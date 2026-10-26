@@ -31,7 +31,7 @@ docker run --rm chandanghosh/dns-rs:26102026 --version
 | Plain DNS | port 53 UDP/TCP |
 | DoT / DoH | ports 853 / 443 when TLS material is configured |
 | Healthcheck | `dns-rs healthcheck` (no shell or `dig` needed) |
-| Size | about 2.0 MiB compressed (4.3 MiB on disk) on `amd64`; about 1.7 MiB compressed (3.4 MiB on disk) on `arm64` |
+| Size | about 2.0 MiB compressed (4.3 MiB on disk) on `amd64`; about 2.0 MiB compressed (3.4 MiB on disk) on `arm64` |
 
 The image runs with no writable filesystem paths by default. If you enable
 features that write state (for example the RFC 5011
@@ -84,7 +84,9 @@ foreign architecture through QEMU, set `PLATFORM`, for example
 
 Because the image is `scratch`, it has no shell. Use `docker logs`,
 `docker inspect`, and `docker exec ... /usr/local/bin/dns-rs` for diagnostics;
-`docker exec ... sh` will not work.
+`docker exec ... sh` will not work. The optional `packaging/container.toml`
+mount below assumes the repository root; omit it to use the image's built-in
+configuration.
 
 ### Quick loopback test
 
@@ -150,9 +152,9 @@ docker stop dns-rs
 docker rm dns-rs
 ```
 
-To use a different configuration or provide DoT/DoH certificates, mount a
-directory containing `dns-rs.toml` and the TLS files instead of the single
-default file:
+To use a different configuration or provide DoT/DoH certificates, add these
+flags to the `docker run` command and mount a directory containing
+`dns-rs.toml` and the TLS files instead of the single default file:
 
 ```bash
 -v "$PWD/config:/etc/dns-rs:ro" \
@@ -167,6 +169,10 @@ The image runs as UID 65532. Keep `--cap-add NET_BIND_SERVICE` so it can bind
 port 53 inside the container, or publish a high port with `-p 5353:53`. The host
 side of the mapping may bind port 53 without extra container capabilities
 because Docker performs the publish as root.
+
+If the host already uses port 53 (for example `systemd-resolved` on
+`127.0.0.53:53`), use the loopback high-port command instead or stop the local
+stub resolver first. Check with `ss -lntup '( sport = :53 )'`.
 
 ## Run with Docker Compose
 

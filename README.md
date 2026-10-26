@@ -47,10 +47,35 @@ Published images are available for `linux/amd64` and `linux/arm64`:
 docker pull chandanghosh/dns-rs:26102026
 ```
 
+Run it manually on loopback port 5353:
+
+```bash
+docker run -d --rm --name dns-rs-test \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+  --cap-drop ALL \
+  --cap-add NET_BIND_SERVICE \
+  --security-opt no-new-privileges=true \
+  -p 127.0.0.1:5353:53/udp \
+  -p 127.0.0.1:5353:53/tcp \
+  chandanghosh/dns-rs:26102026
+
+dig @127.0.0.1 -p 5353 example.com A
+docker stop dns-rs-test
+```
+
+Or start the Compose example with the published image:
+
+```bash
+DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 docker compose up -d
+docker compose logs -f resolver
+```
+
 The smoke test runs with a read-only root filesystem, all capabilities dropped
-except `NET_BIND_SERVICE`, and Docker's default seccomp profile. For Compose and
-Kubernetes examples, Raspberry Pi deployment notes, and the Docker Hub
-publishing workflow, see [`docs/container.md`](docs/container.md).
+except `NET_BIND_SERVICE`, and Docker's default seccomp profile. For full
+`docker run` and `docker compose` command references, Kubernetes examples,
+Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
+[`docs/container.md`](docs/container.md).
 
 ## Implemented
 
