@@ -592,6 +592,9 @@ pub struct ForwardZoneConfig {
     pub forward_hosts: Vec<String>,
     /// Fall back to iterative resolution if forwarding fails.
     pub forward_first: bool,
+    /// Resolve iteratively first and use the forwarders only when iteration
+    /// fails with a reachability error.
+    pub forward_fallback: bool,
     /// Require TLS for forwarding.
     pub tls_upstream: bool,
 }
@@ -612,6 +615,12 @@ impl ForwardZoneConfig {
         if !name.is_fqdn() {
             return Err(ConfigError::Validation(format!(
                 "forward-zone name {:?} must be fully qualified",
+                self.name
+            )));
+        }
+        if self.forward_first && self.forward_fallback {
+            return Err(ConfigError::Validation(format!(
+                "forward-zone {:?} sets both forward-first and forward-fallback; choose one",
                 self.name
             )));
         }
@@ -1340,5 +1349,23 @@ mod tests {
         };
         let error = config.validate().expect_err("relative name must fail");
         assert!(error.to_string().contains("fully qualified"));
+    }
+
+    #[test]
+    fn rejects_forward_first_with_forward_fallback() {
+        let config = Config {
+            forward_zones: vec![super::ForwardZoneConfig {
+                name: ".".to_owned(),
+                forward_addrs: vec!["192.0.2.1".parse().expect("valid target")],
+                forward_first: true,
+                forward_fallback: true,
+                ..super::ForwardZoneConfig::default()
+            }],
+            ..Config::default()
+        };
+        let error = config
+            .validate()
+            .expect_err("the two fallback directions are mutually exclusive");
+        assert!(error.to_string().contains("forward-fallback"));
     }
 }

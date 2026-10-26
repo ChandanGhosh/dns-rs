@@ -81,13 +81,15 @@ Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
 
 **Resolution**
 
-- Iterative resolution from the root, using built-in root hints.
+- Iterative resolution from the root, using built-in root hints, with IPv4 and
+  IPv6 upstream transports gated by `do-ip4`/`do-ip6`.
 - QNAME minimisation, with an optional strict mode.
 - DNS 0x20 case randomisation and response scrubbing.
 - DNS cookies (RFC 7873) on upstream queries.
 - TCP fallback on truncation and pooled upstream connections.
 - Forward zones over plain UDP, DNS-over-TLS, or DNS-over-HTTPS (`https://`
-  targets), with `forward-first` fallback.
+  targets), with `forward-first` fallback and iteration-first
+  `forward-fallback`.
 - Stub zones, including `stub-host`, `stub-prime`, `stub-first`, and
   `stub-no-cache`.
 - Coalescing of identical in-flight questions.
@@ -183,8 +185,8 @@ Supported `unbound.conf` blocks:
   minimisation, 0x20, EDNS sizes, TTL bounds, prefetch, serve-expired, rate
   limiting, and TCP connection limits.
 - `forward-zone:` — name, `forward-addr` (plain, DoT, or DoH targets),
-  `forward-first`, and `forward-tls-upstream`. `forward-host` is parsed but not
-  implemented.
+  `forward-first`, `forward-fallback`, and `forward-tls-upstream`.
+  `forward-host` is parsed but not implemented.
 - `stub-zone:` — name, `stub-addr`, `stub-host`, `stub-prime`, `stub-first`,
   `stub-no-cache`, and `stub-tls-upstream`.
 - `auth-zone:` — name, zonefile, primaries, URL, fallback, and

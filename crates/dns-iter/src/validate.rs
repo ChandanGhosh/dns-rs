@@ -178,6 +178,7 @@ impl IteratorResolver {
             dnssec_ok: true,
             validating: true,
             checking_disabled: true,
+            forward_only: false,
         };
         let response = self
             .fetch_internal(zone, RecordType::DNSKEY, &context)
@@ -549,6 +550,7 @@ impl IteratorResolver {
             dnssec_ok: true,
             validating: true,
             checking_disabled: true,
+            forward_only: false,
         };
         self.resolve_inner(name.clone(), qtype, sub_context).await
     }

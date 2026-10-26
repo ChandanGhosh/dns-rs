@@ -17,7 +17,7 @@ use dns_proto::{
     decode, encode,
 };
 use rand::Rng;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::ResolveError;
 use crate::cookies::CookieJar;
@@ -48,6 +48,22 @@ pub struct ForwardZone {
     pub servers: Vec<ForwardServer>,
     /// Fall back to iterative resolution when every forwarder fails.
     pub forward_first: bool,
+    /// Resolve iteratively first and use the forwarders only when iteration
+    /// fails with a reachability error.
+    pub forward_fallback: bool,
+}
+
+/// Whether a resolution error means the network could not reach authoritative
+/// servers.
+///
+/// Negative answers (`NXDOMAIN`, NODATA) and DNSSEC verdicts are returned as
+/// data, never as these errors, so a `forward_fallback` zone cannot override an
+/// authoritative answer or a validation failure.
+fn is_reachability_error(error: &ResolveError) -> bool {
+    matches!(
+        error,
+        ResolveError::NoNameservers | ResolveError::Timeout | ResolveError::Io(_)
+    )
 }
 
 /// A zone whose queries are resolved iteratively starting from the listed
@@ -120,6 +136,14 @@ pub struct IteratorConfig {
     pub min_ttl: u32,
     /// Upper bound applied to upstream TTLs.
     pub max_ttl: u32,
+    /// Allow outgoing queries to IPv4 servers.
+    pub allow_ipv4: bool,
+    /// Allow outgoing queries to IPv6 servers.
+    ///
+    /// When disabled, IPv6 root hints, priming glue, and delegation addresses
+    /// are skipped so an IPv4-only host does not burn its budget on
+    /// connections that cannot work.
+    pub allow_ipv6: bool,
     /// Secret used for DNS cookies.
     pub cookie_secret: [u8; 32],
     /// Override the root server set (useful for tests and private roots).
@@ -163,6 +187,8 @@ impl Default for IteratorConfig {
             edns_payload: 1232,
             min_ttl: 0,
             max_ttl: 86_400,
+            allow_ipv4: true,
+            allow_ipv6: true,
             cookie_secret,
             root_servers: None,
             bootstrap_servers: None,
@@ -267,6 +293,12 @@ pub(crate) struct WalkContext<'a> {
     /// Set when this resolver validates the answer itself, or when the client
     /// disabled checking and will validate on its own.
     pub(crate) checking_disabled: bool,
+    /// Resolve only through forwarders.
+    ///
+    /// Set once a query is being answered by a forwarder, so a subquery for a
+    /// CNAME target inside the same zone does not run the iteration-first
+    /// fallback again.
+    pub(crate) forward_only: bool,
 }
 
 impl IteratorResolver {
@@ -352,6 +384,7 @@ impl IteratorResolver {
             dnssec_ok: self.config.dnssec_validation || options.dnssec_ok,
             validating: false,
             checking_disabled: options.checking_disabled,
+            forward_only: false,
         };
         let mut message = self.resolve_inner(name, qtype, context.clone()).await?;
         message.metadata.recursion_available = true;
@@ -409,15 +442,19 @@ impl IteratorResolver {
         qtype: RecordType,
         context: WalkContext<'_>,
     ) -> Result<Message, ResolveError> {
-        // A matching forward zone short-circuits iteration. Subqueries inherit
-        // this path, so a CNAME target inside the zone is forwarded too.
-        if let Some(forward) = self.forward_zone(&name).cloned() {
-            match self.walk_forward(&name, qtype, &forward, &context).await {
+        // A matching forward zone normally short-circuits iteration. Subqueries
+        // inherit this path, so a CNAME target inside the zone is forwarded
+        // too. A `forward_fallback` zone is only used when iteration fails.
+        let forward = self.forward_zone(&name).cloned();
+        if let Some(zone) = &forward
+            && !zone.forward_fallback
+        {
+            match self.walk_forward(&name, qtype, zone, &context).await {
                 Ok(message) => return Ok(message),
-                Err(error) if forward.forward_first => {
+                Err(error) if zone.forward_first => {
                     debug!(
                         qname = %name,
-                        zone = %forward.zone,
+                        zone = %zone.zone,
                         %error,
                         "forwarding failed; falling back to iteration"
                     );
@@ -431,16 +468,17 @@ impl IteratorResolver {
             recursion_desired: false,
             ..context
         };
+        let forward_only = context.forward_only;
 
         // A matching stub zone seeds the walk with its authoritative servers.
         // `stub-first` falls back to normal resolution when the stub fails.
-        if let Some(stub) = self.stub_zone(&name).cloned() {
+        let iterated = if let Some(stub) = self.stub_zone(&name).cloned() {
             let start = Some((stub.zone.clone(), stub.servers.clone()));
             match self
                 .iterate(name.clone(), qtype, context.clone(), start, stub.no_cache)
                 .await
             {
-                Ok(message) => return Ok(message),
+                Ok(message) => Ok(message),
                 Err(error) if stub.stub_first => {
                     debug!(
                         qname = %name,
@@ -448,12 +486,48 @@ impl IteratorResolver {
                         %error,
                         "stub resolution failed; falling back to normal resolution"
                     );
+                    self.iterate(name.clone(), qtype, context.clone(), None, false)
+                        .await
                 }
-                Err(error) => return Err(error),
+                Err(error) => Err(error),
             }
-        }
+        } else {
+            self.iterate(name.clone(), qtype, context.clone(), None, false)
+                .await
+        };
 
-        self.iterate(name, qtype, context, None, false).await
+        let error = match iterated {
+            Ok(message) => return Ok(message),
+            Err(error) => error,
+        };
+
+        // `forward_fallback` keeps iteration as the primary path and uses the
+        // forwarders only when the network cannot reach authoritative servers.
+        match forward {
+            Some(zone)
+                if zone.forward_fallback && !forward_only && is_reachability_error(&error) =>
+            {
+                // One warning per client query is actionable; validator and
+                // NS-address subqueries would otherwise repeat it many times.
+                if context.validating || context.depth > 0 {
+                    debug!(
+                        qname = %name,
+                        zone = %zone.zone,
+                        %error,
+                        "iteration failed; falling back to forwarders"
+                    );
+                } else {
+                    warn!(
+                        qname = %name,
+                        zone = %zone.zone,
+                        %error,
+                        "iteration failed; falling back to forwarders"
+                    );
+                }
+                self.walk_forward(&name, qtype, &zone, &context).await
+            }
+            _ => Err(error),
+        }
     }
 
     /// Return the most specific stub zone covering `name`.
@@ -815,6 +889,9 @@ impl IteratorResolver {
     ) -> Result<Message, ResolveError> {
         let context = WalkContext {
             recursion_desired: true,
+            // Subqueries for this answer already go to the forwarders; the
+            // iteration-first fallback must not run again inside them.
+            forward_only: true,
             // A validating resolver must receive the raw data so it can judge
             // it; a client that set CD is validating on its own.
             checking_disabled: context.checking_disabled || self.config.dnssec_validation,
@@ -1565,11 +1642,15 @@ impl IteratorResolver {
         }
         servers.sort_unstable();
         servers.dedup();
+        servers.retain(|server| self.address_allowed(server));
         servers
     }
 
     fn ordered_servers(&self, servers: Vec<SocketAddr>) -> Vec<SocketAddr> {
-        let mut servers = servers;
+        let mut servers: Vec<SocketAddr> = servers
+            .into_iter()
+            .filter(|server| self.address_allowed(server))
+            .collect();
         servers.dedup();
         if let Some(infra) = &self.infra {
             servers.sort_by_key(|server| {
@@ -1584,6 +1665,32 @@ impl IteratorResolver {
             });
         }
         servers
+    }
+
+    /// Whether outgoing queries may use this address family.
+    ///
+    /// `do_ip4`/`do_ip6` disable the transport, not just the listeners, so a
+    /// host without working IPv6 does not spend its budget on unreachable
+    /// upstreams.
+    fn family_allowed(&self, addr: IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(_) => self.config.allow_ipv4,
+            IpAddr::V6(_) => self.config.allow_ipv6,
+        }
+    }
+
+    fn address_allowed(&self, addr: &SocketAddr) -> bool {
+        self.family_allowed(addr.ip())
+    }
+
+    /// Address record types that may be used to reach upstream servers.
+    fn address_qtypes(&self) -> &'static [RecordType] {
+        match (self.config.allow_ipv4, self.config.allow_ipv6) {
+            (true, true) => &[RecordType::A, RecordType::AAAA],
+            (true, false) => &[RecordType::A],
+            (false, true) => &[RecordType::AAAA],
+            (false, false) => &[],
+        }
     }
 
     async fn referral_servers(
@@ -1613,7 +1720,7 @@ impl IteratorResolver {
                 continue;
             }
 
-            for qtype in [RecordType::A, RecordType::AAAA] {
+            for qtype in self.address_qtypes().iter().copied() {
                 let sub_context = WalkContext {
                     depth: context.depth + 1,
                     ancestors: context.ancestors,
@@ -1623,6 +1730,7 @@ impl IteratorResolver {
                     dnssec_ok: context.dnssec_ok,
                     validating: context.validating,
                     checking_disabled: context.checking_disabled,
+                    forward_only: false,
                 };
                 let Ok(message) = self
                     .resolve_inner(nameserver.clone(), qtype, sub_context)
@@ -1641,6 +1749,7 @@ impl IteratorResolver {
 
         addresses.sort_unstable();
         addresses.dedup();
+        addresses.retain(|address| self.family_allowed(*address));
         let servers: Vec<SocketAddr> = addresses
             .into_iter()
             .map(|address| SocketAddr::new(address, self.config.nameserver_port))
@@ -1662,7 +1771,7 @@ impl IteratorResolver {
                     let RData::NS(target) = &record.data else {
                         continue;
                     };
-                    for qtype in [RecordType::A, RecordType::AAAA] {
+                    for qtype in self.address_qtypes().iter().copied() {
                         if let Some(addresses_entry) = cache.get(&target.0, qtype) {
                             addresses.extend(scrub::addresses(&addresses_entry.records));
                         }
@@ -1691,7 +1800,7 @@ impl IteratorResolver {
             return Vec::new();
         };
         let mut addresses = Vec::new();
-        for qtype in [RecordType::A, RecordType::AAAA] {
+        for qtype in self.address_qtypes().iter().copied() {
             if let Some(entry) = cache.get(name, qtype) {
                 addresses.extend(scrub::addresses(&entry.records));
             }
@@ -1918,5 +2027,35 @@ mod tests {
         let ordered = resolver.ordered_servers(vec![failing, healthy]);
         assert_eq!(ordered[0], healthy, "backed-off servers must be tried last");
         assert_eq!(ordered[1], failing);
+    }
+
+    #[test]
+    fn skips_disabled_address_families() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+        let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 53);
+        let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53);
+
+        let config = IteratorConfig {
+            allow_ipv6: false,
+            ..IteratorConfig::default()
+        };
+        let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+        assert_eq!(
+            resolver.ordered_servers(vec![v4, v6]),
+            vec![v4],
+            "do_ip6 = false must drop IPv6 upstreams"
+        );
+
+        let config = IteratorConfig {
+            allow_ipv4: false,
+            ..IteratorConfig::default()
+        };
+        let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+        assert_eq!(
+            resolver.ordered_servers(vec![v4, v6]),
+            vec![v6],
+            "do_ip4 = false must drop IPv4 upstreams"
+        );
     }
 }

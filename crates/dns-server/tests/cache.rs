@@ -87,6 +87,7 @@ fn config(forwarder: SocketAddr) -> Config {
         forward_addrs: vec![ForwardTarget::new(forwarder, None)],
         forward_hosts: Vec::new(),
         forward_first: false,
+        forward_fallback: false,
         tls_upstream: false,
     }];
     config

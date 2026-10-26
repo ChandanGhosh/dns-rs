@@ -682,6 +682,7 @@ fn forwarding_config(server: SocketAddr, forward_first: bool) -> IteratorConfig 
             zone: Name::root(),
             servers: vec![server.into()],
             forward_first,
+            forward_fallback: false,
         }],
         ..IteratorConfig::default()
     }
@@ -878,6 +879,7 @@ async fn forward_first_falls_back_to_iteration() {
             zone: Name::root(),
             servers: vec![failing.addr.into()],
             forward_first: true,
+            forward_fallback: false,
         }],
         root_servers: Some(vec![root.addr]),
         nameserver_port: root.addr.port(),
@@ -903,6 +905,90 @@ async fn forward_first_falls_back_to_iteration() {
     assert!(
         !root.observed().is_empty(),
         "iteration must run after forwarding fails"
+    );
+}
+
+#[tokio::test]
+async fn forward_fallback_uses_forwarders_when_iteration_fails() {
+    // Every authoritative query is refused, so iteration gives up with a
+    // reachability error instead of returning an answer.
+    let root = MockAuth::start(|query, _tcp| Some(reply(query, ResponseCode::Refused))).await;
+    let forwarder = MockAuth::start(|query, _tcp| {
+        Some(answer(query, vec![a("www.example.com.", [192, 0, 2, 44])]))
+    })
+    .await;
+
+    let config = IteratorConfig {
+        forward_zones: vec![ForwardZone {
+            zone: Name::root(),
+            servers: vec![forwarder.addr.into()],
+            forward_first: false,
+            forward_fallback: true,
+        }],
+        root_servers: Some(vec![root.addr]),
+        nameserver_port: root.addr.port(),
+        case_randomization: false,
+        cookies: false,
+        qname_minimization: false,
+        harden_glue: true,
+        ..IteratorConfig::default()
+    };
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+    let message = resolver
+        .resolve("www.example.com.", RecordType::A)
+        .await
+        .expect("falls back to the forwarder");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(message.answers.len(), 1);
+    assert!(
+        !root.observed().is_empty(),
+        "iteration must run before the forwarders"
+    );
+    let forwarded = forwarder.observed();
+    assert_eq!(forwarded.len(), 1, "the forwarder must be asked once");
+    assert!(
+        forwarded[0].recursion_desired,
+        "a fallback query must still be recursive"
+    );
+}
+
+#[tokio::test]
+async fn forward_fallback_does_not_override_authoritative_negative() {
+    let root = MockAuth::start(|query, _tcp| Some(reply(query, ResponseCode::NXDomain))).await;
+    let forwarder = MockAuth::start(|query, _tcp| {
+        Some(answer(query, vec![a("www.example.com.", [192, 0, 2, 99])]))
+    })
+    .await;
+
+    let config = IteratorConfig {
+        forward_zones: vec![ForwardZone {
+            zone: Name::root(),
+            servers: vec![forwarder.addr.into()],
+            forward_first: false,
+            forward_fallback: true,
+        }],
+        root_servers: Some(vec![root.addr]),
+        nameserver_port: root.addr.port(),
+        case_randomization: false,
+        cookies: false,
+        qname_minimization: false,
+        harden_glue: true,
+        ..IteratorConfig::default()
+    };
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+    let message = resolver
+        .resolve("www.example.com.", RecordType::A)
+        .await
+        .expect("an authoritative NXDOMAIN is an answer");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NXDomain);
+    assert!(message.answers.is_empty());
+    assert!(
+        forwarder.observed().is_empty(),
+        "an authoritative negative answer must not trigger the fallback"
     );
 }
 

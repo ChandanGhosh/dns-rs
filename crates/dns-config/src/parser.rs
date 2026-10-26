@@ -462,6 +462,10 @@ impl Parser {
                 self.config.forward_zones[zone_index].forward_first =
                     parse_bool(path, line, key, value)?;
             }
+            "forward-fallback" => {
+                self.config.forward_zones[zone_index].forward_fallback =
+                    parse_bool(path, line, key, value)?;
+            }
             "forward-tls-upstream" => {
                 self.config.forward_zones[zone_index].tls_upstream =
                     parse_bool(path, line, key, value)?;
@@ -932,6 +936,7 @@ forward-zone:
     forward-addr: 192.0.2.2@853#resolver.example
     forward-addr: https://cloudflare-dns.com/dns-query
     forward-first: yes
+    forward-fallback: no
     forward-tls-upstream: yes
 
 remote-control:
@@ -965,6 +970,7 @@ remote-control:
         assert_eq!(zone.name, "example.com.");
         assert_eq!(zone.forward_addrs.len(), 3);
         assert!(zone.forward_first);
+        assert!(!zone.forward_fallback);
         assert!(zone.tls_upstream);
         assert_eq!(
             zone.forward_addrs[1].tls_name.as_deref(),

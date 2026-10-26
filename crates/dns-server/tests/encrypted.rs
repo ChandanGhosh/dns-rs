@@ -305,6 +305,7 @@ fn forward_config(
                 path: path.map(str::to_owned),
             }],
             forward_first: false,
+            forward_fallback: false,
         }],
         tls_cert_bundle: Some(cert.to_path_buf()),
         tls_use_system_ca: false,

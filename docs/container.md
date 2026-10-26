@@ -82,10 +82,12 @@ Common mistakes:
   prefix that normalizes to `::/7`; use `172.16.0.0/12` for IPv4.
 
 IPv6 entries have no effect while `do_ip6 = false`, which is the container
-default. To serve IPv6 clients, set `do_ip6 = true`, add an IPv6 listener (for
-example `interfaces = ["0.0.0.0", "::"]`), and include the IPv6 allow rules
-before `::/0 refuse`. With an Unbound-style `.conf` file, use one
-`access-control: <cidr> allow` line per entry instead of the TOML array.
+default. `do_ip4`/`do_ip6` apply to outgoing queries as well: with `do_ip6 =
+false` the resolver also skips IPv6 root hints, glue, and forwarder addresses
+instead of timing out on them. To serve IPv6 clients, set `do_ip6 = true`, add
+an IPv6 listener (for example `interfaces = ["0.0.0.0", "::"]`), and include the
+IPv6 allow rules before `::/0 refuse`. With an Unbound-style `.conf` file, use
+one `access-control: <cidr> allow` line per entry instead of the TOML array.
 
 ### Troubleshooting
 
@@ -97,6 +99,30 @@ before `::/0 refuse`. With an Unbound-style `.conf` file, use one
   failing, for example because the network intercepts port 53. Fix the network
   or add an encrypted forward zone (DoT/DoH); `examples/full.toml` contains
   working syntax.
+
+If you want to keep local iteration but survive a network that blocks or
+rewrites port 53, do not make the forwarder the primary path. Use
+`forward_fallback = true` instead, which only asks the forwarders after
+iteration fails to reach authoritative servers:
+
+```toml
+[[forward_zones]]
+name = "."
+forward_fallback = true
+tls_upstream = true
+forward_addrs = [
+    "1.1.1.1@853#cloudflare-dns.com",
+    "1.0.0.1@853#cloudflare-dns.com",
+]
+```
+
+`forward_first = true` is the opposite direction: forward first, then iterate.
+The two are mutually exclusive, and a fallback is never taken for an
+authoritative `NXDOMAIN`/NODATA answer or a DNSSEC validation failure, so a
+forwarder cannot override signed data. A client-facing fallback logs
+`iteration failed; falling back to forwarders` with the query name and the
+original error; internal validator and nameserver-address lookups log the same
+message at debug level.
 
 The container healthcheck is a listener probe only: it asks for `localhost.`,
 so a container can be `healthy` while upstream resolution is broken.
@@ -390,6 +416,13 @@ For a long-lived test node:
    ```bash
    dnsperf -s <pi-address> -d queries.txt -l 300 -c 8 -T 4
    ```
+
+If the Pi sits behind a gateway that intercepts port 53, pure iteration fails
+for uncached names while cached ones still resolve, and the container
+healthcheck keeps reporting `healthy`. Add a DoT forward zone with
+`forward_fallback = true` (see [Troubleshooting](#troubleshooting)) rather than
+replacing iteration with forwarding. Each client-facing fallback appears in
+`docker logs` as `iteration failed; falling back to forwarders`.
 
 Record CPU, RSS, temperature, throttling, cache hit ratio, and any resolution
 failures in the test notes. The M7 roadmap item remains open until the Pi has

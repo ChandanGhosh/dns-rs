@@ -179,7 +179,13 @@ impl QueryPipeline {
                         "forward-host is not implemented yet; use forward-addr"
                     );
                 }
-                let servers = build_servers(&zone.name, &zone.forward_addrs, zone.tls_upstream);
+                let servers = build_servers(
+                    &zone.name,
+                    &zone.forward_addrs,
+                    zone.tls_upstream,
+                    config.server.do_ip4,
+                    config.server.do_ip6,
+                );
                 if servers.is_empty() {
                     warn!(
                         zone = %zone.name,
@@ -191,6 +197,7 @@ impl QueryPipeline {
                     zone: zone_name,
                     servers,
                     forward_first: zone.forward_first,
+                    forward_fallback: zone.forward_fallback,
                 })
             })
             .collect::<Vec<_>>();
@@ -198,7 +205,11 @@ impl QueryPipeline {
         if !forward_zones.is_empty() {
             info!(
                 zones = forward_zones.len(),
-                "using configured forward zones instead of iteration"
+                fallback = forward_zones
+                    .iter()
+                    .filter(|zone| zone.forward_fallback)
+                    .count(),
+                "using configured forward zones"
             );
         }
 
@@ -217,7 +228,13 @@ impl QueryPipeline {
                         return None;
                     }
                 };
-                let mut servers = build_servers(&zone.name, &zone.stub_addrs, zone.tls_upstream);
+                let mut servers = build_servers(
+                    &zone.name,
+                    &zone.stub_addrs,
+                    zone.tls_upstream,
+                    config.server.do_ip4,
+                    config.server.do_ip6,
+                );
                 for host in &zone.stub_hosts {
                     let port = if zone.tls_upstream { 853 } else { 53 };
                     match resolve_forward_host(host, port) {
@@ -245,6 +262,12 @@ impl QueryPipeline {
                         ),
                     }
                 }
+                retain_allowed_families(
+                    &zone.name,
+                    &mut servers,
+                    config.server.do_ip4,
+                    config.server.do_ip6,
+                );
                 if servers.is_empty() {
                     warn!(
                         zone = %zone.name,
@@ -298,6 +321,8 @@ impl QueryPipeline {
             max_ttl: config.server.max_ttl,
             forward_zones,
             stub_zones,
+            allow_ipv4: config.server.do_ip4,
+            allow_ipv6: config.server.do_ip6,
             dnssec_validation: config.server.dnssec_validation,
             trust_store: trust_store.clone(),
             harden_dnssec_stripped: config.server.harden_dnssec_stripped,
@@ -883,7 +908,16 @@ impl QueryPipeline {
 
 /// Resolve a DoH forwarder hostname at startup, preferring IPv4.
 /// Convert configured targets into concrete upstream servers.
-fn build_servers(zone: &str, targets: &[ForwardTarget], tls_upstream: bool) -> Vec<ForwardServer> {
+///
+/// Addresses whose family is disabled by `do-ip4`/`do-ip6` are dropped: the
+/// transport setting applies to outgoing queries, not only to listeners.
+fn build_servers(
+    zone: &str,
+    targets: &[ForwardTarget],
+    tls_upstream: bool,
+    allow_ipv4: bool,
+    allow_ipv6: bool,
+) -> Vec<ForwardServer> {
     let mut servers = Vec::new();
     for target in targets {
         if let Some(path) = &target.https_path {
@@ -937,7 +971,47 @@ fn build_servers(zone: &str, targets: &[ForwardTarget], tls_upstream: bool) -> V
             path: None,
         });
     }
+
+    retain_allowed_families(zone, &mut servers, allow_ipv4, allow_ipv6);
     servers
+}
+
+/// Drop upstream servers whose address family is disabled by `do-ip4`/`do-ip6`.
+///
+/// The transport setting applies to outgoing queries, not only to listeners, so
+/// a disabled family must not be attempted.
+fn retain_allowed_families(
+    zone: &str,
+    servers: &mut Vec<ForwardServer>,
+    allow_ipv4: bool,
+    allow_ipv6: bool,
+) {
+    let dropped_v4 = servers
+        .iter()
+        .filter(|server| server.addr.is_ipv4() && !allow_ipv4)
+        .count();
+    let dropped_v6 = servers
+        .iter()
+        .filter(|server| server.addr.is_ipv6() && !allow_ipv6)
+        .count();
+    if dropped_v4 > 0 {
+        warn!(
+            %zone,
+            count = dropped_v4,
+            "ignoring IPv4 upstream addresses because do-ip4 is off"
+        );
+    }
+    if dropped_v6 > 0 {
+        warn!(
+            %zone,
+            count = dropped_v6,
+            "ignoring IPv6 upstream addresses because do-ip6 is off"
+        );
+    }
+    servers.retain(|server| match server.addr {
+        SocketAddr::V4(_) => allow_ipv4,
+        SocketAddr::V6(_) => allow_ipv6,
+    });
 }
 
 fn resolve_forward_host(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {

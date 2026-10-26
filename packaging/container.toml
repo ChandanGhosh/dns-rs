@@ -12,8 +12,9 @@ verbosity = 1
 num_threads = 2
 do_daemonize = false
 do_ip4 = true
-# Keep IPv6 off by default: many container networks do not provide it. Enable
-# do_ip6 and add an "::" interface when the runtime has working IPv6.
+# Keep IPv6 off by default: many container networks do not provide it. This
+# also stops outgoing queries to IPv6 root servers and glue. Enable do_ip6 and
+# add an "::" interface when the runtime has working IPv6.
 do_ip6 = false
 do_udp = true
 do_tcp = true
@@ -62,6 +63,22 @@ use_caps_for_id = true
 # interfaces, for example ["0.0.0.0@853", "0.0.0.0@443"].
 # tls_service_key = "/etc/dns-rs/tls/server.key"
 # tls_service_pem = "/etc/dns-rs/tls/server.pem"
+
+# Forward zones. Use one when the network blocks or rewrites port 53, or when
+# only a recursive upstream is reachable. `forward_fallback = true` keeps local
+# iteration as the primary path and asks these forwarders only when iteration
+# cannot reach authoritative servers; `forward_first = true` is the opposite
+# direction and the two cannot be combined. DoT on port 853 bypasses a network
+# that intercepts port 53.
+#
+# [[forward_zones]]
+# name = "."
+# forward_fallback = true
+# tls_upstream = true
+# forward_addrs = [
+#     "1.1.1.1@853#cloudflare-dns.com",
+#     "1.0.0.1@853#cloudflare-dns.com",
+# ]
 
 [remote_control]
 enabled = false

@@ -123,6 +123,11 @@ tls_use_system_ca = true
 # everything. Forwarders may be plain UDP (with TCP fallback), DoT with
 # tls_upstream = true and "addr@853#auth-name", or DoH with an https:// URL.
 # Encrypted forwarders skip 0x20 and DNS cookies.
+#
+# forward_first = true forwards first and falls back to iteration.
+# forward_fallback = true iterates first and forwards only when iteration
+# cannot reach authoritative servers; set it on the same zone instead of
+# forward_first. Negative answers and DNSSEC failures never trigger it.
 [[forward_zones]]
 name = "."
 tls_upstream = true
@@ -133,6 +138,15 @@ forward_addrs = [
 ]
 forward_hosts = []
 forward_first = false
+forward_fallback = false
+
+# Iterate first, forward on failure (e.g. a network that intercepts port 53):
+# [[forward_zones]]
+# name = "."
+# forward_addrs = ["1.1.1.1@853#cloudflare-dns.com"]
+# forward_first = false
+# forward_fallback = true
+# tls_upstream = true
 
 # Plain-DNS forwarder example (no TLS):
 # [[forward_zones]]
