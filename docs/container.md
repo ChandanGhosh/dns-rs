@@ -322,30 +322,32 @@ stub resolver first. Check with `ss -lntup '( sport = :53 )'`.
 
 ## Run with Docker Compose
 
-The compose file (`docker-compose.yml`) starts the `resolver` service with the
-same hardening, mounts `packaging/container.toml`, and persists
-`/var/lib/dns-rs` in the `dns-rs-data` volume.
+The compose file (`docker-compose.yml`) pulls the published image from Docker
+Hub, mounts `packaging/container.toml`, persists `/var/lib/dns-rs` in the
+`dns-rs-data` volume, and applies the same hardening as the manual `docker run`
+examples. It does not build the image locally.
 
-### Build the local checkout and start
+### Start with the published image
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose ps
 docker compose logs -f resolver
 ```
 
-### Use the published image
+To pin a different tag or use a locally built image, set `DNS_RS_IMAGE`:
 
 ```bash
-DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 docker compose pull
-DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 docker compose up -d
+DNS_RS_IMAGE=chandanghosh/dns-rs@sha256:<digest> docker compose up -d
+DNS_RS_IMAGE=dns-rs:local docker compose up -d
 ```
 
 ### Loopback-only test on a high port
 
 ```bash
 DNS_RS_BIND_ADDR=127.0.0.1 DNS_RS_HOST_PORT=15353 \
-  docker compose up -d --build
+  docker compose up -d
 
 dig @127.0.0.1 -p 15353 example.com A
 ```
@@ -447,17 +449,7 @@ Pi 2, Pi 3, and Pi Zero are not supported by the published tags.
 
 ```bash
 docker pull chandanghosh/dns-rs:26102026
-DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 DNS_RS_HOST_PORT=53 \
-  docker compose up -d
-```
-
-To build the image directly on the Pi from a checkout:
-
-```bash
-git clone <repository> dns-rs
-cd dns-rs
-docker build -t dns-rs:pi .
-DNS_RS_IMAGE=dns-rs:pi DNS_RS_HOST_PORT=53 docker compose up -d
+DNS_RS_HOST_PORT=53 docker compose up -d
 ```
 
 For a long-lived test node:

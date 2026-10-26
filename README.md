@@ -64,10 +64,10 @@ dig @127.0.0.1 -p 15353 example.com A
 docker stop dns-rs-test
 ```
 
-Or start the Compose example with the published image:
+Or start the Compose example, which pulls the published image:
 
 ```bash
-DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 docker compose up -d
+docker compose up -d
 docker compose logs -f resolver
 ```
 

@@ -2,12 +2,7 @@ name: dns-rs
 
 services:
     resolver:
-        image: ${DNS_RS_IMAGE:-dns-rs:dev}
-        build:
-            context: .
-            args:
-                VERSION: dev
-                VCS_REF: local
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:26102026}
         container_name: dns-rs
         restart: unless-stopped
 
