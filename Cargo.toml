@@ -82,3 +82,14 @@ dbg_macro = "deny"
 codegen-units = 1
 lto = "thin"
 strip = "debuginfo"
+
+# Size-optimised profile used by the container image. The normal `release`
+# profile stays optimised for throughput; the container trades some speed for a
+# much smaller static binary.
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

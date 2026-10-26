@@ -1,33 +1,77 @@
 # syntax=docker/dockerfile:1.7
 
-# Multi-stage build. The builder compiles the workspace, and the runtime image
-# contains only the resolver binary, its default configuration, and glibc.
+# Multi-stage build. The builder cross-compiles a static musl binary on the
+# native build platform, and the runtime image is `scratch`: it contains only
+# the resolver, its default configuration, and two empty state directories.
 #
 # Build locally:
-#   docker build -t dns-rs:dev .
+#   docker build -t chandanghosh/dns-rs:dev .
 #
 # Build and verify:
 #   scripts/container-smoke.sh
 #
-# Multi-arch (requires buildx and QEMU):
-#   docker buildx build --platform linux/amd64,linux/arm64 -t dns-rs:dev .
+# Multi-arch (requires buildx and QEMU only for running the foreign image):
+#   docker buildx build --platform linux/amd64,linux/arm/v7 -t dns-rs:dev .
 ARG RUST_VERSION=1.99
 
-FROM rust:${RUST_VERSION}-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
+
+ARG TARGETARCH
+ARG TARGETVARIANT
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        musl-tools \
+        perl \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Select the static musl target for the requested runtime platform.
+RUN arch="${TARGETARCH:-amd64}"; variant="${TARGETVARIANT:-}"; \
+    case "${arch}${variant}" in \
+        amd64) target=x86_64-unknown-linux-musl ;; \
+        armv7) target=armv7-unknown-linux-musleabihf ;; \
+        arm64|arm64v8) target=aarch64-unknown-linux-musl ;; \
+        *) echo "unsupported platform: ${arch}${variant}" >&2; exit 1 ;; \
+    esac \
+    && echo "$target" > /tmp/rust-target \
+    && rustup target add "$target"
+
+# Debian provides musl-gcc for amd64. The ARM targets use the pinned musl.cc
+# cross toolchains, which include their own linker and libc.
+RUN arch="${TARGETARCH:-amd64}"; variant="${TARGETVARIANT:-}"; \
+    if [ "${arch}${variant}" = "armv7" ]; then \
+        curl -fsSL https://musl.cc/armv7l-linux-musleabihf-cross.tgz | tar -xz -C /opt; \
+    elif [ "$arch" = "arm64" ]; then \
+        curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /opt; \
+    fi
+
+ENV RUSTFLAGS="-C target-feature=+crt-static" \
+    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static" \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static" \
+    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc \
+    CC_armv7_unknown_linux_musleabihf=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc \
+    AR_armv7_unknown_linux_musleabihf=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-ar \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
+    CC_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
+    AR_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar
 
 WORKDIR /build
 
-# Compile the pinned dependency graph. The release profile already strips
-# debug info, so the copied binary stays small.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --locked --release --package dns-daemon --bin dns-rs
 
-# Prepare writable state directories with the distroless non-root UID.
-RUN mkdir -p /out/var/lib/dns-rs /out/var/cache/dns-rs \
-    && chown -R 65532:65532 /out
+# The `dist` profile is size-optimised (fat LTO, opt-level=z, strip, panic=abort).
+RUN target="$(cat /tmp/rust-target)" \
+    && cargo build --locked --profile dist --target "$target" \
+        --package dns-daemon --bin dns-rs \
+    && mkdir -p /out/var/lib/dns-rs /out/var/cache/dns-rs \
+    && cp "target/$target/dist/dns-rs" /out/dns-rs \
+    && chown -R 65532:65532 /out/var
 
-FROM gcr.io/distroless/cc-debian12:nonroot AS runtime
+FROM scratch AS runtime
 
 ARG VERSION=dev
 ARG VCS_REF=unknown
@@ -42,14 +86,13 @@ LABEL org.opencontainers.image.title="dns-rs" \
       org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 
-WORKDIR /etc/dns-rs
-
-COPY --from=builder /build/target/release/dns-rs /usr/local/bin/dns-rs
+COPY --from=builder /out/dns-rs /usr/local/bin/dns-rs
 COPY --chown=65532:65532 packaging/container.toml /etc/dns-rs/dns-rs.toml
 COPY --from=builder --chown=65532:65532 /out/var/lib/dns-rs /var/lib/dns-rs
 COPY --from=builder --chown=65532:65532 /out/var/cache/dns-rs /var/cache/dns-rs
 
-USER nonroot:nonroot
+WORKDIR /etc/dns-rs
+USER 65532:65532
 
 EXPOSE 53/udp 53/tcp 853/tcp 443/tcp
 

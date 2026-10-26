@@ -75,10 +75,10 @@ jobs:
             - name: Image size gate
               run: |
                   size="$(docker image inspect --format '{{.Size}}' dns-rs:ci)"
-                  limit=$((100 * 1024 * 1024))
-                  echo "image size: $((size / 1024 / 1024)) MiB (limit 100 MiB)"
+                  limit=$((10 * 1024 * 1024))
+                  echo "image size: $((size / 1024 / 1024)) MiB (limit 10 MiB)"
                   if [ "$size" -gt "$limit" ]; then
-                      echo "::error::container image exceeds the 100 MiB size budget"
+                      echo "::error::container image exceeds the 10 MiB size budget"
                       exit 1
                   fi
             - name: Vulnerability scan

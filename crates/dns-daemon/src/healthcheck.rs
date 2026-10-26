@@ -1,7 +1,7 @@
 //! Container health probe.
 //!
-//! The image is based on a distroless runtime, so it has no shell, `dig`, or
-//! other utilities to run as a healthcheck. This module implements a minimal
+//! The image is based on `scratch`, so it has no shell, `dig`, or other
+//! utilities to run as a healthcheck. This module implements a minimal
 //! probe in the daemon binary itself: it loads the same configuration as the
 //! server, picks a plain-DNS listener, and asks for the built-in `localhost.`
 //! record. A successful DNS response proves that the process is up and its

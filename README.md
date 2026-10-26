@@ -32,17 +32,24 @@ encrypted forwarders.
 
 ## Container
 
-The repository includes a multi-stage `Dockerfile` with a distroless, non-root
-runtime and a built-in DNS healthcheck. Build and verify it locally with:
+The repository includes a multi-stage `Dockerfile` that cross-compiles a static
+musl binary and ships it on a `scratch`, non-root runtime with a built-in DNS
+healthcheck. Build and verify it locally with:
 
 ```bash
 docker build -t dns-rs:dev .
 PORT=15353 scripts/container-smoke.sh
 ```
 
+Published images are available for `linux/amd64` and `linux/arm/v7`:
+
+```bash
+docker pull chandanghosh/dns-rs:26102026
+```
+
 The smoke test runs with a read-only root filesystem, all capabilities dropped
 except `NET_BIND_SERVICE`, and Docker's default seccomp profile. For Compose and
-Kubernetes examples, Raspberry Pi deployment notes, and the deferred Docker Hub
+Kubernetes examples, Raspberry Pi deployment notes, and the Docker Hub
 publishing workflow, see [`docs/container.md`](docs/container.md).
 
 ## Implemented
@@ -98,7 +105,8 @@ publishing workflow, see [`docs/container.md`](docs/container.md).
 - `checkconf`, `run`, and `healthcheck` commands, configuration warnings, and structured logging.
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
 - TOML configuration and an `unbound.conf`-compatible front-end.
-- Container image on a distroless non-root runtime, with a `healthcheck`
+- Container image on a `scratch` runtime with a statically linked musl binary,
+  published for `linux/amd64` and `linux/arm/v7`, with a `healthcheck`
   subcommand for container liveness probes and a read-only/hardened example
   deployment.
 
