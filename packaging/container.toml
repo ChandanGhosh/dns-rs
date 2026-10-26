@@ -18,8 +18,9 @@ do_ip6 = false
 do_udp = true
 do_tcp = true
 
-# A recursive resolver must not be an open resolver. Add the networks that
-# should use it. 172.16.0.0/12 covers the default Docker bridge network.
+# A recursive resolver must not be an open resolver. Rules are evaluated in
+# order and the first match wins; clients that match no rule are refused.
+# 172.16.0.0/12 covers the default Docker bridge network.
 access_control = [
     "127.0.0.0/8 allow",
     "10.0.0.0/8 allow",
@@ -27,6 +28,26 @@ access_control = [
     "192.168.0.0/16 allow",
     "0.0.0.0/0 refuse",
 ]
+
+# IPv6 is disabled above (`do_ip6 = false`), so this list is IPv4-only. To
+# serve IPv6 clients, set `do_ip6 = true`, add an IPv6 interface such as
+# `"::"`, and use this list instead:
+#
+# access_control = [
+#     "127.0.0.0/8 allow",
+#     "::1/128 allow",
+#     "10.0.0.0/8 allow",
+#     "172.16.0.0/12 allow",
+#     "192.168.0.0/16 allow",
+#     "fc00::/7 allow",   # unique-local; home networks use fd00::/8
+#     "fe80::/10 allow",  # link-local
+#     "0.0.0.0/0 refuse",
+#     "::/0 refuse",
+# ]
+#
+# `fc80::/7` normalizes to the same range as `fc00::/7` but is misleading;
+# use the canonical prefix. `172::/7` is not IPv4 172.16.0.0/12: it is an
+# IPv6 prefix that normalizes to `::/7`.
 
 harden_glue = true
 dnssec_validation = true

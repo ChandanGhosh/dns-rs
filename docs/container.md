@@ -47,6 +47,60 @@ The default configuration in `packaging/container.toml` listens on `0.0.0.0:53`
 and allows loopback, RFC 1918, and Docker bridge clients. Replace it before
 exposing the resolver to a wider network.
 
+## Access control
+
+`access_control` decides which client addresses may query the resolver. Rules
+are evaluated in order and the first match wins; a client that matches no rule
+is refused. A refused client receives `REFUSED`, not a resolution failure.
+
+The default configuration allows loopback, RFC 1918, and Docker bridge clients
+only:
+
+```toml
+access_control = [
+    "127.0.0.0/8 allow",
+    "10.0.0.0/8 allow",
+    "172.16.0.0/12 allow",
+    "192.168.0.0/16 allow",
+    "0.0.0.0/0 refuse",
+]
+```
+
+Use canonical CIDRs:
+
+| Purpose | IPv4 | IPv6 |
+|---|---|---|
+| Loopback | `127.0.0.0/8` | `::1/128` |
+| Private LAN | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | `fc00::/7` (unique-local; `fd00::/8` in home networks), `fe80::/10` (link-local) |
+| Default deny | `0.0.0.0/0 refuse` | `::/0 refuse` |
+
+Common mistakes:
+
+- `fc80::/7` is equivalent to `fc00::/7` but non-canonical; write
+  `fc00::/7`.
+- `172::/7` is not the IPv4 `172.16.0.0/12` private range. It is an IPv6
+  prefix that normalizes to `::/7`; use `172.16.0.0/12` for IPv4.
+
+IPv6 entries have no effect while `do_ip6 = false`, which is the container
+default. To serve IPv6 clients, set `do_ip6 = true`, add an IPv6 listener (for
+example `interfaces = ["0.0.0.0", "::"]`), and include the IPv6 allow rules
+before `::/0 refuse`. With an Unbound-style `.conf` file, use one
+`access-control: <cidr> allow` line per entry instead of the TOML array.
+
+### Troubleshooting
+
+- A client gets `REFUSED`: its source address does not match an `allow` rule.
+  Check whether the client is using IPv4 or IPv6 and whether an earlier rule
+  matches it first.
+- `localhost.` resolves and cached names work, but fresh external names return
+  `SERVFAIL`: access control is not the cause. The upstream/iterative path is
+  failing, for example because the network intercepts port 53. Fix the network
+  or add an encrypted forward zone (DoT/DoH); `examples/full.toml` contains
+  working syntax.
+
+The container healthcheck is a listener probe only: it asks for `localhost.`,
+so a container can be `healthy` while upstream resolution is broken.
+
 ## Build and verify locally
 
 ```bash
