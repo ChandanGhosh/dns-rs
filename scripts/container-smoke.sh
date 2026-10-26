@@ -5,7 +5,7 @@
 #   scripts/container-smoke.sh
 #   IMAGE=dns-rs:test PORT=5353 scripts/container-smoke.sh
 #   KEEP=1 scripts/container-smoke.sh        # leave the container running
-#   PLATFORM=linux/arm/v7 IMAGE=dns-rs:pi scripts/container-smoke.sh
+#   PLATFORM=linux/arm64 IMAGE=dns-rs:pi scripts/container-smoke.sh
 #
 # The script requires Docker and, for the DNS query step, dig.
 set -euo pipefail
@@ -14,7 +14,7 @@ IMAGE="${IMAGE:-dns-rs:smoke}"
 CONTAINER="${CONTAINER:-dns-rs-smoke}"
 PORT="${PORT:-5353}"
 KEEP="${KEEP:-0}"
-# Optional runtime platform, for example linux/arm/v7 when testing a foreign
+# Optional runtime platform, for example linux/arm64 when testing a foreign
 # image through QEMU.
 PLATFORM="${PLATFORM:-}"
 

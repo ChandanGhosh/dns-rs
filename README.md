@@ -41,7 +41,7 @@ docker build -t dns-rs:dev .
 PORT=15353 scripts/container-smoke.sh
 ```
 
-Published images are available for `linux/amd64` and `linux/arm/v7`:
+Published images are available for `linux/amd64` and `linux/arm64`:
 
 ```bash
 docker pull chandanghosh/dns-rs:26102026
@@ -106,7 +106,7 @@ publishing workflow, see [`docs/container.md`](docs/container.md).
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
 - TOML configuration and an `unbound.conf`-compatible front-end.
 - Container image on a `scratch` runtime with a statically linked musl binary,
-  published for `linux/amd64` and `linux/arm/v7`, with a `healthcheck`
+  published for `linux/amd64` and `linux/arm64`, with a `healthcheck`
   subcommand for container liveness probes and a read-only/hardened example
   deployment.
 

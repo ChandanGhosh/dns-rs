@@ -11,7 +11,7 @@
 #   scripts/container-smoke.sh
 #
 # Multi-arch (requires buildx and QEMU only for running the foreign image):
-#   docker buildx build --platform linux/amd64,linux/arm/v7 -t dns-rs:dev .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t dns-rs:dev .
 ARG RUST_VERSION=1.99
 
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
@@ -32,28 +32,21 @@ RUN apt-get update \
 RUN arch="${TARGETARCH:-amd64}"; variant="${TARGETVARIANT:-}"; \
     case "${arch}${variant}" in \
         amd64) target=x86_64-unknown-linux-musl ;; \
-        armv7) target=armv7-unknown-linux-musleabihf ;; \
         arm64|arm64v8) target=aarch64-unknown-linux-musl ;; \
         *) echo "unsupported platform: ${arch}${variant}" >&2; exit 1 ;; \
     esac \
     && echo "$target" > /tmp/rust-target \
     && rustup target add "$target"
 
-# Debian provides musl-gcc for amd64. The ARM targets use the pinned musl.cc
-# cross toolchains, which include their own linker and libc.
-RUN arch="${TARGETARCH:-amd64}"; variant="${TARGETVARIANT:-}"; \
-    if [ "${arch}${variant}" = "armv7" ]; then \
-        curl -fsSL https://musl.cc/armv7l-linux-musleabihf-cross.tgz | tar -xz -C /opt; \
-    elif [ "$arch" = "arm64" ]; then \
+# Debian provides musl-gcc for amd64. The ARM64 target uses the pinned musl.cc
+# cross toolchain, which includes its own linker and libc.
+RUN arch="${TARGETARCH:-amd64}"; \
+    if [ "$arch" = "arm64" ]; then \
         curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /opt; \
     fi
 
 ENV RUSTFLAGS="-C target-feature=+crt-static" \
-    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static" \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static" \
-    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc \
-    CC_armv7_unknown_linux_musleabihf=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-gcc \
-    AR_armv7_unknown_linux_musleabihf=/opt/armv7l-linux-musleabihf-cross/bin/armv7l-linux-musleabihf-ar \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
     CC_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
     AR_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar
