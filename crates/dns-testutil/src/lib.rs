@@ -1,7 +1,7 @@
 //! Test helpers shared by workspace crates.
 //!
-//! M0 provides DNS message builders. Mock authoritative servers, a virtual clock,
-//! and the Unbound replay harness arrive alongside M1/M2.
+//! Currently provides DNS message builders. Mock authoritative servers, a virtual
+//! clock, and the Unbound replay harness are not implemented yet.
 
 use dns_proto::{Message, MessageType, Name, OpCode, Query, RecordType, encode};
 

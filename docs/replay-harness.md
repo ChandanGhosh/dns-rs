@@ -1,6 +1,7 @@
 # Unbound replay harness design
 
-**Status:** Design complete for M0; implementation starts in M1/M2.
+**Status:** Design only; the harness is not implemented yet. RFC 5011 autotrust
+itself exists in `dns-dnssec`, but none of the replay events are wired up.
 
 ## Purpose
 
@@ -58,6 +59,8 @@ arithmetic and time macros first; file-comparison macros can follow.
 
 The resolver must not call `tokio::time`, `Instant::now`, `getrandom`, or real
 sockets directly. Define narrow traits and inject them through a runtime context.
+The current resolver does use Tokio time and real sockets directly, so these
+seams must be introduced before the harness can drive it.
 
 ```rust
 pub trait Clock: Send + Sync {
@@ -134,17 +137,18 @@ Defer scenarios that depend on:
 - `unbound-control`, `unbound-host`, or `unbound-anchor` CLI behavior
 - Python/dynlib modules, DNSCrypt, dnstap, IPsec, or IPSet
 - Full `unbound.conf` coverage outside the supported subset
-- Autotrust file formatting, until RFC 5011 lands in M5
+- Autotrust and tempfile comparisons, until the harness implements
+  `CHECK_AUTOTRUST` and `CHECK_TEMPFILE`
 
 Maintain `tests/replay/UNSUPPORTED.md` with a scenario path and reason for every
 excluded file. No silent skips.
 
 ## Pass-rate gates
 
-- M2: at least 10 iterator scenarios pass.
-- M3: at least 30 cache/retry scenarios pass.
-- M5: at least 60 scenarios including DNSSEC pass.
-- M9: agreed final subset passes, with no regressions.
+- First phase: at least 10 iterator scenarios pass.
+- Second phase: at least 30 cache/retry scenarios pass.
+- Third phase: at least 60 scenarios including DNSSEC pass.
+- Final: the agreed subset passes, with no regressions.
 
 The exact list is frozen when the harness first runs, so progress is measurable.
 

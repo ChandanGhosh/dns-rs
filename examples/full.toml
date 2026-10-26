@@ -152,7 +152,7 @@ forward_first = false
 # forward_first = false
 # tls_upstream = false
 
-# Remote control is parsed for compatibility but not served yet (M8).
+# Remote control is parsed for compatibility but not served yet.
 [remote_control]
 enabled = false
 interfaces = ["127.0.0.1"]

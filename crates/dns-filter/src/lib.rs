@@ -1,5 +1,5 @@
 //! Local data and policy filtering.
 //!
-//! This crate will own local zones, auth zones, views, RPZ, response IP filtering,
-//! and DNS64. Implementation starts in M7; the crate is present now so the
-//! workspace dependency graph is stable from day one.
+//! This crate is currently a placeholder: RPZ, DNS64, and response-IP filtering
+//! are not implemented. Local zones, auth zones, and views are served by
+//! `dns-server` for now; their policy logic may move here once filtering lands.
