@@ -1,0 +1,56 @@
+name: dns-rs
+
+services:
+    resolver:
+        image: ${DNS_RS_IMAGE:-dns-rs:dev}
+        build:
+            context: .
+            args:
+                VERSION: dev
+                VCS_REF: local
+        container_name: dns-rs
+        restart: unless-stopped
+
+        ports:
+            # Publish on the LAN by default. Override DNS_RS_BIND_ADDR=127.0.0.1
+            # for a loopback-only test, or DNS_RS_HOST_PORT to avoid port 53.
+            - "${DNS_RS_BIND_ADDR:-0.0.0.0}:${DNS_RS_HOST_PORT:-53}:53/udp"
+            - "${DNS_RS_BIND_ADDR:-0.0.0.0}:${DNS_RS_HOST_PORT:-53}:53/tcp"
+
+        volumes:
+            # Replace the image's default configuration with your own.
+            - ./packaging/container.toml:/etc/dns-rs/dns-rs.toml:ro
+            # Persist the RFC 5011 auto-trust-anchor file when enabled.
+            - dns-rs-data:/var/lib/dns-rs
+            # Mount TLS material for DoT/DoH and enable the interfaces in the
+            # mounted configuration.
+            # - ./tls:/etc/dns-rs/tls:ro
+
+        # Runtime hardening: no writable root filesystem, no capabilities
+        # except the one needed to bind port 53, and the runtime's default
+        # seccomp profile (do not pass seccomp=unconfined).
+        read_only: true
+        tmpfs:
+            - /tmp:rw,noexec,nosuid,size=16m
+        cap_drop:
+            - ALL
+        cap_add:
+            - NET_BIND_SERVICE
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 256
+
+        healthcheck:
+            test:
+                - CMD
+                - /usr/local/bin/dns-rs
+                - -c
+                - /etc/dns-rs/dns-rs.toml
+                - healthcheck
+            interval: 30s
+            timeout: 5s
+            start_period: 5s
+            retries: 3
+
+volumes:
+    dns-rs-data:

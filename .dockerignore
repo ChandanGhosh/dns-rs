@@ -1,0 +1,15 @@
+# Build artifacts and repository-only files are not needed in the image.
+target/
+.git/
+.github/
+.gitignore
+.editorconfig
+docs/
+examples/
+fuzz/
+*.md
+*.log
+*.pid
+.DS_Store
+.idea/
+.vscode/

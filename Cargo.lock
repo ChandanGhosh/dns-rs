@@ -351,6 +351,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dns-config",
+ "dns-proto",
  "dns-server",
  "tokio",
  "tokio-util",

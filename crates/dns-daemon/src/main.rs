@@ -1,6 +1,10 @@
+mod healthcheck;
+
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand};
@@ -41,6 +45,30 @@ enum Command {
     Checkconf,
     /// Run the resolver.
     Run,
+    /// Query a running resolver and exit non-zero if it does not answer.
+    ///
+    /// Intended for container healthchecks and for simple liveness checks.
+    Healthcheck {
+        /// Address to probe. Defaults to the first plain-DNS listener.
+        #[arg(long, value_name = "ADDR")]
+        address: Option<IpAddr>,
+
+        /// Port to probe. Defaults to the listener or server port.
+        #[arg(long, value_name = "PORT")]
+        port: Option<u16>,
+
+        /// Query name. Defaults to the built-in `localhost.` record.
+        #[arg(long, value_name = "NAME", default_value = "localhost.")]
+        name: String,
+
+        /// Per-operation timeout in milliseconds.
+        #[arg(long, value_name = "MILLISECONDS", default_value_t = 2000)]
+        timeout: u64,
+
+        /// Force TCP instead of UDP.
+        #[arg(long)]
+        tcp: bool,
+    },
 }
 
 #[tokio::main]
@@ -53,6 +81,22 @@ async fn main() -> ExitCode {
             init_tracing(cli.verbose);
             run(&cli.config).await
         }
+        Command::Healthcheck {
+            address,
+            port,
+            name,
+            timeout,
+            tcp,
+        } => healthcheck::run(
+            &cli.config,
+            &healthcheck::Options {
+                address,
+                port,
+                name: &name,
+                timeout: Duration::from_millis(timeout),
+                tcp,
+            },
+        ),
     };
 
     match result {

@@ -1,0 +1,152 @@
+# Example single-node deployment for a dedicated resolver (for example a
+# Raspberry Pi running k3s). It runs one non-root replica with a read-only root
+# filesystem and the runtime-default seccomp profile.
+#
+#   kubectl apply -f deploy/k8s/dns-rs.yaml
+#
+# The Service is a ClusterIP. To serve LAN clients, expose the pod on port 53
+# (hostPort or hostNetwork) or point your router at a LoadBalancer service.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+    name: dns-rs-config
+    labels:
+        app.kubernetes.io/name: dns-rs
+data:
+    dns-rs.toml: |
+        [server]
+        interfaces = ["0.0.0.0"]
+        port = 53
+        verbosity = 1
+        num_threads = 2
+        do_daemonize = false
+        do_ip4 = true
+        do_ip6 = false
+        do_udp = true
+        do_tcp = true
+        access_control = [
+            "127.0.0.0/8 allow",
+            "10.0.0.0/8 allow",
+            "172.16.0.0/12 allow",
+            "192.168.0.0/16 allow",
+            "0.0.0.0/0 refuse",
+        ]
+        harden_glue = true
+        dnssec_validation = true
+        qname_minimisation = true
+        use_caps_for_id = true
+        # auto_trust_anchor_file = "/var/lib/dns-rs/root.key"
+
+        [remote_control]
+        enabled = false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: dns-rs
+    labels:
+        app.kubernetes.io/name: dns-rs
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app.kubernetes.io/name: dns-rs
+    template:
+        metadata:
+            labels:
+                app.kubernetes.io/name: dns-rs
+        spec:
+            securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                fsGroup: 65532
+                seccompProfile:
+                    type: RuntimeDefault
+            containers:
+                - name: dns-rs
+                  image: docker.io/your-dockerhub-user/dns-rs:dev
+                  imagePullPolicy: IfNotPresent
+                  args: ["-c", "/etc/dns-rs/dns-rs.toml", "run"]
+                  securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                          drop: ["ALL"]
+                          add: ["NET_BIND_SERVICE"]
+                  ports:
+                      - name: dns-udp
+                        containerPort: 53
+                        protocol: UDP
+                      - name: dns-tcp
+                        containerPort: 53
+                        protocol: TCP
+                  livenessProbe:
+                      exec:
+                          command:
+                              - /usr/local/bin/dns-rs
+                              - -c
+                              - /etc/dns-rs/dns-rs.toml
+                              - healthcheck
+                      initialDelaySeconds: 5
+                      periodSeconds: 30
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                  readinessProbe:
+                      exec:
+                          command:
+                              - /usr/local/bin/dns-rs
+                              - -c
+                              - /etc/dns-rs/dns-rs.toml
+                              - healthcheck
+                      initialDelaySeconds: 2
+                      periodSeconds: 10
+                      timeoutSeconds: 5
+                      failureThreshold: 3
+                  resources:
+                      requests:
+                          cpu: 50m
+                          memory: 32Mi
+                      limits:
+                          cpu: 500m
+                          memory: 128Mi
+                  volumeMounts:
+                      - name: config
+                        mountPath: /etc/dns-rs
+                        readOnly: true
+                      - name: data
+                        mountPath: /var/lib/dns-rs
+                      - name: tmp
+                        mountPath: /tmp
+            volumes:
+                - name: config
+                  configMap:
+                      name: dns-rs-config
+                # Replace with a PersistentVolumeClaim when RFC 5011 state must
+                # survive pod rescheduling.
+                - name: data
+                  emptyDir: {}
+                - name: tmp
+                  emptyDir:
+                      medium: Memory
+                      sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+    name: dns-rs
+    labels:
+        app.kubernetes.io/name: dns-rs
+spec:
+    type: ClusterIP
+    selector:
+        app.kubernetes.io/name: dns-rs
+    ports:
+        - name: dns-udp
+          port: 53
+          targetPort: 53
+          protocol: UDP
+        - name: dns-tcp
+          port: 53
+          targetPort: 53
+          protocol: TCP

@@ -30,6 +30,21 @@ CLI verbosity. `examples/full.toml` and `examples/full.conf` are annotated
 references covering every supported option, including DoT/DoH listeners and
 encrypted forwarders.
 
+## Container
+
+The repository includes a multi-stage `Dockerfile` with a distroless, non-root
+runtime and a built-in DNS healthcheck. Build and verify it locally with:
+
+```bash
+docker build -t dns-rs:dev .
+PORT=15353 scripts/container-smoke.sh
+```
+
+The smoke test runs with a read-only root filesystem, all capabilities dropped
+except `NET_BIND_SERVICE`, and Docker's default seccomp profile. For Compose and
+Kubernetes examples, Raspberry Pi deployment notes, and the deferred Docker Hub
+publishing workflow, see [`docs/container.md`](docs/container.md).
+
 ## Implemented
 
 **Resolution**
@@ -80,9 +95,12 @@ encrypted forwarders.
 
 **Operations**
 
-- `checkconf` and `run` commands, configuration warnings, and structured logging.
+- `checkconf`, `run`, and `healthcheck` commands, configuration warnings, and structured logging.
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
 - TOML configuration and an `unbound.conf`-compatible front-end.
+- Container image on a distroless non-root runtime, with a `healthcheck`
+  subcommand for container liveness probes and a read-only/hardened example
+  deployment.
 
 ## Not yet implemented
 
@@ -154,15 +172,18 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo test --workspace --doc
+scripts/container-smoke.sh
 ```
 
 CI additionally runs `cargo nextest`, `cargo deny`, `cargo audit`, and a
-short `cargo fuzz` smoke test for the message decoder. The `delv` corpus-parity
-test in `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not
-installed.
+short `cargo fuzz` smoke test for the message decoder. The container job builds
+the image, runs the smoke test, enforces a size budget, and scans for
+vulnerabilities. The `delv` corpus-parity test in
+`crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
 
 Architecture decisions live in [`docs/adr/`](docs/adr/). The Unbound replay
-harness design is in [`docs/replay-harness.md`](docs/replay-harness.md).
+harness design is in [`docs/replay-harness.md`](docs/replay-harness.md), and
+container deployment is covered in [`docs/container.md`](docs/container.md).
 
 ## License
 
