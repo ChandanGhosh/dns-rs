@@ -218,9 +218,9 @@ the image, runs the smoke test, enforces a size budget, and scans for
 vulnerabilities. The `delv` corpus-parity test in
 `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
 
-Architecture decisions live in [`docs/adr/`](docs/adr/). The Unbound replay
-harness design is in [`docs/replay-harness.md`](docs/replay-harness.md), and
-container deployment is covered in [`docs/container.md`](docs/container.md).
+The Unbound replay harness design is in
+[`docs/replay-harness.md`](docs/replay-harness.md), and container deployment is
+covered in [`docs/container.md`](docs/container.md).
 
 ## License
 
