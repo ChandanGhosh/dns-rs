@@ -100,14 +100,14 @@ docker run --rm --name dns-rs-test \
   --cap-drop ALL \
   --cap-add NET_BIND_SERVICE \
   --security-opt no-new-privileges=true \
-  -p 127.0.0.1:5353:53/udp \
-  -p 127.0.0.1:5353:53/tcp \
+  -p 127.0.0.1:15353:53/udp \
+  -p 127.0.0.1:15353:53/tcp \
   chandanghosh/dns-rs:26102026
 ```
 
 ```bash
-dig @127.0.0.1 -p 5353 example.com A
-dig @127.0.0.1 -p 5353 localhost. A
+dig @127.0.0.1 -p 15353 example.com A
+dig @127.0.0.1 -p 15353 localhost. A
 ```
 
 Press `Ctrl+C` (or run `docker stop dns-rs-test` from another terminal) to stop
@@ -166,7 +166,7 @@ Files must be readable by UID 65532.
 ### Binding a privileged port
 
 The image runs as UID 65532. Keep `--cap-add NET_BIND_SERVICE` so it can bind
-port 53 inside the container, or publish a high port with `-p 5353:53`. The host
+port 53 inside the container, or publish a high port with `-p 15353:53`. The host
 side of the mapping may bind port 53 without extra container capabilities
 because Docker performs the publish as root.
 
@@ -198,10 +198,10 @@ DNS_RS_IMAGE=chandanghosh/dns-rs:26102026 docker compose up -d
 ### Loopback-only test on a high port
 
 ```bash
-DNS_RS_BIND_ADDR=127.0.0.1 DNS_RS_HOST_PORT=5353 \
+DNS_RS_BIND_ADDR=127.0.0.1 DNS_RS_HOST_PORT=15353 \
   docker compose up -d --build
 
-dig @127.0.0.1 -p 5353 example.com A
+dig @127.0.0.1 -p 15353 example.com A
 ```
 
 ### Common operations

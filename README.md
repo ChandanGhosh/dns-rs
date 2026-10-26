@@ -47,7 +47,7 @@ Published images are available for `linux/amd64` and `linux/arm64`:
 docker pull chandanghosh/dns-rs:26102026
 ```
 
-Run it manually on loopback port 5353:
+Run it manually on loopback port 15353:
 
 ```bash
 docker run -d --rm --name dns-rs-test \
@@ -56,11 +56,11 @@ docker run -d --rm --name dns-rs-test \
   --cap-drop ALL \
   --cap-add NET_BIND_SERVICE \
   --security-opt no-new-privileges=true \
-  -p 127.0.0.1:5353:53/udp \
-  -p 127.0.0.1:5353:53/tcp \
+  -p 127.0.0.1:15353:53/udp \
+  -p 127.0.0.1:15353:53/tcp \
   chandanghosh/dns-rs:26102026
 
-dig @127.0.0.1 -p 5353 example.com A
+dig @127.0.0.1 -p 15353 example.com A
 docker stop dns-rs-test
 ```
 
