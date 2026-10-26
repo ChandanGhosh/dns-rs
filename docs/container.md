@@ -440,16 +440,30 @@ Images are published manually under `chandanghosh/dns-rs`; the current tag is
 `26102026` (26 October 2026). The tag contains `linux/amd64` and `linux/arm64`
 manifests plus BuildKit SBOM and provenance attestations.
 
+Tags are date-based (`DDMMYYYY`) and mutable: the current day's tag is rebuilt
+and pushed in place when the source changes, so `docker pull` picks up the
+latest build for that date. There are no semantic-version tags and no
+per-commit tags, so record the manifest digest from `imagetools inspect` when
+you need an immutable reference:
+
+```bash
+TAG=26102026
+docker buildx imagetools inspect "chandanghosh/dns-rs:$TAG" --format '{{json .Manifest}}'
+docker pull "chandanghosh/dns-rs@sha256:<digest>"
+```
+
 To publish from a workstation:
 
 ```bash
+TAG=26102026
 docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --tag chandanghosh/dns-rs:<tag> \
-  --build-arg VERSION=<tag> \
+  --tag "chandanghosh/dns-rs:$TAG" \
+  --build-arg VERSION="$TAG" \
   --build-arg VCS_REF="$(git rev-parse HEAD)" \
   --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --build-arg SOURCE_URL="$(git remote get-url origin)" \
   --provenance=mode=max --sbom=true \
   --push .
 ```
