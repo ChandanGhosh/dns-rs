@@ -151,8 +151,86 @@ Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
 - `forward-host`, `interface-view`, `response-ip`, and AXFR/URL fetching for
   auth zones. These are parsed and reported as warnings.
 - Configuration reload without restart.
-- The Unbound `.rpl` replay harness (`docs/replay-harness.md` is still a design),
-  live interop tests, and benchmarks.
+- The Unbound `.rpl` replay harness (`docs/replay-harness.md` is still a design)
+  and live interop tests.
+
+## Performance
+
+Loopback UDP benchmark of the release binary on an Intel Core i7-9750H
+(6 cores / 12 threads, Linux 7.3, rustc 1.99.1). The resolver was pinned to
+four CPUs and the load generator to the remaining eight. Each run sent 8,000
+distinct names against a warm message cache, with 64 queries in flight and
+EDNS(0); `bench.test.` was answered by a local stub authority with
+3,600-second TTLs, so these are steady-state cache hits rather than cold
+iteration.
+
+| `num_threads` | p50 | p75 | p90 | p95 | p99 | Throughput | Idle RSS | Peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.81 ms | 0.88 ms | 0.95 ms | 0.98 ms | 1.06 ms | 52,400 qps | 8.1 MiB | 23.9 MiB |
+| 2 | 0.36 ms | 0.43 ms | 0.49 ms | 0.53 ms | 0.60 ms | 115,700 qps | 8.2 MiB | 25.0 MiB |
+| 4 | 0.30 ms | 0.35 ms | 0.41 ms | 0.45 ms | 0.53 ms | 139,300 qps | 8.2 MiB | 26.1 MiB |
+
+Values are from the best of three 10-second runs after a 5-second warm-up.
+Latency is the client-side send-to-response RTT at 64 queries in flight. The
+host was shared with desktop workloads, so tail latency is indicative rather
+than a strict upper bound. RSS is `VmRSS` at idle and `VmHWM` after the
+8,000-name cache was filled; `num_threads` sets the Tokio worker count.
+
+### Running it
+
+The runner is [`scripts/bench-loopback.sh`](scripts/bench-loopback.sh); the
+load generator is [`scripts/dns-bench.rs`](scripts/dns-bench.rs). The runner
+builds the release binary, starts a local mock authority, and loops over the
+thread counts.
+
+The script needs a Rust toolchain; host mode uses `cargo` to build the
+resolver, and every mode uses `rustc` to build the load generator. Container
+mode also needs Docker. For each worker count it writes a stub-zone config and
+starts the resolver on loopback.
+
+```bash
+# All three worker counts (1, 2, 4).
+scripts/bench-loopback.sh
+
+# One worker count with a longer sample.
+BENCH_WARMUP=5 BENCH_DURATION=30 scripts/bench-loopback.sh 2
+```
+
+On Linux hosts with at least eight CPUs it pins the resolver to CPUs 0-3 and
+the generator to the rest. Override this with `BENCH_SERVER_CPUS` and
+`BENCH_CLIENT_CPUS`.
+
+The generator can also be run directly. The resolver must have a `bench.test.`
+stub zone pointing at the mock (the script writes this config for you):
+
+```bash
+rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
+/tmp/dns-bench serve 127.0.0.1:15354 &
+/tmp/dns-bench load 127.0.0.1:15353 8000 bench.test 64 5 10
+```
+
+The `load` arguments are address, distinct names, zone, concurrency, warm-up
+seconds, and measured seconds.
+
+### In a container
+
+Build the image from this checkout and point the same script at it:
+
+```bash
+docker build -t dns-rs:bench .
+BENCH_SERVER_IMAGE=dns-rs:bench scripts/bench-loopback.sh
+```
+
+The script starts the resolver with `--network host` (so it shares the loopback
+mock and resolver port with the host), applies CPU pinning with `--cpuset-cpus`,
+and reads the container process's RSS from the host. Host networking is
+Linux-only; on Docker Desktop, run it from a Linux VM or place the mock in the
+same network namespace.
+
+Use an image built from this checkout. Images built before the `num_threads`
+runtime fix ignore the setting, so 1, 2, and 4 workers would look identical. The
+image uses the size-optimised `dist` profile, so its numbers are not directly
+comparable to the host `release` numbers above.
 
 ## Workspace
 

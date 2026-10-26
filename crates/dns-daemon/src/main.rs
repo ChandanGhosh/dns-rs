@@ -71,15 +71,14 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
         Command::Checkconf => checkconf(&cli.config),
         Command::Run => {
             init_tracing(cli.verbose);
-            run(&cli.config).await
+            run(&cli.config)
         }
         Command::Healthcheck {
             address,
@@ -130,13 +129,27 @@ fn checkconf(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn run(path: &Path) -> Result<()> {
+fn run(path: &Path) -> Result<()> {
     let loaded = load(path)?;
-    let config = Arc::new(loaded.config);
+    // `num-threads` is the number of resolver worker threads. Build the
+    // runtime explicitly so the setting controls Tokio's worker pool instead
+    // of always using one worker per available CPU.
+    let threads = loaded.config.server.num_threads;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+        .context("failed to build the Tokio runtime")?;
+    runtime.block_on(run_server(path, loaded.config))
+}
+
+async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
+    let config = Arc::new(config);
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         config = %path.display(),
+        threads = config.server.num_threads,
         "starting dns-rs"
     );
 
