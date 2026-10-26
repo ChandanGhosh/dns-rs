@@ -124,6 +124,72 @@ forwarder cannot override signed data. A client-facing fallback logs
 original error; internal validator and nameserver-address lookups log the same
 message at debug level.
 
+### Which path answered the query?
+
+dns-rs randomises the case of the query name on iterative queries (DNS 0x20,
+the equivalent of Unbound's `use-caps-for-id`) so a spoofed reply that guessed
+the name cannot match. Authoritative servers echo the case of the question, so
+answers learned by iteration keep that spelling:
+
+```console
+$ dig @127.0.0.1 kernel.org A
+;; ANSWER SECTION:
+keRnel.orG.		300	IN	A	172.105.4.254
+```
+
+This is correct on the wire: DNS names are compared case-insensitively
+(RFC 4343), and the resolver does not rewrite the spelling. The cached RRset
+keeps the case it was first learned with until its TTL expires, so repeated
+queries return the same mixed-case name — and different names will show
+different capitalisation.
+
+Casing does not multiply cache entries: the message cache, the RRset cache and
+the in-flight registry all key on the lowercased name (`name|type`), so the
+randomised spelling changes bytes in place, not the number of keys or their
+size. A mixed-case entry and a lowercase lookup of the same name share one
+cache slot.
+
+Encrypted forwarders (DoT and DoH) skip 0x20 and DNS cookies, because the TLS
+connection already authenticates the server. Their answers therefore arrive
+all-lowercase. Plain-UDP forwarders still use the iterator's transport and can
+show mixed case, and a server that is learned not to preserve case is not
+randomised against again.
+
+| Answer owner name | How the cached data was learned |
+|---|---|
+| Mixed case (`keRnel.orG.`) | local iteration |
+| All lowercase (`kernel.org.`) | DoT/DoH forwarding, or an upstream that does not preserve case |
+
+The casing describes how the cached entry was learned, not necessarily how the
+current query was routed. To be certain, check the startup log line
+`using configured forward zones ...` and the per-query
+`iteration failed; falling back to forwarders` warning.
+
+### Verifying that the network allows iteration
+
+A gateway that filters DNS redirects every query sent to port 53, whatever its
+destination, so a rewritten path can look like a resolver bug. Two probes
+distinguish them:
+
+```bash
+# A root server answers authoritatively and never recurses.
+# Expect "qr aa", 13 NS records and NO "ra" flag.
+dig +norecurse @198.41.0.4 . NS
+
+# 203.0.113.0/24 (TEST-NET-3) is reserved and unroutable.
+# Expect a timeout. An answer means port 53 is being intercepted.
+dig +norecurse @203.0.113.53 . NS
+dig +tcp +norecurse @203.0.113.53 . NS
+```
+
+A router or gateway that filters content or blocks ads redirects DNS to itself
+so it can inspect the answers, and some deployments add an explicit port-53
+DNAT rule. Disable DNS/content filtering for this host, or move it to a segment
+that is not redirected, and remove any such rule. While the redirect is active,
+dns-rs receives recursive, unsigned answers from a root server, rejects them,
+and returns `SERVFAIL` for fresh names while cached names and `localhost.` keep
+working.
+
 The container healthcheck is a listener probe only: it asks for `localhost.`,
 so a container can be `healthy` while upstream resolution is broken.
 

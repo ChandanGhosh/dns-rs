@@ -84,7 +84,9 @@ Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
 - Iterative resolution from the root, using built-in root hints, with IPv4 and
   IPv6 upstream transports gated by `do-ip4`/`do-ip6`.
 - QNAME minimisation, with an optional strict mode.
-- DNS 0x20 case randomisation and response scrubbing.
+- DNS 0x20 case randomisation and response scrubbing. Answers keep the
+  randomised spelling, which shows whether a name was learned by iteration or
+  through an encrypted forwarder (see `docs/container.md`).
 - DNS cookies (RFC 7873) on upstream queries.
 - TCP fallback on truncation and pooled upstream connections.
 - Forward zones over plain UDP, DNS-over-TLS, or DNS-over-HTTPS (`https://`
