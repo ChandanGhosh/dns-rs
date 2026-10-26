@@ -1,0 +1,25 @@
+[package]
+name = "dns-client"
+description = "Upstream DNS transports for dns-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+dns-proto.workspace = true
+socket2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "time", "io-util"] }
+tracing.workspace = true
+rand = "0.9"
+
+[lints]
+workspace = true

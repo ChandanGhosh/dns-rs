@@ -1,0 +1,13 @@
+[package]
+name = "dns-testutil"
+description = "Test helpers for dns-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dns-proto.workspace = true
+
+[lints]
+workspace = true

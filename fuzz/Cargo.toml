@@ -1,0 +1,25 @@
+[package]
+name = "dns-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dns-proto = { path = "../crates/dns-proto" }
+
+[[bin]]
+name = "decode_message"
+path = "fuzz_targets/decode_message.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Keep the fuzz crate out of the resolver workspace.
+[workspace]

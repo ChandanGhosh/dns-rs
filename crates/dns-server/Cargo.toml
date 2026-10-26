@@ -1,0 +1,40 @@
+[package]
+name = "dns-server"
+description = "DNS listeners and query pipeline for dns-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dns-cache = { path = "../dns-cache" }
+dns-client = { path = "../dns-client" }
+dns-config.workspace = true
+dns-dnssec.workspace = true
+dns-iter = { path = "../dns-iter" }
+dns-proto.workspace = true
+dns-testutil.workspace = true
+dashmap.workspace = true
+data-encoding.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+socket2.workspace = true
+tokio-rustls.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+bytes = "1.10"
+hickory-proto.workspace = true
+ipnet.workspace = true
+
+[dev-dependencies]
+rcgen = "0.13"
+ring.workspace = true
+tokio = { workspace = true, features = ["test-util", "time"] }
+
+[lints]
+workspace = true

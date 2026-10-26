@@ -1,0 +1,159 @@
+# dns-rs full reference configuration (native TOML)
+#
+# This mirrors examples/full.conf. TOML is the native format; use it when you
+# want typed values or tooling-friendly configuration. Every field below is
+# optional unless noted, and omitted fields use the defaults shown.
+#
+# Validate with:   dns-rs -c examples/full.toml checkconf
+# Run with:        dns-rs -c examples/full.toml run
+#
+# Listener protocol is selected by port, as in Unbound:
+#   * port        plain DNS over UDP and TCP
+#   * tls_port    DNS-over-TLS (RFC 7858)
+#   * https_port  DNS-over-HTTPS (RFC 8484)
+# DoT and DoH are only enabled when tls_service_key and tls_service_pem are
+# set, and an interface must use the matching port (for example
+# "127.0.0.1@853") to get the encrypted service.
+
+[server]
+# Addresses to listen on. An explicit @port overrides `port`.
+interfaces = [
+    "127.0.0.1",
+    "::1",
+    "127.0.0.1@853",
+    "::1@853",
+    "127.0.0.1@443",
+    "::1@443",
+]
+
+# Default plain DNS port for interfaces without an explicit port.
+port = 53
+
+# Ports that select the encrypted listeners.
+tls_port = 853
+https_port = 443
+
+# HTTP path served by the DoH listener.
+http_endpoint = "/dns-query"
+
+# PEM private key and certificate chain for downstream DoT and DoH.
+# Both must be set together; setting neither disables both listeners.
+# Create these files (for example with `openssl req -x509`) before `run`;
+# `checkconf` does not read them.
+tls_service_key = "/etc/dns-rs/tls/server.key"
+tls_service_pem = "/etc/dns-rs/tls/server.pem"
+
+# Process and logging. verbosity: 0 = errors, 1 = info, 2 = detail, 3+ = debug.
+verbosity = 1
+num_threads = 2
+do_daemonize = false
+# username = "dns-rs"
+# chroot = "/var/lib/dns-rs"
+# directory = "/var/lib/dns-rs"
+# logfile = "/var/log/dns-rs.log"
+# pidfile = "/run/dns-rs.pid"
+use_syslog = false
+
+# Transports. At least one of do_ip4/do_ip6 and one of do_udp/do_tcp must stay
+# enabled.
+do_ip4 = true
+do_ip6 = true
+do_udp = true
+do_tcp = true
+# Source addresses for outgoing queries (kernel choice when empty).
+outgoing_interfaces = []
+
+# First matching network wins. Actions: allow, deny (drop), refuse (REFUSED),
+# allow-snoop, deny-non-local, refuse-non-local.
+access_control = [
+    "127.0.0.0/8 allow",
+    "::1/128 allow",
+    "192.168.0.0/16 allow",
+    "0.0.0.0/0 refuse",
+    "::/0 refuse",
+]
+
+# Hardening and protocol behaviour.
+harden_glue = true
+dnssec_validation = true
+harden_dnssec_stripped = true
+val_permissive_mode = false
+val_clean_additional = true
+qname_minimisation = true
+qname_minimisation_strict = false
+use_caps_for_id = true
+
+# EDNS and TTL bounds.
+edns_buffer_size = 1232
+max_udp_size = 1232
+cache_min_ttl = 0
+cache_max_ttl = 86400
+# Refresh entries when less than 10% (or 3 seconds) of their TTL remains.
+prefetch = false
+# Serve an expired entry while it is refreshed (RFC 8767).
+serve_expired = false
+# Seconds to keep expired entries; 0 uses the built-in 30 second window.
+serve_expired_ttl = 0
+# TTL attached to a serve-expired reply.
+serve_expired_reply_ttl = 30
+min_ttl = 0
+max_ttl = 86400
+
+# Rate limiting. ratelimit = 0 disables limiting.
+ratelimit = 0
+ratelimit_slip = 2
+max_concurrent_queries_per_client = 64
+
+# Maximum concurrent plain-TCP and DoT connections per worker thread.
+# The effective limit is incoming_num_tcp * num_threads. Zero disables the
+# TCP and DoT listeners; DoH keeps its own HTTP connection management.
+incoming_num_tcp = 10
+
+# DNSSEC trust anchors. dns-rs ships the built-in root KSKs, so no anchor is
+# required for normal validation. Use these to add or replace anchors.
+trust_anchor = []
+# trust_anchor_file = "/etc/dns-rs/trust-anchors.conf"
+# auto_trust_anchor_file = "/var/lib/dns-rs/root.key"
+
+# Upstream TLS verification for DoT/DoH forwarders.
+tls_use_system_ca = true
+# tls_cert_bundle = "/etc/dns-rs/upstream-ca.pem"
+
+# Forward zones. The most specific matching zone wins; name = "." forwards
+# everything. Forwarders may be plain UDP (with TCP fallback), DoT with
+# tls_upstream = true and "addr@853#auth-name", or DoH with an https:// URL.
+# Encrypted forwarders skip 0x20 and DNS cookies.
+[[forward_zones]]
+name = "."
+tls_upstream = true
+forward_addrs = [
+    "1.1.1.1@853#cloudflare-dns.com",
+    "1.0.0.1@853#cloudflare-dns.com",
+    "https://cloudflare-dns.com/dns-query",
+]
+forward_hosts = []
+forward_first = false
+
+# Plain-DNS forwarder example (no TLS):
+# [[forward_zones]]
+# name = "corp.example."
+# forward_addrs = ["10.0.0.53"]
+# forward_hosts = []
+# forward_first = false
+# tls_upstream = false
+
+# DoH-only forwarder example:
+# [[forward_zones]]
+# name = "."
+# forward_addrs = [
+#     "https://dns.google/dns-query",
+#     "https://cloudflare-dns.com/dns-query",
+# ]
+# forward_first = false
+# tls_upstream = false
+
+# Remote control is parsed for compatibility but not served yet (M8).
+[remote_control]
+enabled = false
+interfaces = ["127.0.0.1"]
+port = 8953

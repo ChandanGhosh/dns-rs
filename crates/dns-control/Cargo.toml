@@ -1,0 +1,13 @@
+[package]
+name = "dns-control"
+description = "Control and statistics interface for dns-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true
