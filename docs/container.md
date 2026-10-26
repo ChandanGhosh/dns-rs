@@ -31,7 +31,7 @@ docker run --rm chandanghosh/dns-rs:26102026 --version
 | Plain DNS | port 53 UDP/TCP |
 | DoT / DoH | ports 853 / 443 when TLS material is configured |
 | Healthcheck | `dns-rs healthcheck` (no shell or `dig` needed) |
-| Size | about 6.3 MiB uncompressed on `amd64`, 1.7 MiB on `arm/v7` |
+| Size | about 2.0 MiB compressed (4.3 MiB on disk) on `amd64`; 1.7 MiB compressed (3.2 MiB on disk) on `arm/v7` |
 
 The image runs with no writable filesystem paths by default. If you enable
 features that write state (for example the RFC 5011
