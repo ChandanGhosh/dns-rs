@@ -1,0 +1,8 @@
+# `cargo-fuzz` needs nightly for sanitizer coverage. The repository-level
+# toolchain file pins stable, so this nested file selects nightly for the
+# standalone fuzz workspace. The musl target keeps the instrumented binary
+# static and avoids ASAN interposition with the system allocator.
+[toolchain]
+channel = "nightly"
+targets = ["x86_64-unknown-linux-musl"]
+profile = "minimal"

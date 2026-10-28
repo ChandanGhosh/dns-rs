@@ -800,10 +800,10 @@ fn strip_comment(line: &str) -> &str {
                     return &line[..index];
                 }
                 // Check if # appears to be attached to a value (no space before)
-                if let Some(last) = before.chars().last() {
-                    if last.is_whitespace() {
-                        return before;
-                    }
+                if let Some(last) = before.chars().last()
+                    && last.is_whitespace()
+                {
+                    return before;
                 }
                 // Otherwise it's likely part of the value, don't strip
                 continue;

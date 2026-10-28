@@ -86,10 +86,10 @@ impl CookieJar {
         if data[..8] != self.client_cookie(server) {
             return false;
         }
-        if data.len() > 8 {
-            if let Ok(mut cookies) = self.server_cookies.lock() {
-                cookies.insert(server, data[8..].to_vec());
-            }
+        if data.len() > 8
+            && let Ok(mut cookies) = self.server_cookies.lock()
+        {
+            cookies.insert(server, data[8..].to_vec());
         }
         true
     }

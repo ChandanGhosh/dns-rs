@@ -16,6 +16,8 @@ use dns_iter::{ForwardServer, ForwardTransport, ForwardZone, IteratorConfig, Ite
 use dns_proto::{
     Message, MessageType, Name, OpCode, Query, RData, RecordType, ResponseCode, decode, encode,
 };
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use tokio_util::sync::CancellationToken;
 
 struct TestServer {
@@ -210,7 +212,7 @@ async fn downstream_dot_connections_share_the_tcp_limit() {
 fn tls_connector(cert: &Path, alpn: Option<&[u8]>) -> tokio_rustls::TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
     let pem = std::fs::read(cert).expect("read certificate");
-    for certificate in rustls_pemfile::certs(&mut pem.as_slice()) {
+    for certificate in CertificateDer::pem_slice_iter(&pem) {
         roots
             .add(certificate.expect("certificate"))
             .expect("add root");

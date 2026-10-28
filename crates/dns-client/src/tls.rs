@@ -14,7 +14,9 @@ use std::time::Duration;
 
 use rustls::ClientConfig;
 use rustls::RootCertStore;
+use rustls::pki_types::CertificateDer;
 use rustls::pki_types::ServerName;
+use rustls::pki_types::pem::PemObject;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
@@ -129,10 +131,11 @@ pub(crate) fn client_config(
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
     if let Some(path) = ca_bundle {
-        let file = std::fs::File::open(path)?;
-        let mut reader = std::io::BufReader::new(file);
-        for certificate in rustls_pemfile::certs(&mut reader) {
-            let certificate = certificate?;
+        for certificate in CertificateDer::pem_file_iter(path)
+            .map_err(|error| ClientError::Tls(format!("invalid CA bundle: {error}")))?
+        {
+            let certificate = certificate
+                .map_err(|error| ClientError::Tls(format!("invalid CA certificate: {error}")))?;
             roots
                 .add(certificate)
                 .map_err(|error| ClientError::Tls(format!("invalid CA certificate: {error}")))?;

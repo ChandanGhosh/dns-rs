@@ -18,7 +18,7 @@ default-members = ["crates/dns-daemon"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "BSD-3-Clause"
 authors = ["dns-rs contributors"]
 
@@ -36,7 +36,6 @@ ipnet = "2.12"
 moka = { version = "0.12", features = ["sync"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2.2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -59,16 +58,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Internal crates
-dns-cache = { path = "crates/dns-cache" }
-dns-client = { path = "crates/dns-client" }
-dns-config = { path = "crates/dns-config" }
-dns-control = { path = "crates/dns-control" }
-dns-dnssec = { path = "crates/dns-dnssec" }
-dns-filter = { path = "crates/dns-filter" }
-dns-iter = { path = "crates/dns-iter" }
-dns-proto = { path = "crates/dns-proto" }
-dns-server = { path = "crates/dns-server" }
-dns-testutil = { path = "crates/dns-testutil" }
+dns-cache = { version = "0.1.0", path = "crates/dns-cache" }
+dns-client = { version = "0.1.0", path = "crates/dns-client" }
+dns-config = { version = "0.1.0", path = "crates/dns-config" }
+dns-control = { version = "0.1.0", path = "crates/dns-control" }
+dns-dnssec = { version = "0.1.0", path = "crates/dns-dnssec" }
+dns-filter = { version = "0.1.0", path = "crates/dns-filter" }
+dns-iter = { version = "0.1.0", path = "crates/dns-iter" }
+dns-proto = { version = "0.1.0", path = "crates/dns-proto" }
+dns-server = { version = "0.1.0", path = "crates/dns-server" }
+dns-testutil = { version = "0.1.0", path = "crates/dns-testutil" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"

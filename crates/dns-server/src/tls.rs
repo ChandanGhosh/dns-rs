@@ -1,12 +1,10 @@
 //! Downstream TLS material for DNS-over-TLS and DNS-over-HTTPS.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 
 use dns_config::ServerConfig;
 use rustls::ServerConfig as RustlsServerConfig;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio_rustls::TlsAcceptor;
 
 use crate::ServerError;
@@ -30,9 +28,10 @@ pub fn load(server: &ServerConfig) -> Result<Option<TlsMaterial>, ServerError> {
         return Ok(None);
     };
 
-    let certificates: Vec<CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut BufReader::new(File::open(cert_path)?))
-            .collect::<Result<_, _>>()?;
+    let certificates: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|error| ServerError::Tls(format!("{}: {error}", cert_path.display())))?
+        .collect::<Result<_, _>>()
+        .map_err(|error| ServerError::Tls(format!("{}: {error}", cert_path.display())))?;
     if certificates.is_empty() {
         return Err(ServerError::Tls(format!(
             "{} contains no certificates",
@@ -40,10 +39,18 @@ pub fn load(server: &ServerConfig) -> Result<Option<TlsMaterial>, ServerError> {
         )));
     }
 
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(
-        File::open(key_path)?,
-    ))?
-    .ok_or_else(|| ServerError::Tls(format!("{} contains no private key", key_path.display())))?;
+    let key: PrivateKeyDer<'static> = match PrivateKeyDer::from_pem_file(key_path) {
+        Ok(key) => key,
+        Err(rustls::pki_types::pem::Error::NoItemsFound) => {
+            return Err(ServerError::Tls(format!(
+                "{} contains no private key",
+                key_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(ServerError::Tls(format!("{}: {error}", key_path.display())));
+        }
+    };
 
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = RustlsServerConfig::builder_with_provider(provider)

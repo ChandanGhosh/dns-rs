@@ -4,7 +4,8 @@
 
 ## Requirements
 
-- Rust nightly (`rustup toolchain install nightly`)
+- Rust nightly — `fuzz/rust-toolchain.toml` selects it (with the musl target)
+  for this standalone workspace, so no manual `rustup override` is needed
 - `cargo install cargo-fuzz`
 
 ## Run

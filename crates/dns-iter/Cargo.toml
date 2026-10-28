@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-dns-cache = { path = "../dns-cache" }
-dns-client = { path = "../dns-client" }
+dns-cache.workspace = true
+dns-client.workspace = true
 dns-dnssec.workspace = true
 dns-proto.workspace = true
 ring.workspace = true

@@ -7,11 +7,11 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-dns-cache = { path = "../dns-cache" }
-dns-client = { path = "../dns-client" }
+dns-cache.workspace = true
+dns-client.workspace = true
 dns-config.workspace = true
 dns-dnssec.workspace = true
-dns-iter = { path = "../dns-iter" }
+dns-iter.workspace = true
 dns-proto.workspace = true
 dns-testutil.workspace = true
 dashmap.workspace = true
@@ -20,7 +20,6 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 socket2.workspace = true
 tokio-rustls.workspace = true
 thiserror.workspace = true
