@@ -325,6 +325,7 @@ impl QueryPipeline {
             allow_ipv6: config.server.do_ip6,
             dnssec_validation: config.server.dnssec_validation,
             trust_store: trust_store.clone(),
+            domain_insecure: config.server.insecure_domains(),
             harden_dnssec_stripped: config.server.harden_dnssec_stripped,
             val_permissive_mode: config.server.val_permissive_mode,
             val_clean_additional: config.server.val_clean_additional,

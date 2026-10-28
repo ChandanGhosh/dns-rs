@@ -100,6 +100,21 @@ one `access-control: <cidr> allow` line per entry instead of the TOML array.
   or add an encrypted forward zone (DoT/DoH); `examples/full.toml` contains
   working syntax.
 
+- One domain returns `SERVFAIL` with an EDE such as `DNSSEC Bogus` while other
+  names resolve: that domain's upstream data is failing validation. If the
+  domain is legitimately unsigned or its operator's DNSSEC is broken, exclude
+  just that subtree instead of disabling validation globally:
+
+  ```toml
+  [server]
+  domain_insecure = ["broken.example"]
+  ```
+
+  The domain and every name below it are then treated as insecure. In
+  `unbound.conf`, use `domain-insecure: "broken.example"`. This is a static
+  negative trust anchor (RFC 7646) and is never created automatically. Prefer
+  it over `val_permissive_mode`, which applies to every domain.
+
 If you want to keep local iteration but survive a network that blocks or
 rewrites port 53, do not make the forwarder the primary path. Use
 `forward_fallback = true` instead, which only asks the forwarders after

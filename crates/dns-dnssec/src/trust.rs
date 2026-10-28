@@ -151,6 +151,19 @@ impl TrustStore {
             .clone()
     }
 
+    /// Whether an anchor at or below `domain` covers `name`.
+    ///
+    /// `domain-insecure` ignores anchors above the excluded domain, but an
+    /// explicit anchor inside the excluded subtree re-enables validation for
+    /// the names it covers.
+    pub fn anchor_within(&self, domain: &Name, name: &Name) -> bool {
+        self.anchors
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .any(|anchor| domain.zone_of(&anchor.name) && anchor.name.zone_of(name))
+    }
+
     /// Whether the store contains no anchors.
     pub fn is_empty(&self) -> bool {
         self.anchors

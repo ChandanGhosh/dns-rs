@@ -320,6 +320,13 @@ impl Parser {
             "val-permissive-mode" => {
                 self.config.server.val_permissive_mode = parse_bool(path, line, key, value)?;
             }
+            "domain-insecure" => {
+                let domain = parse_scalar(value);
+                if domain.is_empty() {
+                    return Err(ConfigError::parse(path, line, "domain-insecure is empty"));
+                }
+                self.config.server.domain_insecure.push(domain);
+            }
             "val-clean-additional" => {
                 self.config.server.val_clean_additional = parse_bool(path, line, key, value)?;
             }
@@ -922,6 +929,8 @@ server:
     incoming-num-tcp: 32
     access-control: 127.0.0.0/8 allow
     access-control: 10.0.0.0/8 refuse
+    domain-insecure: docker.com
+    domain-insecure: "internal.example."
     tls-service-key: "/tmp/key.pem"
     tls-service-pem: "/tmp/cert.pem"
     tls-port: 8853
@@ -957,6 +966,10 @@ remote-control:
         assert_eq!(config.server.incoming_num_tcp, 32);
         assert!(!config.server.do_daemonize);
         assert_eq!(config.server.access_control.len(), 2);
+        assert_eq!(
+            config.server.domain_insecure,
+            vec!["docker.com".to_owned(), "internal.example.".to_owned()]
+        );
         assert_eq!(config.server.tls_port, 8853);
         assert_eq!(config.server.https_port, 8443);
         assert_eq!(config.server.http_endpoint, "/custom-dns");

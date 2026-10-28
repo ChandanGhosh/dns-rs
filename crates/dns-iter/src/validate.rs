@@ -51,6 +51,14 @@ pub struct ProbedDnskeys {
     pub revoked: Vec<Record>,
 }
 
+/// Response-level data shared by every RRset in one answer.
+struct AnswerContext<'a> {
+    /// Authority records, used to prove wildcard expansion.
+    authorities: &'a [Record],
+    /// Authoritative zone that supplied each answer owner.
+    origins: &'a HashMap<String, Name>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ZoneStatus {
     pub(crate) security: Security,
@@ -140,11 +148,35 @@ impl ZoneCache {
 }
 
 impl IteratorResolver {
+    /// Whether `name` falls under a configured `domain-insecure` entry.
+    ///
+    /// The entry is a static negative trust anchor (RFC 7646): it marks the
+    /// named domain and everything below it as insecure. The longest matching
+    /// entry wins, and an explicit trust anchor at or below it re-enables
+    /// validation for the subtree it covers, matching Unbound's semantics.
+    fn is_domain_insecure(&self, name: &Name) -> bool {
+        let Some(domain) = self
+            .config
+            .domain_insecure
+            .iter()
+            .filter(|domain| domain.zone_of(name))
+            .max_by_key(|domain| domain.num_labels())
+        else {
+            return false;
+        };
+        !self.config.trust_store.anchor_within(domain, name)
+    }
+
     /// Validate a response and classify it as secure, insecure, or bogus.
+    ///
+    /// `origins` maps each answer owner to the authoritative zone that supplied
+    /// it. Unsigned RRsets use it to start the chain of trust at a real zone
+    /// apex instead of probing DS at the owner name.
     pub(crate) async fn validate_message<'a>(
         &'a self,
         message: &Message,
         qtype: RecordType,
+        origins: &HashMap<String, Name>,
         context: &'a WalkContext<'a>,
     ) -> Security {
         match message.metadata.response_code {
@@ -158,7 +190,8 @@ impl IteratorResolver {
                 .await;
         }
 
-        self.validate_positive(message, context.clone()).await
+        self.validate_positive(message, origins, context.clone())
+            .await
     }
 
     /// Fetch a zone's DNSKEY RRset and authenticate it against the current
@@ -222,8 +255,17 @@ impl IteratorResolver {
         Ok(ProbedDnskeys { keys, revoked })
     }
 
-    async fn validate_positive(&self, message: &Message, context: WalkContext<'_>) -> Security {
+    async fn validate_positive(
+        &self,
+        message: &Message,
+        origins: &HashMap<String, Name>,
+        context: WalkContext<'_>,
+    ) -> Security {
         let now = unix_now();
+        let answer = AnswerContext {
+            authorities: &message.authorities,
+            origins,
+        };
         let mut result = Security::Secure;
         let mut validated = false;
         let mut seen: HashSet<(String, u16)> = HashSet::new();
@@ -256,7 +298,7 @@ impl IteratorResolver {
                     &rrset,
                     &signatures,
                     &record.name,
-                    &message.authorities,
+                    &answer,
                     context.clone(),
                     now,
                 )
@@ -277,12 +319,36 @@ impl IteratorResolver {
         rrset: &[Record],
         signatures: &[Record],
         owner: &Name,
-        authorities: &[Record],
+        answer: &AnswerContext<'_>,
         context: WalkContext<'_>,
         now: u64,
     ) -> Security {
+        if self.is_domain_insecure(owner) {
+            return Security::Insecure;
+        }
         if signatures.is_empty() {
-            let zone = self.zone_is_signed(owner, context).await;
+            let zone = match answer.origins.get(&origin_key(owner)) {
+                // The walk recorded the zone that owns this name. Start the
+                // chain of trust there instead of probing DS at an alias.
+                Some(origin) => {
+                    let origin_security = self
+                        .zone_status(origin.clone(), context.clone(), 0)
+                        .await
+                        .security;
+                    if origin_security != Security::Secure || origin == owner {
+                        origin_security
+                    } else {
+                        // The answer came from an ancestor zone. The owner may
+                        // still be a delegation the walk did not have to
+                        // follow, so probe the owner's own zone before treating
+                        // the ancestor's status as final.
+                        self.zone_is_signed(owner, context).await
+                    }
+                }
+                // Forwarded answers do not reveal the authoritative zone;
+                // fall back to probing DS at the owner.
+                None => self.zone_is_signed(owner, context).await,
+            };
             return match zone {
                 Security::Secure if self.config.harden_dnssec_stripped => {
                     Security::Bogus(BogusReason::MissingSignature)
@@ -307,7 +373,7 @@ impl IteratorResolver {
         match verify_rrset(rrset, signatures, &zone.keys, now) {
             Ok(()) => {
                 if wildcard_labels(rrset, signatures).is_some() {
-                    match wildcard_proof(owner, signatures, authorities) {
+                    match wildcard_proof(owner, signatures, answer.authorities) {
                         Ok(()) => Security::Secure,
                         Err(error) => Security::Bogus(error.into()),
                     }
@@ -325,9 +391,19 @@ impl IteratorResolver {
         qtype: RecordType,
         context: WalkContext<'_>,
     ) -> Security {
+        if message
+            .queries
+            .first()
+            .is_some_and(|query| self.is_domain_insecure(&query.name))
+        {
+            return Security::Insecure;
+        }
         let Some(qname) = effective_qname(message) else {
             return Security::Insecure;
         };
+        if self.is_domain_insecure(&qname) {
+            return Security::Insecure;
+        }
         let Some(zone_name) = negative_zone(message) else {
             return Security::Insecure;
         };
@@ -344,69 +420,95 @@ impl IteratorResolver {
         }
     }
 
-    /// Whether the zone containing `name` is signed.
+    /// Probe whether the zone containing `name` is signed.
     ///
-    /// A DS query for a non-delegation name returns NODATA from its enclosing
-    /// zone. The denial is validated against the parent: if it proves an
-    /// unsigned delegation (including an NSEC3 opt-out span), everything below
-    /// `name` is insecure. Otherwise the enclosing zone is signed, so an RRset
-    /// without a signature is bogus.
+    /// Used when the walk did not record a distinct authoritative zone for an
+    /// unsigned RRset: either the answer was forwarded, or the owner may be a
+    /// delegation below the zone that answered. A DS query for a non-delegation
+    /// name returns NODATA from its enclosing zone. The denial is validated
+    /// against the parent: if it proves an unsigned delegation (including an
+    /// NSEC3 opt-out span), everything below `name` is insecure. Otherwise the
+    /// enclosing zone is signed, so an RRset without a signature is bogus.
+    ///
+    /// A DS query for an alias is answered with a CNAME, so the probe follows
+    /// the alias up to the zone that owns it.
     async fn zone_is_signed(&self, name: &Name, context: WalkContext<'_>) -> Security {
-        if let Ok(mut cache) = self.zones.lock()
-            && let Some(security) = cache.get_signed(name)
-        {
+        let original = name.clone();
+        let mut name = name.clone();
+        loop {
+            if self.is_domain_insecure(&name) {
+                return Security::Insecure;
+            }
+            if let Ok(mut cache) = self.zones.lock()
+                && let Some(security) = cache.get_signed(&name)
+            {
+                return security;
+            }
+
+            let response = match self.fetch_internal(&name, RecordType::DS, &context).await {
+                Ok(response) => response,
+                Err(_) => return Security::Insecure,
+            };
+
+            // A DS query for an alias is answered with a CNAME instead of a
+            // denial from the parent zone. The alias is not a delegation, and
+            // the target's denial does not cover the alias name. The alias
+            // itself lives in the parent zone, so determine that zone's
+            // signing status instead.
+            if crate::scrub::cname_target(&response, &name).is_some() {
+                if name.num_labels() == 0 {
+                    return Security::Insecure;
+                }
+                name = name.base_name();
+                continue;
+            }
+
+            let security = if !records_of(&response.answers, &name, RecordType::DS).is_empty() {
+                // The name is a delegation. It is only securely signed when the
+                // parent chain is secure; an unsigned DS RRset means the parent
+                // is insecure, so the child is an island of security.
+                let signatures = sigs_for(&response.answers, &name, RecordType::DS);
+                match signatures
+                    .iter()
+                    .find_map(|record| rrsig_of(record).map(|sig| sig.input().signer_name.clone()))
+                {
+                    Some(parent_name) => {
+                        self.zone_status(parent_name, context.clone(), 0)
+                            .await
+                            .security
+                    }
+                    None => Security::Insecure,
+                }
+            } else {
+                let Some(parent_name) = negative_zone(&response) else {
+                    return Security::Insecure;
+                };
+                let parent = self.zone_status(parent_name, context.clone(), 0).await;
+                if parent.security != Security::Secure {
+                    parent.security
+                } else {
+                    match verify_negative_proof(
+                        &response,
+                        &name,
+                        RecordType::DS,
+                        &parent.keys,
+                        unix_now(),
+                    ) {
+                        Ok(Proof::Secure) => Security::Secure,
+                        Ok(Proof::Insecure) => Security::Insecure,
+                        Err(error) => Security::Bogus(error.into()),
+                    }
+                }
+            };
+
+            if !matches!(security, Security::Bogus(_))
+                && let Ok(mut cache) = self.zones.lock()
+            {
+                cache.insert_signed(&original, security.clone(), Duration::from_secs(300));
+                cache.insert_signed(&name, security.clone(), Duration::from_secs(300));
+            }
             return security;
         }
-
-        let response = match self.fetch_internal(name, RecordType::DS, &context).await {
-            Ok(response) => response,
-            Err(_) => return Security::Insecure,
-        };
-
-        let security = if !records_of(&response.answers, name, RecordType::DS).is_empty() {
-            // The name is a delegation. It is only securely signed when the
-            // parent chain is secure; an unsigned DS RRset means the parent is
-            // insecure, so the child is an island of security.
-            let signatures = sigs_for(&response.answers, name, RecordType::DS);
-            match signatures
-                .iter()
-                .find_map(|record| rrsig_of(record).map(|sig| sig.input().signer_name.clone()))
-            {
-                Some(parent_name) => {
-                    self.zone_status(parent_name, context.clone(), 0)
-                        .await
-                        .security
-                }
-                None => Security::Insecure,
-            }
-        } else {
-            let Some(parent_name) = negative_zone(&response) else {
-                return Security::Insecure;
-            };
-            let parent = self.zone_status(parent_name, context.clone(), 0).await;
-            if parent.security != Security::Secure {
-                parent.security
-            } else {
-                match verify_negative_proof(
-                    &response,
-                    name,
-                    RecordType::DS,
-                    &parent.keys,
-                    unix_now(),
-                ) {
-                    Ok(Proof::Secure) => Security::Secure,
-                    Ok(Proof::Insecure) => Security::Insecure,
-                    Err(error) => Security::Bogus(error.into()),
-                }
-            }
-        };
-
-        if !matches!(security, Security::Bogus(_))
-            && let Ok(mut cache) = self.zones.lock()
-        {
-            cache.insert_signed(name, security.clone(), Duration::from_secs(300));
-        }
-        security
     }
 
     fn zone_status<'a>(
@@ -418,6 +520,9 @@ impl IteratorResolver {
         Box::pin(async move {
             if depth > 24 {
                 return ZoneStatus::bogus(BogusReason::Malformed);
+            }
+            if self.is_domain_insecure(&zone) {
+                return ZoneStatus::insecure();
             }
             if let Ok(mut cache) = self.zones.lock()
                 && let Some(status) = cache.get(&zone)
@@ -552,7 +657,9 @@ impl IteratorResolver {
             checking_disabled: true,
             forward_only: false,
         };
-        self.resolve_inner(name.clone(), qtype, sub_context).await
+        self.resolve_inner(name.clone(), qtype, sub_context)
+            .await
+            .map(|answer| answer.message)
     }
 
     fn cache_zone(&self, zone: &Name, status: &ZoneStatus) {
@@ -908,6 +1015,10 @@ fn negative_zone(message: &Message) -> Option<Name> {
                 .iter()
                 .find_map(|record| rrsig_of(record).map(|sig| sig.input().signer_name.clone()))
         })
+}
+
+fn origin_key(name: &Name) -> String {
+    name.to_ascii().to_ascii_lowercase()
 }
 
 fn records_of(records: &[Record], owner: &Name, rtype: RecordType) -> Vec<Record> {

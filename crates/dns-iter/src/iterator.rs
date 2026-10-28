@@ -162,6 +162,12 @@ pub struct IteratorConfig {
     pub dnssec_validation: bool,
     /// Trust anchors used to start validation chains.
     pub trust_store: TrustStore,
+    /// Domains whose DNSSEC chain of trust is ignored.
+    ///
+    /// Each entry is a static negative trust anchor (RFC 7646): the domain and
+    /// all names below it are treated as insecure. An explicit trust anchor at
+    /// or below an entry overrides the exclusion.
+    pub domain_insecure: Vec<Name>,
     /// Treat unsigned data in a signed zone as bogus.
     pub harden_dnssec_stripped: bool,
     /// Return bogus data instead of failing (validation still runs).
@@ -197,6 +203,7 @@ impl Default for IteratorConfig {
             stub_zones: Vec::new(),
             dnssec_validation: false,
             trust_store: TrustStore::builtin(),
+            domain_insecure: Vec::new(),
             harden_dnssec_stripped: true,
             val_permissive_mode: false,
             val_clean_additional: true,
@@ -301,6 +308,45 @@ pub(crate) struct WalkContext<'a> {
     pub(crate) forward_only: bool,
 }
 
+/// A walk result plus the authoritative zone that supplied each answer owner.
+///
+/// Validation needs the zone that owns an unsigned RRset to start the chain of
+/// trust at a real apex. Deriving it from the owner name is wrong for aliases:
+/// a DS query for an alias is answered with a CNAME, not a delegation denial.
+/// `origins` is empty for forwarded answers, where the authoritative zone is
+/// not known and validation has to fall back to a DS probe.
+pub(crate) struct WalkAnswer {
+    pub(crate) message: Message,
+    pub(crate) origins: HashMap<String, Name>,
+}
+
+impl WalkAnswer {
+    fn new(message: Message) -> Self {
+        Self {
+            message,
+            origins: HashMap::new(),
+        }
+    }
+
+    /// Record the zone that answered every owner in `records`.
+    fn note(&mut self, records: &[Record], zone: Option<&Name>) {
+        note_origins(&mut self.origins, records, zone);
+    }
+}
+
+fn note_origins(origins: &mut HashMap<String, Name>, records: &[Record], zone: Option<&Name>) {
+    let Some(zone) = zone else {
+        return;
+    };
+    for record in records {
+        origins.insert(origin_key(&record.name), zone.clone());
+    }
+}
+
+fn origin_key(name: &Name) -> String {
+    name.to_ascii().to_ascii_lowercase()
+}
+
 impl IteratorResolver {
     pub fn new() -> std::io::Result<Self> {
         Self::with_config(IteratorConfig::default(), None)
@@ -386,11 +432,15 @@ impl IteratorResolver {
             checking_disabled: options.checking_disabled,
             forward_only: false,
         };
-        let mut message = self.resolve_inner(name, qtype, context.clone()).await?;
+        let WalkAnswer {
+            mut message,
+            origins,
+        } = self.resolve_inner(name, qtype, context.clone()).await?;
         message.metadata.recursion_available = true;
 
         let security = if self.config.dnssec_validation {
-            self.validate_message(&message, qtype, &context).await
+            self.validate_message(&message, qtype, &origins, &context)
+                .await
         } else {
             Security::Insecure
         };
@@ -412,7 +462,7 @@ impl IteratorResolver {
         name: Name,
         qtype: RecordType,
         context: WalkContext<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Message, ResolveError>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<WalkAnswer, ResolveError>> + Send + 'a>> {
         Box::pin(async move {
             if context.depth > MAX_DEPTH {
                 return Err(ResolveError::DepthExceeded);
@@ -441,7 +491,7 @@ impl IteratorResolver {
         name: Name,
         qtype: RecordType,
         context: WalkContext<'_>,
-    ) -> Result<Message, ResolveError> {
+    ) -> Result<WalkAnswer, ResolveError> {
         // A matching forward zone normally short-circuits iteration. Subqueries
         // inherit this path, so a CNAME target inside the zone is forwarded
         // too. A `forward_fallback` zone is only used when iteration fails.
@@ -547,7 +597,7 @@ impl IteratorResolver {
         context: WalkContext<'_>,
         start: Option<(Name, Vec<ForwardServer>)>,
         no_cache: bool,
-    ) -> Result<Message, ResolveError> {
+    ) -> Result<WalkAnswer, ResolveError> {
         // Reuse the closest cached delegation instead of walking from the
         // root again for every query. DS records live in the parent zone, so
         // a DS query must start from the delegation above the name rather than
@@ -599,7 +649,12 @@ impl IteratorResolver {
                 .minimize(&name, qtype, &mut servers, &mut zone, &context)
                 .await?
             {
-                Minimized::Answer(message) => return Ok(message),
+                Minimized::Answer(message) => {
+                    let records = message.answers.clone();
+                    let mut answer = WalkAnswer::new(message);
+                    answer.note(&records, Some(&zone));
+                    return Ok(answer);
+                }
                 Minimized::Continue => {}
             }
         }
@@ -615,19 +670,23 @@ impl IteratorResolver {
 
             if response.metadata.response_code == ResponseCode::NXDomain {
                 debug!(qname = %name, "authoritative NXDOMAIN");
-                return Ok(self.negative_message(name, qtype, response));
+                return Ok(WalkAnswer::new(
+                    self.negative_message(name, qtype, response),
+                ));
             }
             if scrub::is_negative(&response) {
                 debug!(qname = %name, "authoritative NODATA");
-                return Ok(self.negative_message(name, qtype, response));
+                return Ok(WalkAnswer::new(
+                    self.negative_message(name, qtype, response),
+                ));
             }
 
             if let Some(answer) = self
-                .answer_chain(&name, qtype, &response, context.clone())
+                .answer_chain(&name, qtype, &response, context.clone(), Some(&zone))
                 .await?
             {
                 if !no_cache {
-                    self.cache_answers(&answer);
+                    self.cache_answers(&answer.message);
                 }
                 return Ok(answer);
             }
@@ -797,18 +856,24 @@ impl IteratorResolver {
     }
 
     /// Walk any CNAME chain, resolving the target when it is out of message.
+    ///
+    /// `zone` is the authoritative zone that answered `response`, when known.
+    /// The owner-to-zone map it produces lets validation start at a real zone
+    /// apex instead of probing DS at an alias.
     async fn answer_chain(
         &self,
         qname: &Name,
         qtype: RecordType,
         response: &Message,
         context: WalkContext<'_>,
-    ) -> Result<Option<Message>, ResolveError> {
+        zone: Option<&Name>,
+    ) -> Result<Option<WalkAnswer>, ResolveError> {
         if response.answers.is_empty() {
             return Ok(None);
         }
 
         let mut chain: Vec<Record> = Vec::new();
+        let mut origins: HashMap<String, Name> = HashMap::new();
         let mut current = qname.clone();
         let mut seen = HashSet::new();
 
@@ -819,15 +884,19 @@ impl IteratorResolver {
 
             let direct = select_rrset(&response.answers, &current, qtype);
             if !direct.is_empty() {
+                note_origins(&mut origins, &direct, zone);
                 chain.extend(direct);
-                return Ok(Some(self.build_response(
-                    qname,
-                    qtype,
-                    ResponseCode::NoError,
-                    chain,
-                    dnssec_authorities(response),
-                    Vec::new(),
-                )));
+                return Ok(Some(WalkAnswer {
+                    message: self.build_response(
+                        qname,
+                        qtype,
+                        ResponseCode::NoError,
+                        chain,
+                        dnssec_authorities(response),
+                        Vec::new(),
+                    ),
+                    origins,
+                }));
             }
 
             let Some(target) = scrub::cname_target(response, &current) else {
@@ -840,20 +909,27 @@ impl IteratorResolver {
                     depth: context.depth + 1,
                     ..context.clone()
                 };
-                let sub = self
+                let WalkAnswer {
+                    message: sub,
+                    origins: sub_origins,
+                } = self
                     .resolve_inner(current.clone(), qtype, sub_context)
                     .await?;
                 let authorities = dnssec_authorities(&sub);
                 let rcode = sub.metadata.response_code;
                 chain.extend(sub.answers);
-                return Ok(Some(self.build_response(
-                    qname,
-                    qtype,
-                    rcode,
-                    chain,
-                    authorities,
-                    Vec::new(),
-                )));
+                origins.extend(sub_origins);
+                return Ok(Some(WalkAnswer {
+                    message: self.build_response(
+                        qname,
+                        qtype,
+                        rcode,
+                        chain,
+                        authorities,
+                        Vec::new(),
+                    ),
+                    origins,
+                }));
             };
 
             if let Some(record) = response
@@ -861,8 +937,11 @@ impl IteratorResolver {
                 .iter()
                 .find(|record| record.record_type() == RecordType::CNAME && record.name == current)
             {
+                note_origins(&mut origins, std::slice::from_ref(record), zone);
                 chain.push(record.clone());
-                chain.extend(rrsigs_for(&response.answers, &current, RecordType::CNAME));
+                let signatures = rrsigs_for(&response.answers, &current, RecordType::CNAME);
+                note_origins(&mut origins, &signatures, zone);
+                chain.extend(signatures);
             }
             current = target;
         }
@@ -886,7 +965,7 @@ impl IteratorResolver {
         qtype: RecordType,
         forward: &ForwardZone,
         context: &WalkContext<'_>,
-    ) -> Result<Message, ResolveError> {
+    ) -> Result<WalkAnswer, ResolveError> {
         let context = WalkContext {
             recursion_desired: true,
             // Subqueries for this answer already go to the forwarders; the
@@ -933,14 +1012,18 @@ impl IteratorResolver {
             if response.metadata.response_code == ResponseCode::NXDomain
                 || scrub::is_negative(&response)
             {
-                return Ok(self.negative_message(name.clone(), qtype, response));
+                return Ok(WalkAnswer::new(self.negative_message(
+                    name.clone(),
+                    qtype,
+                    response,
+                )));
             }
 
             if let Some(answer) = self
-                .answer_chain(name, qtype, &response, context.clone())
+                .answer_chain(name, qtype, &response, context.clone(), None)
                 .await?
             {
-                self.cache_answers(&answer);
+                self.cache_answers(&answer.message);
                 return Ok(answer);
             }
 
@@ -1732,13 +1815,13 @@ impl IteratorResolver {
                     checking_disabled: context.checking_disabled,
                     forward_only: false,
                 };
-                let Ok(message) = self
+                let Ok(answer) = self
                     .resolve_inner(nameserver.clone(), qtype, sub_context)
                     .await
                 else {
                     continue;
                 };
-                let found = scrub::addresses(&message.answers);
+                let found = scrub::addresses(&answer.message.answers);
                 let had_found = !found.is_empty();
                 addresses.extend(found);
                 if had_found {

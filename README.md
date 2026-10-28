@@ -103,6 +103,31 @@ Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
 - Extended DNS Errors in responses for bogus and insecure validation outcomes.
 - Built-in root trust anchors, extra anchors from configuration or files, and
   RFC 5011 automatic trust-anchor updates.
+- Per-domain exclusions for subtrees whose upstream DNSSEC cannot be
+  validated, without disabling validation for other names.
+
+A domain that fails validation because of an upstream problem can be excluded
+instead of enabling permissive mode globally:
+
+```toml
+[server]
+domain_insecure = ["broken.example"]
+```
+
+The domain and every name below it are treated as insecure. Validation
+continues for all other names, and an explicit trust anchor at or below the
+excluded domain overrides the exclusion. In `unbound.conf`, the equivalent is
+`domain-insecure: "broken.example"`.
+
+The entry is a static negative trust anchor in the sense of RFC 7646. dns-rs
+never creates one automatically and does not expire it; an exclusion stays in
+effect until it is removed from the configuration. Use it only for a domain
+whose own DNSSEC is broken or deliberately unsigned, not to silence a
+validator bug. For example, an alias in an unsigned zone that points into a
+signed CDN zone is insecure by design and resolves without any exclusion.
+
+`val_permissive_mode` is a different, global escape hatch: it still runs
+validation but returns bogus data with `AD=0` instead of `SERVFAIL`.
 
 **Caching**
 
@@ -261,9 +286,9 @@ Supported `unbound.conf` blocks:
 - `server:` — interfaces, ports, TLS/HTTPS listeners, verbosity, threads,
   daemonize, user/chroot/directory, log file, PID file, syslog, IPv4/IPv6,
   UDP/TCP, outgoing interfaces, access control, access-control-view, local
-  zones and data, hardening, DNSSEC validation, trust anchors, QNAME
-  minimisation, 0x20, EDNS sizes, TTL bounds, prefetch, serve-expired, rate
-  limiting, and TCP connection limits.
+  zones and data, hardening, DNSSEC validation and per-domain exclusions, trust
+  anchors, QNAME minimisation, 0x20, EDNS sizes, TTL bounds, prefetch,
+  serve-expired, rate limiting, and TCP connection limits.
 - `forward-zone:` — name, `forward-addr` (plain, DoT, or DoH targets),
   `forward-first`, `forward-fallback`, and `forward-tls-upstream`.
   `forward-host` is parsed but not implemented.

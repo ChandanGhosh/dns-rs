@@ -92,6 +92,21 @@ impl Config {
                 "max-concurrent-queries-per-client must be at least 1".to_owned(),
             ));
         }
+        let mut insecure_domains = BTreeSet::new();
+        for domain in &server.domain_insecure {
+            let name = absolute_name(domain)?;
+            if name.is_root() {
+                return Err(ConfigError::Validation(
+                    "domain-insecure must name a non-root domain; disable dnssec-validation instead"
+                        .to_owned(),
+                ));
+            }
+            if !insecure_domains.insert(name.to_ascii().to_ascii_lowercase()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate domain-insecure for {domain:?}"
+                )));
+            }
+        }
         match (&server.tls_service_key, &server.tls_service_pem) {
             (Some(_), Some(_)) => {}
             (None, None) => {}
@@ -254,6 +269,13 @@ pub struct ServerConfig {
     pub harden_dnssec_stripped: bool,
     /// Return bogus data instead of SERVFAIL (validation still runs).
     pub val_permissive_mode: bool,
+    /// Domains whose DNSSEC chain of trust is ignored (`domain-insecure`).
+    ///
+    /// Each entry is a static negative trust anchor (RFC 7646): the domain and
+    /// everything below it are marked insecure. A trust anchor at or below the
+    /// entry overrides the exclusion and re-enables validation for that
+    /// subtree.
+    pub domain_insecure: Vec<String>,
     /// Strip unvalidated additional-section data from responses.
     pub val_clean_additional: bool,
     /// Inline trust anchors in zone-file syntax (`name DS ...` or `name DNSKEY ...`).
@@ -346,6 +368,7 @@ impl Default for ServerConfig {
             dnssec_validation: true,
             harden_dnssec_stripped: true,
             val_permissive_mode: false,
+            domain_insecure: Vec::new(),
             val_clean_additional: true,
             trust_anchor: Vec::new(),
             trust_anchor_file: None,
@@ -376,6 +399,31 @@ impl Default for ServerConfig {
             tls_use_system_ca: true,
         }
     }
+}
+
+impl ServerConfig {
+    /// Domains excluded from DNSSEC validation, in absolute form.
+    ///
+    /// The values are validated by [`Config::validate`]; invalid entries are
+    /// skipped here so the accessor is also safe for hand-built configs.
+    pub fn insecure_domains(&self) -> Vec<Name> {
+        self.domain_insecure
+            .iter()
+            .filter_map(|domain| absolute_name(domain).ok())
+            .collect()
+    }
+}
+
+/// Parse a configured domain name, treating an omitted trailing dot as the
+/// root label.
+fn absolute_name(value: &str) -> Result<Name, ConfigError> {
+    let candidate = if value.ends_with('.') {
+        value.to_owned()
+    } else {
+        format!("{value}.")
+    };
+    Name::from_ascii(&candidate)
+        .map_err(|error| ConfigError::Validation(format!("invalid domain name {value:?}: {error}")))
 }
 
 fn default_access_control() -> Vec<AccessControl> {
@@ -1367,5 +1415,52 @@ mod tests {
             .validate()
             .expect_err("the two fallback directions are mutually exclusive");
         assert!(error.to_string().contains("forward-fallback"));
+    }
+
+    #[test]
+    fn domain_insecure_names_are_made_absolute() {
+        let config = Config {
+            server: super::ServerConfig {
+                domain_insecure: vec!["docker.com".to_owned(), "internal.example.".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        config.validate().expect("valid exclusions");
+
+        let names = config.server.insecure_domains();
+        assert_eq!(
+            names,
+            vec![
+                super::Name::from_ascii("docker.com.").expect("name"),
+                super::Name::from_ascii("internal.example.").expect("name"),
+            ]
+        );
+    }
+
+    #[test]
+    fn domain_insecure_rejects_root() {
+        let config = Config {
+            server: super::ServerConfig {
+                domain_insecure: vec![".".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("root must fail");
+        assert!(error.to_string().contains("non-root"));
+    }
+
+    #[test]
+    fn domain_insecure_rejects_duplicates() {
+        let config = Config {
+            server: super::ServerConfig {
+                domain_insecure: vec!["docker.com".to_owned(), "DOCKER.COM.".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("duplicate must fail");
+        assert!(error.to_string().contains("duplicate"));
     }
 }

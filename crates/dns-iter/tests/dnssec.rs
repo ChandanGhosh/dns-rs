@@ -7,12 +7,13 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dns_dnssec::{AutoTrustAnchor, Security, TrustAnchor, TrustStore};
 use dns_iter::{IteratorConfig, IteratorResolver, ResolveOptions};
 use dns_proto::{
-    Algorithm, DNSClass, DNSKEY, DNSSECRData, DS, DigestType, Message, MessageType, NS, NSEC,
-    NSEC3, Name, Nsec3HashAlgorithm, OpCode, PublicKeyBuf, RData, RRSIG, Record, RecordType,
+    Algorithm, CNAME, DNSClass, DNSKEY, DNSSECRData, DS, DigestType, Message, MessageType, NS,
+    NSEC, NSEC3, Name, Nsec3HashAlgorithm, OpCode, PublicKeyBuf, RData, RRSIG, Record, RecordType,
     ResponseCode, SOA, SerialNumber, SigInput, TBS, decode, encode,
 };
 use ring::rand::SystemRandom;
@@ -610,6 +611,142 @@ async fn unsigned_delegation_is_insecure() {
     assert_eq!(resolved.message.answers.len(), 1);
 }
 
+/// A DS query for an alias is answered with the alias's CNAME, not a DS denial
+/// from the parent zone. The validator must follow the alias up to the zone
+/// that owns it; otherwise the target's NSEC is checked against the alias name
+/// and a legitimate unsigned CNAME is reported as bogus.
+#[tokio::test]
+async fn cname_in_unsigned_zone_is_insecure() {
+    let (root, com, example, now) = build_hierarchy();
+    let alias_ds_probe = Arc::new(AtomicBool::new(false));
+    let server = {
+        let alias_ds_probe = Arc::clone(&alias_ds_probe);
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let example_dnskey = signed(
+            vec![example.record("example.com.")],
+            &example,
+            "example.com.",
+            now,
+        );
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let com_ds_example = ds_record(&example, "example.com.", &com, now);
+        let unsigned_ds_denial = nsec(
+            "unsigned.com.",
+            "zzz.com.",
+            &[RecordType::NS, RecordType::RRSIG, RecordType::NSEC],
+            &com,
+            "com.",
+            now,
+        );
+        let www = signed(
+            vec![Record::from_rdata(
+                n("www.example.com."),
+                300,
+                RData::A(Ipv4Addr::new(192, 0, 2, 2).into()),
+            )],
+            &example,
+            "example.com.",
+            now,
+        );
+        let alias = Record::from_rdata(
+            n("alias.unsigned.com."),
+            60,
+            RData::CNAME(CNAME(n("www.example.com."))),
+        );
+        let target_soa = signed(vec![soa("example.com.")], &example, "example.com.", now);
+        let target_nsec = nsec(
+            "www.example.com.",
+            "zzz.example.com.",
+            &[RecordType::A, RecordType::RRSIG, RecordType::NSEC],
+            &example,
+            "example.com.",
+            now,
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("example.com.", RecordType::DNSKEY) => answer(query, example_dnskey.clone()),
+                ("example.com.", RecordType::DS) => answer(query, com_ds_example.clone()),
+                ("example.com.", RecordType::NS) => {
+                    referral(query, "example.com.", "ns.example.com.")
+                }
+                ("www.example.com.", RecordType::A) => answer(query, www.clone()),
+                ("www.example.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    for record in target_soa.clone() {
+                        message.add_authority(record);
+                    }
+                    for record in target_nsec.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("unsigned.com.", RecordType::NS) => {
+                    referral(query, "unsigned.com.", "ns.unsigned.com.")
+                }
+                ("unsigned.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in unsigned_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("alias.unsigned.com.", RecordType::A) => answer(query, vec![alias.clone()]),
+                ("alias.unsigned.com.", RecordType::DS) => {
+                    alias_ds_probe.store(true, Ordering::SeqCst);
+                    // Upstream followed the CNAME and returned a denial from
+                    // the target's zone. The target's NSEC does not cover the
+                    // alias name, so validating it against the alias is bogus.
+                    let mut message = answer(query, vec![alias.clone()]);
+                    for record in target_soa.clone() {
+                        message.add_authority(record);
+                    }
+                    for record in target_nsec.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "alias.unsigned.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution succeeds");
+
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+    assert!(
+        !alias_ds_probe.load(Ordering::SeqCst),
+        "the validator must use the authoritative zone from the walk, not probe DS at the alias"
+    );
+    assert!(
+        resolved
+            .message
+            .answers
+            .iter()
+            .any(|record| record.record_type() == RecordType::A)
+    );
+}
+
 /// An unsigned delegation whose own RRsets are queried must be insecure, not
 /// bogus. The DS denial is signed by the parent, so the validator must inspect
 /// the NSEC type bitmap instead of only looking for RRSIGs.
@@ -756,8 +893,9 @@ async fn nsec3_opt_out_delegation_apex_is_insecure() {
     assert_eq!(resolved.message.answers.len(), 1);
 }
 
-#[tokio::test]
-async fn stripped_signature_in_signed_zone_is_bogus() {
+/// A signed `example.com` zone holding an unsigned A record, with the DS and
+/// DNSKEY records needed to prove that the zone is signed.
+async fn stripped_signature_fixture() -> (SocketAddr, SigningKey, SigningKey) {
     let (root, com, example, now) = build_hierarchy();
     let server = {
         let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
@@ -814,9 +952,84 @@ async fn stripped_signature_in_signed_zone_is_bogus() {
         })
         .await
     };
+    (server.addr, root, example)
+}
 
-    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
-        .expect("resolver");
+#[tokio::test]
+async fn stripped_signature_in_signed_zone_is_bogus() {
+    let (addr, root, _example) = stripped_signature_fixture().await;
+    let resolver =
+        IteratorResolver::with_config(signed_zone_config(addr, &root), None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "stripped.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert!(matches!(
+        resolved.security,
+        Security::Bogus(dns_dnssec::BogusReason::MissingSignature)
+    ));
+}
+
+/// A configured exclusion makes the whole subtree insecure without weakening
+/// validation for other zones.
+#[tokio::test]
+async fn domain_insecure_skips_validation_for_excluded_subtree() {
+    let (addr, root, _example) = stripped_signature_fixture().await;
+    let mut config = signed_zone_config(addr, &root);
+    config.domain_insecure = vec![n("example.com.")];
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "stripped.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+    assert_eq!(resolved.message.answers.len(), 1);
+}
+
+/// `domain-insecure` applies to names below the entry even when the entry is
+/// not a zone cut; the enclosing zone stays signed.
+#[tokio::test]
+async fn domain_insecure_applies_below_a_non_zone_name() {
+    let (addr, root, _example) = stripped_signature_fixture().await;
+    let mut config = signed_zone_config(addr, &root);
+    config.domain_insecure = vec![n("stripped.example.com.")];
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "stripped.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
+/// An explicit trust anchor at or below an excluded domain overrides the
+/// exclusion, matching Unbound's `domain-insecure` behaviour.
+#[tokio::test]
+async fn trust_anchor_overrides_domain_insecure() {
+    let (addr, root, example) = stripped_signature_fixture().await;
+    let mut config = signed_zone_config(addr, &root);
+    config.domain_insecure = vec![n("example.com.")];
+    config.trust_store.insert(TrustAnchor::from_keys(
+        n("example.com."),
+        vec![example.record("example.com.")],
+    ));
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     let resolved = resolver
         .resolve_with_options(
             "stripped.example.com.",
