@@ -118,13 +118,11 @@ jobs:
         steps:
             - uses: actions/checkout@v7
             - uses: dtolnay/rust-toolchain@nightly
-              with:
-                  targets: x86_64-unknown-linux-musl
             - uses: Swatinem/rust-cache@v2
               with:
                   workspaces: fuzz -> target
             - uses: taiki-e/install-action@v2
               with:
                   tool: cargo-fuzz
-            - run: cargo fuzz run decode_message -- -runs=20000 -max_total_time=60
+            - run: cargo fuzz run decode_message --target x86_64-unknown-linux-gnu -- -runs=20000 -max_total_time=60
               working-directory: fuzz
