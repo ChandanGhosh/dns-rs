@@ -127,6 +127,8 @@ tls_use_system_ca = true
 # Forward zones. The most specific matching zone wins; name = "." forwards
 # everything. Forwarders may be plain UDP (with TCP fallback), DoT with
 # tls_upstream = true and "addr@853#auth-name", or DoH with an https:// URL.
+# An auth name without "@port" implies port 853. Without an auth name the
+# certificate chain is verified but any name is accepted, matching Unbound.
 # Encrypted forwarders skip 0x20 and DNS cookies.
 #
 # forward_first = true forwards first and falls back to iteration.

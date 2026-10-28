@@ -954,15 +954,12 @@ fn build_servers(
         } else {
             ForwardTransport::Plain
         };
-        let tls_name = target
-            .tls_name
-            .clone()
-            .or_else(|| (transport == ForwardTransport::Tls).then(|| addr.ip().to_string()));
-        if transport == ForwardTransport::Tls && target.tls_name.is_none() {
+        let tls_name = target.tls_name.clone();
+        if transport == ForwardTransport::Tls && tls_name.is_none() {
             warn!(
                 %zone,
                 %addr,
-                "TLS upstream without #auth-name; verifying against the IP address"
+                "TLS upstream without #auth-name; accepting any certificate that chains to a trusted CA"
             );
         }
         servers.push(ForwardServer {

@@ -12,6 +12,11 @@ use crate::ConfigError;
 
 /// Default DNS service port.
 pub const DEFAULT_PORT: u16 = 53;
+/// Default DNS-over-TLS port.
+///
+/// Unbound uses this port for a `forward-addr` or `stub-addr` that has an
+/// `#auth-name` but no explicit `@port`.
+pub const DEFAULT_TLS_PORT: u16 = 853;
 /// Default `unbound-control` compatible port.
 pub const DEFAULT_CONTROL_PORT: u16 = 8953;
 
@@ -392,7 +397,7 @@ impl Default for ServerConfig {
             incoming_num_tcp: 10,
             tls_service_key: None,
             tls_service_pem: None,
-            tls_port: 853,
+            tls_port: DEFAULT_TLS_PORT,
             https_port: 443,
             http_endpoint: "/dns-query".to_owned(),
             tls_cert_bundle: None,
@@ -1224,6 +1229,9 @@ impl FromStr for ForwardTarget {
 
         let (host, port) = match address.rsplit_once('@') {
             Some((host, port)) => (host, parse_port(port)?),
+            // Unbound defaults to the TLS port when an auth name is given
+            // without an explicit port.
+            None if tls_name.is_some() => (address, DEFAULT_TLS_PORT),
             None => (address, DEFAULT_PORT),
         };
         let ip = IpAddr::from_str(host)
@@ -1342,6 +1350,30 @@ mod tests {
             .expect("valid target");
         assert_eq!(target.addr.expect("address").port(), 853);
         assert_eq!(target.tls_name.as_deref(), Some("cloudflare-dns.com"));
+    }
+
+    #[test]
+    fn auth_name_without_port_defaults_to_the_tls_port() {
+        let target = "192.0.2.1#cloudflare-dns.com"
+            .parse::<ForwardTarget>()
+            .expect("valid target");
+        assert_eq!(target.addr.expect("address").port(), 853);
+        assert_eq!(target.tls_name.as_deref(), Some("cloudflare-dns.com"));
+    }
+
+    #[test]
+    fn explicit_port_wins_over_the_auth_name_default() {
+        let target = "192.0.2.1@5353#resolver.example"
+            .parse::<ForwardTarget>()
+            .expect("valid target");
+        assert_eq!(target.addr.expect("address").port(), 5353);
+    }
+
+    #[test]
+    fn target_without_auth_name_keeps_the_plain_dns_port() {
+        let target = "192.0.2.1".parse::<ForwardTarget>().expect("valid target");
+        assert_eq!(target.addr.expect("address").port(), 53);
+        assert!(target.tls_name.is_none());
     }
 
     #[test]

@@ -290,8 +290,11 @@ Supported `unbound.conf` blocks:
   anchors, QNAME minimisation, 0x20, EDNS sizes, TTL bounds, prefetch,
   serve-expired, rate limiting, and TCP connection limits.
 - `forward-zone:` — name, `forward-addr` (plain, DoT, or DoH targets),
-  `forward-first`, `forward-fallback`, and `forward-tls-upstream`.
-  `forward-host` is parsed but not implemented.
+  `forward-first`, `forward-fallback`, and `forward-tls-upstream` (Unbound
+  alias `forward-ssl-upstream`). A DoT `#auth-name` without `@port` implies
+  port 853; without an auth name the certificate chain is verified but any
+  name is accepted, matching Unbound. `forward-host` is parsed but not
+  implemented.
 - `stub-zone:` — name, `stub-addr`, `stub-host`, `stub-prime`, `stub-first`,
   `stub-no-cache`, and `stub-tls-upstream`.
 - `auth-zone:` — name, zonefile, primaries, URL, fallback, and

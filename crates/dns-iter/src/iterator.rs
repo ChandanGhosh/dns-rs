@@ -101,6 +101,10 @@ pub struct ForwardServer {
     /// Transport to use.
     pub transport: ForwardTransport,
     /// TLS authentication name for DoT, or HTTP authority for DoH.
+    ///
+    /// For DoT, `None` verifies the certificate chain but accepts any name in
+    /// the certificate, matching Unbound's behaviour when `#auth-name` is
+    /// omitted.
     pub tls_name: Option<String>,
     /// HTTP path for DoH.
     pub path: Option<String>,
@@ -1075,12 +1079,8 @@ impl IteratorResolver {
                     let client = self.tls.as_ref().ok_or_else(|| {
                         ResolveError::Io("TLS client is not configured".to_owned())
                     })?;
-                    let tls_name = server
-                        .tls_name
-                        .clone()
-                        .unwrap_or_else(|| server.addr.ip().to_string());
                     client
-                        .send_recv(server.addr, &tls_name, &wire, timeout)
+                        .send_recv(server.addr, server.tls_name.as_deref(), &wire, timeout)
                         .await
                         .map_err(|error| ResolveError::Io(error.to_string()))?
                 }

@@ -473,7 +473,7 @@ impl Parser {
                 self.config.forward_zones[zone_index].forward_fallback =
                     parse_bool(path, line, key, value)?;
             }
-            "forward-tls-upstream" => {
+            "forward-tls-upstream" | "forward-ssl-upstream" => {
                 self.config.forward_zones[zone_index].tls_upstream =
                     parse_bool(path, line, key, value)?;
             }
@@ -1002,6 +1002,35 @@ remote-control:
         assert!(config.remote_control.enabled);
         assert_eq!(config.remote_control.port, 8953);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_forward_ssl_upstream_alias_and_auth_name_port_default() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("forward.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+
+forward-zone:
+    name: "."
+    forward-ssl-upstream: yes
+    forward-addr: 192.0.2.1#resolver.example
+"#,
+        )
+        .expect("write config");
+
+        let loaded = parse_unbound_file(&path).expect("parse config");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let zone = &loaded.config.forward_zones[0];
+        assert!(zone.tls_upstream);
+        assert_eq!(zone.forward_addrs[0].port(), 853);
+        assert_eq!(
+            zone.forward_addrs[0].tls_name.as_deref(),
+            Some("resolver.example")
+        );
     }
 
     #[test]

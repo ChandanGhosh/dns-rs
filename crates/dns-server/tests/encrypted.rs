@@ -34,6 +34,14 @@ impl TestServer {
     }
 
     async fn start_with_incoming(incoming_num_tcp: usize) -> Self {
+        Self::start_with_names(
+            incoming_num_tcp,
+            vec!["localhost".to_owned(), "127.0.0.1".to_owned()],
+        )
+        .await
+    }
+
+    async fn start_with_names(incoming_num_tcp: usize, names: Vec<String>) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "dns-rs-encrypted-{}-{}",
             std::process::id(),
@@ -43,11 +51,8 @@ impl TestServer {
         let key_path = directory.join("key.pem");
         let cert_path = directory.join("cert.pem");
 
-        let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_owned(),
-            "127.0.0.1".to_owned(),
-        ])
-        .expect("generate certificate");
+        let rcgen::CertifiedKey { cert, key_pair } =
+            rcgen::generate_simple_self_signed(names).expect("generate certificate");
         std::fs::write(&cert_path, cert.pem()).expect("write certificate");
         std::fs::write(&key_path, key_pair.serialize_pem()).expect("write key");
 
@@ -108,7 +113,7 @@ async fn downstream_dot_answers_and_reuses_connections() {
 
     for _ in 0..2 {
         let response = client
-            .send_recv(server.dot, "localhost", &wire, Duration::from_secs(5))
+            .send_recv(server.dot, Some("localhost"), &wire, Duration::from_secs(5))
             .await
             .expect("DoT response");
         let message = decode(&response).expect("decode response");
@@ -126,7 +131,7 @@ async fn downstream_dot_rejects_the_wrong_server_name() {
     let result = client
         .send_recv(
             server.dot,
-            "wrong.example",
+            Some("wrong.example"),
             &query("localhost.", RecordType::A),
             Duration::from_secs(3),
         )
@@ -257,7 +262,13 @@ async fn downstream_doh_answers_and_reuses_the_http2_connection() {
 #[tokio::test]
 async fn upstream_dot_forwarder_resolves() {
     let server = TestServer::start().await;
-    let config = forward_config(server.dot, ForwardTransport::Tls, None, &server.cert);
+    let config = forward_config(
+        server.dot,
+        ForwardTransport::Tls,
+        Some("localhost"),
+        None,
+        &server.cert,
+    );
     let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     let message = resolver
         .resolve("localhost.", RecordType::A)
@@ -270,11 +281,41 @@ async fn upstream_dot_forwarder_resolves() {
 }
 
 #[tokio::test]
+async fn upstream_dot_forwarder_without_auth_name_ignores_the_certificate_name() {
+    let server = TestServer::start_with_names(10, vec!["resolver.example".to_owned()]).await;
+    let config = forward_config(server.dot, ForwardTransport::Tls, None, None, &server.cert);
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    let message = resolver
+        .resolve("localhost.", RecordType::A)
+        .await
+        .expect("forwarded DoT resolution without an auth name");
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+}
+
+#[tokio::test]
+async fn upstream_dot_forwarder_rejects_a_mismatched_auth_name() {
+    let server = TestServer::start_with_names(10, vec!["resolver.example".to_owned()]).await;
+    let config = forward_config(
+        server.dot,
+        ForwardTransport::Tls,
+        Some("localhost"),
+        None,
+        &server.cert,
+    );
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    assert!(
+        resolver.resolve("localhost.", RecordType::A).await.is_err(),
+        "certificate name verification must still apply when #auth-name is set"
+    );
+}
+
+#[tokio::test]
 async fn upstream_doh_forwarder_resolves() {
     let server = TestServer::start().await;
     let config = forward_config(
         server.doh,
         ForwardTransport::Https,
+        Some("localhost"),
         Some("/dns-query"),
         &server.cert,
     );
@@ -292,6 +333,7 @@ async fn upstream_doh_forwarder_resolves() {
 fn forward_config(
     addr: SocketAddr,
     transport: ForwardTransport,
+    tls_name: Option<&str>,
     path: Option<&str>,
     cert: &Path,
 ) -> IteratorConfig {
@@ -303,7 +345,7 @@ fn forward_config(
             servers: vec![ForwardServer {
                 addr,
                 transport,
-                tls_name: Some("localhost".to_owned()),
+                tls_name: tls_name.map(str::to_owned),
                 path: path.map(str::to_owned),
             }],
             forward_first: false,
