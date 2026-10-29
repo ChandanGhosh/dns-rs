@@ -10,7 +10,9 @@ permissions:
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    # Do not cancel a main-branch run while it is publishing. Pull-request
+    # runs are still superseded as soon as a newer commit arrives.
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
     CARGO_TERM_COLOR: always
@@ -54,6 +56,7 @@ jobs:
     container:
         name: Container
         runs-on: ubuntu-latest
+        timeout-minutes: 30
         steps:
             - uses: actions/checkout@v7
             - uses: docker/setup-buildx-action@v4
@@ -63,8 +66,8 @@ jobs:
                   context: .
                   load: true
                   tags: dns-rs:ci
-                  cache-from: type=gha
-                  cache-to: type=gha,mode=max
+                  cache-from: type=gha,scope=container
+                  cache-to: type=gha,mode=max,scope=container
             - name: Smoke test
               env:
                   IMAGE: dns-rs:ci
@@ -72,6 +75,29 @@ jobs:
                   PORT: "15353"
                   SKIP_BUILD: "1"
               run: scripts/container-smoke.sh
+            - uses: dtolnay/rust-toolchain@stable
+            - name: Load stats (single and two workers)
+              env:
+                  BENCH_SERVER_IMAGE: dns-rs:ci
+                  BENCH_NAMES: "4000"
+                  BENCH_CONCURRENCY: "8"
+                  BENCH_WARMUP: "5"
+                  BENCH_DURATION: "15"
+                  SKIP_BUILD: "1"
+              run: |
+                  set -o pipefail
+                  log="${RUNNER_TEMP}/container-load.txt"
+                  scripts/bench-loopback.sh 1 2 | tee "$log"
+                  {
+                      echo "### Container load stats"
+                      echo ""
+                      echo "Target: one worker >= 50,000 qps and p99 <= 1 ms. These are"
+                      echo "informational only; the load step does not fail on a miss."
+                      echo ""
+                      echo '```'
+                      cat "$log"
+                      echo '```'
+                  } >> "$GITHUB_STEP_SUMMARY"
             - name: Image size gate
               run: |
                   size="$(docker image inspect --format '{{.Size}}' dns-rs:ci)"
@@ -126,3 +152,56 @@ jobs:
                   tool: cargo-fuzz
             - run: cargo fuzz run decode_message --target x86_64-unknown-linux-gnu -- -runs=20000 -max_total_time=60
               working-directory: fuzz
+
+    publish:
+        name: Publish container
+        needs: [fmt, clippy, test, container, deny, audit, fuzz]
+        if: >
+            github.event_name == 'push' &&
+            github.ref == 'refs/heads/main' &&
+            github.repository == 'ChandanGhosh/dns-rs'
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        concurrency:
+            group: publish-main
+            cancel-in-progress: false
+        steps:
+            - uses: actions/checkout@v7
+            - name: Check for a newer main commit
+              id: latest
+              run: |
+                  git fetch --no-tags origin main
+                  if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+                      echo "::notice::Skipping publish; a newer main commit exists."
+                      echo "skip=true" >> "$GITHUB_OUTPUT"
+                  fi
+            - name: Set image metadata
+              id: meta
+              if: steps.latest.outputs.skip != 'true'
+              run: |
+                  echo "tag=$(date -u +%d%m%Y)" >> "$GITHUB_OUTPUT"
+                  echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+            - uses: docker/setup-buildx-action@v4
+              if: steps.latest.outputs.skip != 'true'
+            - uses: docker/login-action@v3
+              if: steps.latest.outputs.skip != 'true'
+              with:
+                  username: ${{ secrets.DOCKER_USERNAME }}
+                  password: ${{ secrets.DOCKER_TOKEN }}
+            - name: Build and push multi-arch image
+              if: steps.latest.outputs.skip != 'true'
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: docker.io/chandanghosh/dns-rs:${{ steps.meta.outputs.tag }}
+                  build-args: |
+                      VERSION=${{ steps.meta.outputs.tag }}
+                      VCS_REF=${{ github.sha }}
+                      BUILD_DATE=${{ steps.meta.outputs.date }}
+                      SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+                  sbom: true
+                  provenance: mode=max
+                  cache-from: type=gha,scope=container
+                  cache-to: type=gha,mode=max,scope=container

@@ -183,23 +183,26 @@ validation but returns bogus data with `AD=0` instead of `SERVFAIL`.
 
 Loopback UDP benchmark of the release binary on an Intel Core i7-9750H
 (6 cores / 12 threads, Linux 7.3, rustc 1.99.1). The resolver was pinned to
-four CPUs and the load generator to the remaining eight. Each run sent 8,000
-distinct names against a warm message cache, with 64 queries in flight and
+four CPUs and the load generator to the remaining eight. Each run sent 4,000
+distinct names against a warm message cache, with 8 queries in flight and
 EDNS(0); `bench.test.` was answered by a local stub authority with
 3,600-second TTLs, so these are steady-state cache hits rather than cold
-iteration.
+iteration. Four thousand names stays below the 8,192-entry message cache;
+8,000 names start evicting entries and depress the result.
 
 | `num_threads` | p50 | p75 | p90 | p95 | p99 | Throughput | Idle RSS | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 0.81 ms | 0.88 ms | 0.95 ms | 0.98 ms | 1.06 ms | 52,400 qps | 8.1 MiB | 23.9 MiB |
-| 2 | 0.36 ms | 0.43 ms | 0.49 ms | 0.53 ms | 0.60 ms | 115,700 qps | 8.2 MiB | 25.0 MiB |
-| 4 | 0.30 ms | 0.35 ms | 0.41 ms | 0.45 ms | 0.53 ms | 139,300 qps | 8.2 MiB | 26.1 MiB |
+| 1 | 0.071 ms | 0.084 ms | 0.093 ms | 0.100 ms | 0.125 ms | 72,504 qps | 16.0 MiB | 22.1 MiB |
+| 2 | 0.046 ms | 0.054 ms | 0.063 ms | 0.069 ms | 0.085 ms | 105,464 qps | 18.0 MiB | 24.2 MiB |
+| 4 | 0.033 ms | 0.039 ms | 0.047 ms | 0.052 ms | 0.072 ms | 127,785 qps | 18.1 MiB | 28.3 MiB |
 
-Values are from the best of three 10-second runs after a 5-second warm-up.
-Latency is the client-side send-to-response RTT at 64 queries in flight. The
-host was shared with desktop workloads, so tail latency is indicative rather
-than a strict upper bound. RSS is `VmRSS` at idle and `VmHWM` after the
-8,000-name cache was filled; `num_threads` sets the Tokio worker count.
+Values are from a 10-second run after a 5-second warm-up. Latency is the
+client-side send-to-response RTT at 8 queries in flight. The host was shared
+with desktop workloads, so tail latency is indicative rather than a strict
+upper bound. RSS is `VmRSS` at idle and `VmHWM` after the 4,000-name cache was
+filled; `num_threads` sets the Tokio worker count. The daemon uses mimalloc,
+which raises idle RSS compared with the system allocator but keeps the
+per-query allocation path fast.
 
 ### Running it
 
@@ -231,7 +234,7 @@ stub zone pointing at the mock (the script writes this config for you):
 ```bash
 rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
 /tmp/dns-bench serve 127.0.0.1:15354 &
-/tmp/dns-bench load 127.0.0.1:15353 8000 bench.test 64 5 10
+/tmp/dns-bench load 127.0.0.1:15353 4000 bench.test 8 5 10
 ```
 
 The `load` arguments are address, distinct names, zone, concurrency, warm-up
@@ -253,9 +256,11 @@ Linux-only; on Docker Desktop, run it from a Linux VM or place the mock in the
 same network namespace.
 
 Use an image built from this checkout. Images built before the `num_threads`
-runtime fix ignore the setting, so 1, 2, and 4 workers would look identical. The
-image uses the size-optimised `dist` profile, so its numbers are not directly
-comparable to the host `release` numbers above.
+runtime fix ignore the setting, so 1, 2, and 4 workers would look identical.
+The image uses the `dist` profile (opt-level 2, fat LTO, static musl), which is
+slightly slower than the host `release` profile. The CI container job runs the
+same loopback benchmark against the built image for one and two workers and
+publishes the numbers to the workflow summary.
 
 ## Workspace
 
@@ -320,8 +325,10 @@ scripts/container-smoke.sh
 
 CI additionally runs `cargo nextest`, `cargo deny`, `cargo audit`, and a
 short `cargo fuzz` smoke test for the message decoder. The container job builds
-the image, runs the smoke test, enforces a size budget, and scans for
-vulnerabilities. The `delv` corpus-parity test in
+the image, runs the smoke test, enforces a size budget, scans for
+vulnerabilities, and records informational one- and two-worker load stats. On
+pushes to `main`, a publish job runs after all gates and pushes the date-tagged
+multi-arch image to Docker Hub. The `delv` corpus-parity test in
 `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
 
 The Unbound replay harness design is in

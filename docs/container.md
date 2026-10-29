@@ -31,7 +31,7 @@ docker run --rm chandanghosh/dns-rs:29102026 --version
 | Plain DNS | port 53 UDP/TCP |
 | DoT / DoH | ports 853 / 443 when TLS material is configured |
 | Healthcheck | `dns-rs healthcheck` (no shell or `dig` needed) |
-| Size | about 2.0 MiB compressed (4.3 MiB on disk) on `amd64`; about 2.0 MiB compressed (3.4 MiB on disk) on `arm64` |
+| Size | about 9.4 MB (9.0 MiB) on disk on `amd64` and 8.0 MB (7.6 MiB) on `arm64`; compressed transfer is about 3.0 MB and 2.8 MB respectively. CI enforces a 10 MiB limit on the uncompressed image size |
 
 The image runs with no writable filesystem paths by default. If you enable
 features that write state (for example the RFC 5011
@@ -219,9 +219,10 @@ docker build -t dns-rs:dev .
 IMAGE=dns-rs:dev PORT=15353 scripts/container-smoke.sh
 ```
 
-The build uses the size-optimised `dist` Cargo profile (fat LTO,
-`opt-level = "z"`, `panic = "abort"`, stripped symbols). To build both
-published architectures without pushing:
+The build uses the container-oriented `dist` Cargo profile (fat LTO,
+`opt-level = 2`, `panic = "abort"`, stripped symbols, static musl). The daemon
+uses mimalloc, which raises idle RSS slightly but keeps the per-query
+allocation path fast. To build both published architectures without pushing:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -509,12 +510,20 @@ settings.
 
 ## Publishing to Docker Hub
 
-Images are published manually under `chandanghosh/dns-rs`; the current tag is
-`29102026` (29 October 2026). The tag contains `linux/amd64` and `linux/arm64`
-manifests plus BuildKit SBOM and provenance attestations.
+Images are published automatically under `chandanghosh/dns-rs` after every
+successful push to `main`; the current tag is `29102026` (29 October 2026). The
+tag contains `linux/amd64` and `linux/arm64` manifests plus BuildKit SBOM and
+provenance attestations.
 
-Tags are date-based (`DDMMYYYY`) and mutable: the current day's tag is rebuilt
-and pushed in place when the source changes, so `docker pull` picks up the
+The `publish` job in `.github/workflows/ci.yml` runs only after formatting,
+Clippy, tests, the container build and smoke test, dependency policy, audit, and
+fuzz checks pass. It skips the push when a newer commit has landed on `main`
+while the run was in progress. Publishing uses the `DOCKER_USERNAME` and
+`DOCKER_TOKEN` repository secrets; the token should be a Docker Hub access
+token with write scope, not your password.
+
+Tags are date-based (`DDMMYYYY`, UTC) and mutable: the current day's tag is
+rebuilt and pushed in place when `main` changes, so `docker pull` picks up the
 latest build for that date. There are no semantic-version tags and no
 per-commit tags, so record the manifest digest from `imagetools inspect` when
 you need an immutable reference:
@@ -541,32 +550,35 @@ docker buildx build \
   --push .
 ```
 
-To publish through GitHub Actions instead:
+To publish a development or hotfix build through GitHub Actions, run the
+manual `Container` workflow:
 
-1. Add repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The token
-   should be a Docker Hub access token with write scope, not your password.
-2. Run the `Container` workflow manually, set `tag` (for example `29102026` or
-   `dev`), and enable `push`.
-3. The publish job builds `linux/amd64` and `linux/arm64`, pushes
-   `docker.io/<username>/dns-rs:<tag>`, and attaches an SBOM and provenance
+1. Set the `tag` input (for example `dev` or a date) and enable `push`.
+2. The publish job builds `linux/amd64` and `linux/arm64`, pushes
+   `docker.io/chandanghosh/dns-rs:<tag>`, and attaches an SBOM and provenance
    attestation via BuildKit.
-4. Verify the result:
+3. Verify the result:
 
    ```bash
-   docker buildx imagetools inspect docker.io/<username>/dns-rs:<tag>
+   docker buildx imagetools inspect docker.io/chandanghosh/dns-rs:<tag>
    docker run --rm --platform linux/arm64 \
-     docker.io/<username>/dns-rs:<tag> --version
+     docker.io/chandanghosh/dns-rs:<tag> --version
    ```
 
-The workflow does not run on tag pushes, so creating a release tag will not
-publish an image by accident. Cross-compilation happens on the native build
-platform; QEMU is only needed to run the foreign `arm64` image for smoke
-testing.
+The manual workflow is for explicit dev or hotfix tags; normal date-tagged
+releases come from CI on `main`. Neither workflow runs on Git tag pushes, so
+creating a release tag will not publish an image by accident.
+Cross-compilation happens on the native build platform; QEMU is only needed to
+run the foreign `arm64` image for smoke testing.
 
 ## CI gates
 
 `.github/workflows/ci.yml` builds the image on every push and pull request,
 runs the smoke test, enforces a 10 MiB image-size budget, and scans the image
 with Trivy for `CRITICAL` and `HIGH` vulnerabilities (ignoring unfixed
-findings). The manual `Container` workflow does not publish unless `push` is
-enabled.
+findings). The container job also runs the loopback benchmark against the built
+image for one and two resolver workers and writes the QPS, latency, and RSS
+numbers to the workflow summary. The load step is informational: a result below
+50,000 QPS or a p99 above 1 ms does not fail the build, although an actual
+benchmark or server error does. The manual `Container` workflow does not
+publish unless `push` is enabled.
