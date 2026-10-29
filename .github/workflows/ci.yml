@@ -169,6 +169,10 @@ jobs:
             cancel-in-progress: false
         steps:
             - uses: actions/checkout@v7
+              with:
+                  # Full history and tags: the release notes diff the release
+                  # commit against the previous `v*` tag to list what changed.
+                  fetch-depth: 0
             - name: Check for a newer main commit
               id: latest
               run: |
@@ -236,6 +240,13 @@ jobs:
                       echo "$tags"
                       echo "EOF"
                   } >> "$GITHUB_OUTPUT"
+
+                  # The release notes list the commits between the previous
+                  # release tag and the one being cut. Only exported when a
+                  # release with a strictly newer version is about to be cut.
+                  if [ "$release" = true ] && [ -n "$latest_version" ] && [ "$latest_version" != "$version" ]; then
+                      echo "prev_tag=v$latest_version" >> "$GITHUB_OUTPUT"
+                  fi
             - uses: docker/setup-buildx-action@v4
               if: steps.latest.outputs.skip != 'true'
             - uses: docker/login-action@v3
@@ -266,9 +277,11 @@ jobs:
               env:
                   GH_TOKEN: ${{ github.token }}
                   VERSION: ${{ steps.meta.outputs.version }}
+                  PREV_TAG: ${{ steps.meta.outputs.prev_tag }}
                   DATE_TAG: ${{ steps.meta.outputs.date_tag }}
                   BUILD_DATE: ${{ steps.meta.outputs.build_date }}
                   DIGEST: ${{ steps.push.outputs.digest }}
+                  REPO_URL: ${{ github.server_url }}/${{ github.repository }}
                   RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
               run: |
                   set -euo pipefail
@@ -281,7 +294,24 @@ jobs:
 
                   notes="$(mktemp)"
                   {
-                      printf '## dns-rs %s\n\n' "$VERSION"
+                      # Human-readable changelog: every commit since the
+                      # previous release, bulleted and linked. Skipped (rather
+                      # than failing) when there is no previous tag to diff.
+                      if [ -n "${PREV_TAG:-}" ] && git cat-file -e "$PREV_TAG" 2>/dev/null; then
+                          log="$(git log --no-merges --format='%H %s' "$PREV_TAG..$GITHUB_SHA")"
+                          if [ -n "$log" ]; then
+                              printf "## What's changed\n\n"
+                              printf '%s\n' "$log" | awk -v url="$REPO_URL/commit" '{
+                                  sha = $1
+                                  sub(/^[0-9a-f]+ /, "")
+                                  printf "- [%s](%s/%s) %s\n", substr(sha, 1, 7), url, sha, $0
+                              }'
+                              printf '\n**Full Changelog**: %s/compare/%s...%s\n\n' \
+                                  "$REPO_URL" "$PREV_TAG" "$tag"
+                          fi
+                      fi
+
+                      printf '## Container images\n\n'
                       printf 'Container images published for this release:\n\n'
                       printf -- '- `docker.io/chandanghosh/dns-rs:%s`\n' "$VERSION"
                       printf -- '- `docker.io/chandanghosh/dns-rs:latest`\n'
