@@ -519,8 +519,9 @@ The `publish` job in `.github/workflows/ci.yml` runs only after formatting,
 Clippy, tests, the container build and smoke test, dependency policy, audit, and
 fuzz checks pass. It skips the push when a newer commit has landed on `main`
 while the run was in progress. Publishing uses the `DOCKER_USERNAME` and
-`DOCKER_TOKEN` repository secrets; the token should be a Docker Hub access
-token with write scope, not your password.
+`DOCKER_TOKEN` repository secrets, with the legacy `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN` names accepted as a fallback; the token should be a Docker Hub
+access token with write scope, not your password.
 
 Tags are date-based (`DDMMYYYY`, UTC) and mutable: the current day's tag is
 rebuilt and pushed in place when `main` changes, so `docker pull` picks up the
