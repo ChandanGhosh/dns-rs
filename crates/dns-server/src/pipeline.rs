@@ -437,7 +437,7 @@ impl QueryPipeline {
         if request.queries.len() != 1 {
             return self.error(&request, ResponseCode::FormErr, client, transport);
         }
-        let query = request.queries[0].clone();
+        let query = &request.queries[0];
         if query.query_class != DNSClass::IN {
             return self.error(&request, ResponseCode::NotImp, client, transport);
         }
@@ -483,14 +483,14 @@ impl QueryPipeline {
         };
         // Local zones are answered before the cache, like Unbound. They are
         // never stored in the message cache because they are policy, not data.
-        match self.local.answer(client.ip(), &query) {
+        match self.local.answer(client.ip(), query) {
             local::LocalAction::Answer(message) => {
                 return self.finalize(*message, &request, client, transport);
             }
             local::LocalAction::Drop => return None,
             local::LocalAction::NotHandled => {}
         }
-        match self.auth_downstream.answer(&query) {
+        match self.auth_downstream.answer(query) {
             local::LocalAction::Answer(message) => {
                 return self.finalize(*message, &request, client, transport);
             }
@@ -506,7 +506,7 @@ impl QueryPipeline {
                     .get(&query.name, query.query_type, do_bit, wire_request)
             {
                 if self.prefetch && MessageCache::should_prefetch(&hit) {
-                    self.spawn_refresh(&query, do_bit);
+                    self.spawn_refresh(query, do_bit);
                 }
                 debug!(
                     %client,
@@ -530,7 +530,7 @@ impl QueryPipeline {
             {
                 // RFC 8767: answer from the expired entry immediately and
                 // refresh it in the background.
-                self.spawn_refresh(&query, do_bit);
+                self.spawn_refresh(query, do_bit);
                 debug!(
                     %client,
                     qname = %query.name,
@@ -545,7 +545,7 @@ impl QueryPipeline {
 
         // Authority zones configured for upstream use answer recursive
         // lookups from local data after the cache.
-        match self.auth_upstream.answer(&query) {
+        match self.auth_upstream.answer(query) {
             local::LocalAction::Answer(message) => {
                 return self.finalize(*message, &request, client, transport);
             }
@@ -555,7 +555,7 @@ impl QueryPipeline {
 
         if !self.local.covers(client.ip(), &query.name)
             && !self.auth_downstream.covers(&query.name)
-            && let Some(local) = local::maybe_respond(&query)
+            && let Some(local) = local::maybe_respond(query)
         {
             return self.finalize(local, &request, client, transport);
         }
@@ -565,7 +565,7 @@ impl QueryPipeline {
         }
 
         let resolution = match self
-            .resolve_coalesced(&query, do_bit, checking_disabled, &cancel)
+            .resolve_coalesced(query, do_bit, checking_disabled, &cancel)
             .await
         {
             Some(resolution) => resolution,
@@ -614,6 +614,30 @@ impl QueryPipeline {
 
         if request.edns.is_none() && hit.wire.len() <= limit {
             return Some(hit.wire);
+        }
+
+        // Common EDNS(0) case: the cached wire has no OPT record, the client
+        // sent no cookie, and the response fits. Append our OPT record instead
+        // of decoding and re-encoding the whole message.
+        if request.edns.is_some()
+            && !hit.has_edns
+            && edns::requested_cookie(request).is_none()
+            && hit
+                .wire
+                .len()
+                .checked_add(edns::EMPTY_OPT_LEN)
+                .is_some_and(|length| length <= limit)
+        {
+            let mut wire = hit.wire;
+            if edns::append_empty_opt(
+                &mut wire,
+                self.config.server.max_udp_size.max(512),
+                edns::dnssec_ok(request),
+            ) {
+                return Some(wire);
+            }
+            let message = Message::from_vec(&wire).ok()?;
+            return self.finalize_with_ede(message, request, client, transport, None);
         }
 
         let message = Message::from_vec(&hit.wire).ok()?;
@@ -1146,10 +1170,11 @@ fn truncate(mut message: Message, limit: usize) -> Vec<u8> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use dns_config::Config;
     use dns_proto::{
-        Edns, Message, MessageType, OpCode, Query, RData, Record, RecordType, ResponseCode,
+        Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType, ResponseCode,
     };
     use dns_testutil::query_bytes;
 
@@ -1213,6 +1238,78 @@ mod tests {
         let response_edns = message.edns.as_ref().expect("OPT in response");
         assert_eq!(response_edns.max_payload(), 1232);
         assert!(response_edns.option(dns_proto::EDNS_COOKIE).is_some());
+    }
+
+    #[tokio::test]
+    async fn cached_edns_response_uses_the_fast_path() {
+        let pipeline = pipeline();
+        let name = Name::from_ascii("cached.example.").expect("name");
+        let mut cached = Message::new(0, MessageType::Response, OpCode::Query);
+        cached.add_query(Query::query(name.clone(), RecordType::A));
+        cached.add_answer(Record::from_rdata(
+            name.clone(),
+            60,
+            RData::A(Ipv4Addr::new(192, 0, 2, 1).into()),
+        ));
+        pipeline.messages.insert(
+            &name,
+            RecordType::A,
+            false,
+            &cached,
+            Duration::from_secs(60),
+        );
+
+        let mut request = Message::new(0x4242, MessageType::Query, OpCode::Query);
+        request.metadata.recursion_desired = true;
+        request.add_query(Query::query(name, RecordType::A));
+        let mut edns = Edns::new();
+        edns.set_max_payload(1400);
+        request.edns = Some(edns);
+
+        let response = pipeline
+            .handle(&request.to_vec().expect("encode"), client(), Transport::Udp)
+            .await
+            .expect("response");
+        assert_eq!(&response[0..2], &0x4242u16.to_be_bytes());
+
+        let message = Message::from_vec(&response).expect("decode");
+        assert_eq!(message.metadata.id, 0x4242);
+        assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+        assert!(message.metadata.recursion_desired);
+        assert!(message.metadata.recursion_available);
+        assert_eq!(message.answers.len(), 1);
+        let edns = message.edns.as_ref().expect("OPT in response");
+        assert_eq!(edns.max_payload(), 1232);
+        assert_eq!(edns.version(), 0);
+        assert!(!edns.flags().dnssec_ok);
+        assert!(edns.option(dns_proto::EDNS_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn cached_edns_response_with_do_sets_the_do_bit() {
+        let pipeline = pipeline();
+        let name = Name::from_ascii("signed.example.").expect("name");
+        let mut cached = Message::new(0, MessageType::Response, OpCode::Query);
+        cached.add_query(Query::query(name.clone(), RecordType::A));
+        cached.metadata.authentic_data = true;
+        pipeline
+            .messages
+            .insert(&name, RecordType::A, true, &cached, Duration::from_secs(60));
+
+        let mut request = Message::new(0x5151, MessageType::Query, OpCode::Query);
+        request.metadata.recursion_desired = true;
+        request.add_query(Query::query(name, RecordType::A));
+        let mut edns = Edns::new();
+        edns.set_dnssec_ok(true);
+        request.edns = Some(edns);
+
+        let response = pipeline
+            .handle(&request.to_vec().expect("encode"), client(), Transport::Udp)
+            .await
+            .expect("response");
+        let message = Message::from_vec(&response).expect("decode");
+        assert!(message.metadata.authentic_data);
+        assert!(message.edns.as_ref().expect("OPT").flags().dnssec_ok);
     }
 
     #[tokio::test]

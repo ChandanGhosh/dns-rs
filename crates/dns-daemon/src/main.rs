@@ -12,6 +12,12 @@ use dns_config::LoadedConfig;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
+/// The resolver allocates per-query names, records, and response buffers.
+/// mimalloc handles that allocation pattern better than the system allocator,
+/// especially in the static musl container image.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "dns-rs",

@@ -56,7 +56,8 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# The `dist` profile is size-optimised (fat LTO, opt-level=z, strip, panic=abort).
+# The `dist` profile uses fat LTO, opt-level=2, strip, and panic=abort. It is
+# fast enough for the load benchmark while keeping the image under 10 MiB.
 RUN target="$(cat /tmp/rust-target)" \
     && cargo build --locked --profile dist --target "$target" \
         --package dns-daemon --bin dns-rs \

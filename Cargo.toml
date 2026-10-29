@@ -33,6 +33,7 @@ http-body-util = "0.1"
 hyper = { version = "1.7", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 ipnet = "2.12"
+mimalloc = { version = "0.1", default-features = false }
 moka = { version = "0.12", features = ["sync"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
@@ -82,12 +83,13 @@ codegen-units = 1
 lto = "thin"
 strip = "debuginfo"
 
-# Size-optimised profile used by the container image. The normal `release`
-# profile stays optimised for throughput; the container trades some speed for a
-# much smaller static binary.
+# Profile used by the container image. Fat LTO and stripping keep the static
+# musl image under the 10 MiB budget; opt-level 2 keeps the cache-hit path
+# fast enough for the loopback load test. `opt-level = "z"` was smaller but
+# roughly 25% slower on the single-worker benchmark.
 [profile.dist]
 inherits = "release"
-opt-level = "z"
+opt-level = 2
 lto = "fat"
 codegen-units = 1
 panic = "abort"

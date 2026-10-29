@@ -23,6 +23,10 @@ struct CachedWire {
     expires_at: Instant,
     stale_until: Instant,
     original_ttl: Duration,
+    /// Whether the stored wire already has an OPT record. Normal responses do
+    /// not, but keeping the flag makes the cache-hit fast path safe for any
+    /// caller that inserts a message with EDNS state.
+    has_edns: bool,
 }
 
 /// Hit/miss counters for observability.
@@ -51,6 +55,8 @@ pub struct CacheHit {
     /// Question name exactly as it was stored.
     pub question_name: String,
     pub stale: bool,
+    /// Whether the stored wire already contains an OPT record.
+    pub has_edns: bool,
 }
 
 #[derive(Clone)]
@@ -117,6 +123,7 @@ impl MessageCache {
             expires_at: now + ttl,
             stale_until: now + ttl + self.stale_for,
             original_ttl: ttl,
+            has_edns: message.edns.is_some(),
         };
         self.cache
             .insert(Self::key(name, record_type, do_bit), entry);
@@ -159,6 +166,7 @@ impl MessageCache {
             original_ttl: entry.original_ttl,
             question_name: entry.question_name,
             stale: false,
+            has_edns: entry.has_edns,
         })
     }
 
@@ -194,6 +202,7 @@ impl MessageCache {
             original_ttl: entry.original_ttl,
             question_name: entry.question_name,
             stale: true,
+            has_edns: entry.has_edns,
         })
     }
 

@@ -7,8 +7,10 @@
 #   THREADS defaults to "1 2 4".
 #
 # Environment overrides:
-#   BENCH_NAMES        unique cache entries (default 8000)
-#   BENCH_CONCURRENCY  queries in flight (default 64)
+#   BENCH_NAMES        unique cache entries (default 4000; the message cache
+#                      holds 8192 entries, so keep this below that limit)
+#   BENCH_CONCURRENCY  queries in flight (default 8; enough to pipeline
+#                      loopback queries without queueing behind one worker)
 #   BENCH_WARMUP       warm-up seconds (default 5)
 #   BENCH_DURATION     measured seconds (default 10)
 #   BENCH_PORT         resolver UDP port (default 15353)
@@ -37,8 +39,8 @@ if [ ${#threads[@]} -eq 0 ]; then
     threads=(1 2 4)
 fi
 
-names="${BENCH_NAMES:-8000}"
-concurrency="${BENCH_CONCURRENCY:-64}"
+names="${BENCH_NAMES:-4000}"
+concurrency="${BENCH_CONCURRENCY:-8}"
 warmup="${BENCH_WARMUP:-5}"
 duration="${BENCH_DURATION:-10}"
 port="${BENCH_PORT:-15353}"
