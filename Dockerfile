@@ -19,6 +19,11 @@ FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
 ARG TARGETARCH
 ARG TARGETVARIANT
 
+# Baked into the binary so `dns-rs --version` matches the image label. The
+# image tag is the build date (`DDMMYYYY`); `VERSION` is the workspace semver.
+ARG VERSION=dev
+ARG BUILD_DATE=unknown
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -67,8 +72,12 @@ COPY crates ./crates
 
 # The `dist` profile uses fat LTO, opt-level=2, strip, and panic=abort. It is
 # fast enough for the load benchmark while keeping the image under 10 MiB.
+# `DNS_RS_VERSION` and `DNS_RS_BUILD_DATE` are read by `main.rs` at compile
+# time, so a rebuilt image reports the version it was built from.
 RUN target="$(cat /tmp/rust-target)" \
-    && cargo build --locked --profile dist --target "$target" \
+    && DNS_RS_VERSION="${VERSION}" \
+       DNS_RS_BUILD_DATE="${BUILD_DATE}" \
+       cargo build --locked --profile dist --target "$target" \
         --package dns-daemon --bin dns-rs \
     && mkdir -p /out/var/lib/dns-rs /out/var/cache/dns-rs \
     && cp "target/$target/dist/dns-rs" /out/dns-rs \
@@ -76,6 +85,8 @@ RUN target="$(cat /tmp/rust-target)" \
 
 FROM scratch AS runtime
 
+# `VERSION` is the workspace semver. The mutable `DDMMYYYY` build date lives in
+# `org.opencontainers.image.created`, not in the version label.
 ARG VERSION=dev
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown

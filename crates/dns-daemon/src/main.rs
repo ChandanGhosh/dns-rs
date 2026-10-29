@@ -18,10 +18,25 @@ use tracing_subscriber::EnvFilter;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// Release version. Container builds pass the workspace version through
+/// `DNS_RS_VERSION` so the binary and the image label always agree; local
+/// builds fall back to `Cargo.toml`.
+const VERSION: &str = match option_env!("DNS_RS_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// UTC build timestamp, or `unknown` for local builds. Reported in the startup
+/// log so a running resolver can be matched to an image.
+const BUILD_DATE: &str = match option_env!("DNS_RS_BUILD_DATE") {
+    Some(date) => date,
+    None => "unknown",
+};
+
 #[derive(Debug, Parser)]
 #[command(
     name = "dns-rs",
-    version,
+    version = VERSION,
     about = "A validating, recursive, caching DNS resolver",
     long_about = None
 )]
@@ -153,7 +168,8 @@ async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
     let config = Arc::new(config);
 
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = VERSION,
+        build_date = BUILD_DATE,
         config = %path.display(),
         threads = config.server.num_threads,
         "starting dns-rs"
