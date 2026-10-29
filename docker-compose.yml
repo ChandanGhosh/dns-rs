@@ -2,7 +2,7 @@ name: dns-rs
 
 services:
     resolver:
-        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:28102026}
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:29102026}
         container_name: dns-rs
         restart: unless-stopped
 

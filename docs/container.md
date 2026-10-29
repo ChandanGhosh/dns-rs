@@ -14,8 +14,8 @@ Published images live on Docker Hub at
 [`chandanghosh/dns-rs`](https://hub.docker.com/r/chandanghosh/dns-rs):
 
 ```bash
-docker pull chandanghosh/dns-rs:28102026
-docker run --rm chandanghosh/dns-rs:28102026 --version
+docker pull chandanghosh/dns-rs:29102026
+docker run --rm chandanghosh/dns-rs:29102026 --version
 ```
 
 ## Image layout
@@ -239,7 +239,7 @@ The smoke script runs the image with:
 If `docker build` is slow while iterating, set `SKIP_BUILD=1` after building.
 Set `KEEP=1` to leave the container running for manual queries. To smoke-test a
 foreign architecture through QEMU, set `PLATFORM`, for example
-`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:28102026 scripts/container-smoke.sh`.
+`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:29102026 scripts/container-smoke.sh`.
 
 ## Run manually with `docker run`
 
@@ -263,7 +263,7 @@ docker run --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:28102026
+  chandanghosh/dns-rs:29102026
 ```
 
 ```bash
@@ -290,7 +290,7 @@ docker run -d --name dns-rs \
   -p 53:53/tcp \
   -v "$PWD/packaging/container.toml:/etc/dns-rs/dns-rs.toml:ro" \
   -v dns-rs-data:/var/lib/dns-rs \
-  chandanghosh/dns-rs:28102026
+  chandanghosh/dns-rs:29102026
 ```
 
 Operate it with:
@@ -463,7 +463,7 @@ and CM5 running 64-bit Raspberry Pi OS (or another 64-bit ARM Linux). Pi 1,
 Pi 2, Pi 3, and Pi Zero are not supported by the published tags.
 
 ```bash
-docker pull chandanghosh/dns-rs:28102026
+docker pull chandanghosh/dns-rs:29102026
 DNS_RS_HOST_PORT=53 docker compose up -d
 ```
 
@@ -510,7 +510,7 @@ settings.
 ## Publishing to Docker Hub
 
 Images are published manually under `chandanghosh/dns-rs`; the current tag is
-`28102026` (28 October 2026). The tag contains `linux/amd64` and `linux/arm64`
+`29102026` (29 October 2026). The tag contains `linux/amd64` and `linux/arm64`
 manifests plus BuildKit SBOM and provenance attestations.
 
 Tags are date-based (`DDMMYYYY`) and mutable: the current day's tag is rebuilt
@@ -520,7 +520,7 @@ per-commit tags, so record the manifest digest from `imagetools inspect` when
 you need an immutable reference:
 
 ```bash
-TAG=28102026
+TAG=29102026
 docker buildx imagetools inspect "chandanghosh/dns-rs:$TAG" --format '{{json .Manifest}}'
 docker pull "chandanghosh/dns-rs@sha256:<digest>"
 ```
@@ -528,7 +528,7 @@ docker pull "chandanghosh/dns-rs@sha256:<digest>"
 To publish from a workstation:
 
 ```bash
-TAG=28102026
+TAG=29102026
 docker login
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
@@ -545,7 +545,7 @@ To publish through GitHub Actions instead:
 
 1. Add repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. The token
    should be a Docker Hub access token with write scope, not your password.
-2. Run the `Container` workflow manually, set `tag` (for example `28102026` or
+2. Run the `Container` workflow manually, set `tag` (for example `29102026` or
    `dev`), and enable `push`.
 3. The publish job builds `linux/amd64` and `linux/arm64`, pushes
    `docker.io/<username>/dns-rs:<tag>`, and attaches an SBOM and provenance

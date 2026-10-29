@@ -44,7 +44,7 @@ PORT=15353 scripts/container-smoke.sh
 Published images are available for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull chandanghosh/dns-rs:28102026
+docker pull chandanghosh/dns-rs:29102026
 ```
 
 Run it manually on loopback port 15353:
@@ -58,7 +58,7 @@ docker run -d --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:28102026
+  chandanghosh/dns-rs:29102026
 
 dig @127.0.0.1 -p 15353 example.com A
 docker stop dns-rs-test
