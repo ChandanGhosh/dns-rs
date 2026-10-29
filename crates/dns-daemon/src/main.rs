@@ -52,7 +52,8 @@ struct Cli {
     )]
     config: PathBuf,
 
-    /// Increase log verbosity (`-v` = debug, `-vv` = trace).
+    /// Raise the log filter (`-v` = debug, `-vv` = trace), overriding the
+    /// `verbosity` server setting. `RUST_LOG` overrides both.
     #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
     verbose: u8,
 
@@ -97,10 +98,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Checkconf => checkconf(&cli.config),
-        Command::Run => {
-            init_tracing(cli.verbose);
-            run(&cli.config)
-        }
+        Command::Run => run(&cli),
         Command::Healthcheck {
             address,
             port,
@@ -150,8 +148,11 @@ fn checkconf(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run(path: &Path) -> Result<()> {
-    let loaded = load(path)?;
+fn run(cli: &Cli) -> Result<()> {
+    // Log level is resolved after the configuration loads so the `verbosity`
+    // server key mirrors Unbound and is honoured before the flags or `RUST_LOG`.
+    let loaded = load(&cli.config)?;
+    init_tracing(cli.verbose, loaded.config.server.verbosity);
     // `num-threads` is the number of resolver worker threads. Build the
     // runtime explicitly so the setting controls Tokio's worker pool instead
     // of always using one worker per available CPU.
@@ -161,7 +162,7 @@ fn run(path: &Path) -> Result<()> {
         .enable_all()
         .build()
         .context("failed to build the Tokio runtime")?;
-    runtime.block_on(run_server(path, loaded.config))
+    runtime.block_on(run_server(&cli.config, loaded.config))
 }
 
 async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
@@ -205,14 +206,26 @@ fn load(path: &Path) -> Result<LoadedConfig> {
     Ok(loaded)
 }
 
-fn init_tracing(verbose: u8) {
-    let default_level = match verbose {
-        0 => "info",
+/// Default filter from the `-v` flags, falling back to the `verbosity` server
+/// key for Unbound compatibility. Precedence: `RUST_LOG` > `-v`/`-vv` >
+/// `verbosity`. `0` maps to warnings only, `1` (the default) to info, `2` and
+/// `3` to debug (including the per-query lines), and `4` or `5` to trace.
+fn default_filter(flag_verbose: u8, config_verbosity: u8) -> &'static str {
+    match flag_verbose {
+        0 => match config_verbosity {
+            0 => "warn",
+            1 => "info",
+            2..=3 => "debug",
+            _ => "trace",
+        },
         1 => "debug",
         _ => "trace",
-    };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    }
+}
+
+fn init_tracing(flag_verbose: u8, config_verbosity: u8) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(default_filter(flag_verbose, config_verbosity)));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -248,6 +261,39 @@ async fn shutdown_signal() {
     {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "failed to listen for Ctrl-C");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_filter;
+
+    /// `-v` wins over the config, `RUST_LOG` still overrides everything at
+    /// runtime, and the `verbosity` values map onto the tracing levels.
+    #[test]
+    fn verbosity_precedence_and_mapping() {
+        let cases: &[(u8, u8, &str)] = &[
+            // Flags override the configuration.
+            (1, 0, "debug"),
+            (1, 1, "debug"),
+            (1, 5, "debug"),
+            (2, 0, "trace"),
+            (2, 5, "trace"),
+            // No flags: the Unbound-style key picks the level.
+            (0, 0, "warn"),
+            (0, 1, "info"),
+            (0, 2, "debug"),
+            (0, 3, "debug"),
+            (0, 4, "trace"),
+            (0, 5, "trace"),
+        ];
+        for &(flag, config, expected) in cases {
+            assert_eq!(
+                default_filter(flag, config),
+                expected,
+                "flag={flag} config={config}"
+            );
         }
     }
 }

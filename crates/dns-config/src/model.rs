@@ -234,7 +234,9 @@ pub struct ServerConfig {
     pub interfaces: Vec<ListenAddress>,
     /// Default service port for interfaces without an explicit port.
     pub port: u16,
-    /// Log verbosity, 0-5.
+    /// Log verbosity, 0-5, mirroring Unbound's `verbosity`: 0 logs warnings
+    /// and errors, 1 (default) adds info, 2-3 add per-query debug lines, and
+    /// 4-5 add trace. `-v`/`-vv` or `RUST_LOG` override it.
     pub verbosity: u8,
     /// Number of worker threads.
     pub num_threads: usize,

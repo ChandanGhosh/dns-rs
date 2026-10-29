@@ -43,7 +43,8 @@ http_endpoint = "/dns-query"
 tls_service_key = "/etc/dns-rs/tls/server.key"
 tls_service_pem = "/etc/dns-rs/tls/server.pem"
 
-# Process and logging. verbosity: 0 = errors, 1 = info, 2 = detail, 3+ = debug.
+# Log verbosity: 0 = warnings/errors, 1 = info, 2-3 = debug (adds one line per
+# query with cache hit/miss), 4-5 = trace. -v/-vv or RUST_LOG override it.
 verbosity = 1
 num_threads = 2
 do_daemonize = false
