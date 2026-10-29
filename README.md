@@ -41,11 +41,16 @@ docker build -t dns-rs:dev .
 PORT=15353 scripts/container-smoke.sh
 ```
 
+The same steps are available as `make image-smoke`.
+
 Published images are available for `linux/amd64` and `linux/arm64`:
 
 ```bash
 docker pull chandanghosh/dns-rs:29102026
 ```
+
+Each release also publishes immutable `X.Y.Z` and `latest` image tags and a
+GitHub Release. The `DDMMYYYY` tag keeps tracking the newest `main` build.
 
 Run it manually on loopback port 15353:
 
@@ -224,6 +229,19 @@ scripts/bench-loopback.sh
 BENCH_WARMUP=5 BENCH_DURATION=30 scripts/bench-loopback.sh 2
 ```
 
+The Makefile wraps the common cases:
+
+```bash
+make bench
+make bench THREADS="1 2" BENCH_DURATION=30
+make bench-container
+make bench-ci
+```
+
+`make bench-ci` reproduces the CI settings: 4,000 names, 8 queries in flight,
+a 5-second warm-up, a 15-second sample, and one and two workers against the
+container image.
+
 On Linux hosts with at least eight CPUs it pins the resolver to CPUs 0-3 and
 the generator to the rest. Override this with `BENCH_SERVER_CPUS` and
 `BENCH_CLIENT_CPUS`.
@@ -314,6 +332,23 @@ Supported `unbound.conf` blocks:
 Options outside this set are accepted with a warning and ignored.
 
 ## Development
+
+Common tasks are wrapped by the [`Makefile`](Makefile); run `make help` for the
+full list.
+
+```bash
+make build          # debug build of the workspace
+make check          # fmt-check, Clippy, tests, cargo-deny, example configs
+make ci             # check plus cargo-audit and the fuzz smoke test
+make bench          # loopback benchmark for 1, 2, and 4 workers
+make image-smoke    # build the image and run the hardened smoke test
+make ci-container   # smoke test, load stats, 10 MiB size gate, Trivy scan
+```
+
+`make tools` installs the optional tools used by the full checks
+(`cargo-nextest`, `cargo-deny`, `cargo-audit`, `cargo-fuzz`, and
+`cargo-llvm-cov`), and `make doctor` reports what is installed. The underlying
+commands are:
 
 ```bash
 cargo fmt --all
