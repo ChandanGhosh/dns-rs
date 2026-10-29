@@ -25,10 +25,11 @@ cargo run -p dns-daemon -- run -c examples/minimal.toml
 dig @127.0.0.1 -p 5353 example.com A
 ```
 
-Use `-v` for debug logging and `-vv` for trace logging. `RUST_LOG` overrides the
-CLI verbosity. `examples/full.toml` and `examples/full.conf` are annotated
-references covering every supported option, including DoT/DoH listeners and
-encrypted forwarders.
+`verbosity` in the server block now controls the log level directly, mirroring
+Unbound: 0 = warnings, 1 = info, 2–3 = debug (one line per query with cache
+hit/miss), 4–5 = trace. `-v`/`-vv` or `RUST_LOG` override it. `examples/full.toml`
+and `examples/full.conf` are annotated references covering every supported
+option, including DoT/DoH listeners and encrypted forwarders.
 
 ## Container
 
