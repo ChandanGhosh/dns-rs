@@ -551,6 +551,11 @@ it with the existing `v*` tags. When the version is newer, it also pushes the
 opens a GitHub Release titled `dns-rs X.Y.Z`. Merging several changes on the same
 day produces one release: only the `DDMMYYYY` tag moves for the later commits.
 
+Each release body starts with a "What's changed" section listing every commit
+since the previous release, bulleted and linked, followed by a Full Changelog
+compare link and the container image details. The same-day date-tag pushes
+accrue silently and all appear in the list when the next release is cut.
+
 Releases are immutable. The `vX.Y.Z` tag is never moved, and re-running the same
 commit republishes the version tags without creating a second release. If the
 version is already tagged on another commit, the job fails instead of reusing the
@@ -560,8 +565,8 @@ The version is compiled into the binary, so a CI image and its `--version` outpu
 always agree:
 
 ```bash
-docker run --rm chandanghosh/dns-rs:0.1.1 --version
-# dns-rs 0.1.1
+docker run --rm chandanghosh/dns-rs:0.1.2 --version
+# dns-rs 0.1.2
 ```
 
 ### Gate order
@@ -581,7 +586,7 @@ picks up the latest build for that date. Use a release tag or the manifest diges
 when you need a stable reference:
 
 ```bash
-docker buildx imagetools inspect "chandanghosh/dns-rs:0.1.1" \
+docker buildx imagetools inspect "chandanghosh/dns-rs:0.1.2" \
   --format '{{json .Manifest}}'
 docker pull "chandanghosh/dns-rs@sha256:<digest>"
 ```
@@ -591,13 +596,13 @@ requires both `TAG` and `CONFIRM=1`):
 
 ```bash
 docker login
-make image-publish TAG=0.1.1 CONFIRM=1
+make image-publish TAG=0.1.2 CONFIRM=1
 ```
 
 The equivalent raw command is:
 
 ```bash
-TAG=0.1.1
+TAG=0.1.2
 VERSION="$(make -s version)"
 docker login
 docker buildx build \
