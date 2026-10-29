@@ -38,18 +38,27 @@ RUN arch="${TARGETARCH:-amd64}"; variant="${TARGETVARIANT:-}"; \
     && echo "$target" > /tmp/rust-target \
     && rustup target add "$target"
 
-# Debian provides musl-gcc for amd64. The ARM64 target uses the pinned musl.cc
-# cross toolchain, which includes its own linker and libc.
+# Debian provides musl-gcc for amd64. The ARM64 target uses the pinned
+# cross-tools musl-cross toolchain, which includes its own linker and libc.
+# GitHub releases are used instead of musl.cc because musl.cc is not reliably
+# reachable from GitHub-hosted runners. The checksum pins the exact tarball.
+ARG AARCH64_MUSL_VERSION=20261001
+ARG AARCH64_MUSL_SHA256=7bf54ef24ecbca3f418e6b74ddc055e3a23b2cbf31ffc0b9a25775189df344ad
 RUN arch="${TARGETARCH:-amd64}"; \
     if [ "$arch" = "arm64" ]; then \
-        curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | tar -xz -C /opt; \
+        url="https://github.com/cross-tools/musl-cross/releases/download/${AARCH64_MUSL_VERSION}/aarch64-unknown-linux-musl.tar.xz"; \
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+            -o /tmp/aarch64-musl.tar.xz "$url"; \
+        echo "${AARCH64_MUSL_SHA256}  /tmp/aarch64-musl.tar.xz" | sha256sum -c -; \
+        tar -xJf /tmp/aarch64-musl.tar.xz -C /opt; \
+        rm /tmp/aarch64-musl.tar.xz; \
     fi
 
 ENV RUSTFLAGS="-C target-feature=+crt-static" \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static" \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
-    CC_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-gcc \
-    AR_aarch64_unknown_linux_musl=/opt/aarch64-linux-musl-cross/bin/aarch64-linux-musl-ar
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=/opt/aarch64-unknown-linux-musl/bin/aarch64-unknown-linux-musl-gcc \
+    CC_aarch64_unknown_linux_musl=/opt/aarch64-unknown-linux-musl/bin/aarch64-unknown-linux-musl-gcc \
+    AR_aarch64_unknown_linux_musl=/opt/aarch64-unknown-linux-musl/bin/aarch64-unknown-linux-musl-ar
 
 WORKDIR /build
 
