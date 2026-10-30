@@ -176,7 +176,9 @@ pub async fn serve_connection<S>(
                 Err(_) => None,
             };
             let Some(truncation) = truncation else { break };
-            let Ok(length) = u16::try_from(truncation.len()) else { break };
+            let Ok(length) = u16::try_from(truncation.len()) else {
+                break;
+            };
             let mut out = Vec::with_capacity(truncation.len() + 2);
             out.extend_from_slice(&length.to_be_bytes());
             out.extend_from_slice(&truncation);

@@ -1074,9 +1074,7 @@ async fn jammed_ds_answers_fail_closed() {
                 ("unsigned.com.", RecordType::NS) => {
                     referral(query, "unsigned.com.", "ns.unsigned.com.")
                 }
-                ("www.unsigned.com.", RecordType::A) => {
-                    answer(query, vec![unsigned_www.clone()])
-                }
+                ("www.unsigned.com.", RecordType::A) => answer(query, vec![unsigned_www.clone()]),
                 _ => reply(query, ResponseCode::ServFail),
             };
             Some(response)
@@ -1128,7 +1126,12 @@ async fn negative_proof_from_foreign_zone_is_not_secure() {
         // A second, genuinely signed zone under com: the attacker's zone.
         let attacker_zone = "attacker.com.";
         let com_ds_attacker = ds_record(&attacker, attacker_zone, &com, now);
-        let attacker_dnskey = signed(vec![attacker.record(attacker_zone)], &attacker, attacker_zone, now);
+        let attacker_dnskey = signed(
+            vec![attacker.record(attacker_zone)],
+            &attacker,
+            attacker_zone,
+            now,
+        );
         // Denial material signed by the attacker for its own zone: NSEC with
         // an RRSIG whose signer_name is attacker.com. Attached to an
         // NXDOMAIN for www.example.com — a name in a different, signed zone.
@@ -1183,11 +1186,7 @@ async fn negative_proof_from_foreign_zone_is_not_secure() {
     let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
         .expect("resolver");
     let resolved = resolver
-        .resolve_with_options(
-            "www.example.com.",
-            RecordType::A,
-            ResolveOptions::default(),
-        )
+        .resolve_with_options("www.example.com.", RecordType::A, ResolveOptions::default())
         .await
         .expect("resolution completes");
 

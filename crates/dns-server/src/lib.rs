@@ -113,9 +113,15 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                     let endpoint = config.server.http_endpoint.clone();
                     let connections = Arc::clone(connections);
                     tokio::spawn(async move {
-                        if let Err(err) =
-                            doh::run(listener, acceptor, endpoint, pipeline, shutdown, connections)
-                                .await
+                        if let Err(err) = doh::run(
+                            listener,
+                            acceptor,
+                            endpoint,
+                            pipeline,
+                            shutdown,
+                            connections,
+                        )
+                        .await
                         {
                             error!(%addr, %err, "DoH listener failed");
                         }
