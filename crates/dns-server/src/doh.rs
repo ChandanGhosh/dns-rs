@@ -17,9 +17,10 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::{ALLOW, CACHE_CONTROL, CONTENT_TYPE};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -44,6 +45,7 @@ pub async fn run(
     endpoint: String,
     pipeline: Arc<QueryPipeline>,
     shutdown: CancellationToken,
+    connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
     loop {
         tokio::select! {
@@ -51,31 +53,54 @@ pub async fn run(
             result = listener.accept() => {
                 match result {
                     Ok((stream, client)) => {
+                        // Share the connection permit pool with the TCP and
+                        // DoT listeners: without a cap, an idle-connection
+                        // flood grows tasks, sockets, and TLS buffers
+                        // unboundedly.
+                        let permit = tokio::select! {
+                            _ = shutdown.cancelled() => break,
+                            permit = Arc::clone(&connections).acquire_owned() => {
+                                match permit {
+                                    Ok(permit) => permit,
+                                    Err(_) => break,
+                                }
+                            }
+                        };
                         let acceptor = acceptor.clone();
                         let pipeline = Arc::clone(&pipeline);
                         let endpoint = endpoint.clone();
                         tokio::spawn(async move {
-                            let stream = match tokio::time::timeout(
-                                Duration::from_secs(10),
-                                acceptor.accept(stream),
-                            )
-                            .await
-                            {
-                                Ok(Ok(stream)) => stream,
-                                Ok(Err(error)) => {
-                                    debug!(%client, %error, "DoH handshake failed");
-                                    return;
-                                }
-                                Err(_) => {
-                                    debug!(%client, "DoH handshake timed out");
-                                    return;
-                                }
-                            };
+                            // Held for the whole connection lifetime, like the
+                            // TCP and DoT listeners.
+                            let _permit = permit;
+                            let stream: tokio_rustls::server::TlsStream<TcpStream> =
+                                match tokio::time::timeout(
+                                    Duration::from_secs(10),
+                                    acceptor.accept(stream),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(stream)) => stream,
+                                    Ok(Err(error)) => {
+                                        debug!(%client, %error, "DoH handshake failed");
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        debug!(%client, "DoH handshake timed out");
+                                        return;
+                                    }
+                                };
 
                             let service = service_fn(move |request| {
                                 handle(request, Arc::clone(&pipeline), client, endpoint.clone())
                             });
-                            let builder = Builder::new(TokioExecutor::new());
+                            let mut builder = Builder::new(TokioExecutor::new());
+                            // Without a timer, hyper enforces no header-read or
+                            // keep-alive deadlines and an idle connection lives
+                            // forever. The 10s handshake timeout above only
+                            // covers the TLS setup.
+                            builder.http1().timer(TokioTimer::new());
+                            builder.http2().timer(TokioTimer::new());
                             if let Err(error) = builder
                                 .serve_connection(TokioIo::new(stream), service)
                                 .await

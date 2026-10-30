@@ -39,9 +39,9 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
     let tls_material = tls::load(&config.server)?;
 
     // Unbound's `incoming-num-tcp` is per thread. Enforce the combined limit
-    // across every TCP and DoT listener so a burst cannot exhaust file
-    // descriptors or task memory. DoH is not counted here: it has its own
-    // HTTP connection management.
+    // across every TCP, DoT, and DoH listener so a burst cannot exhaust file
+    // descriptors or task memory. (DoH previously had no cap: an idle TLS
+    // connection flood could grow tasks and sockets unboundedly.)
     let tcp_capacity = tcp_capacity(&config);
     if config.server.do_tcp && tcp_capacity.is_none() {
         warn!("incoming-num-tcp is 0; TCP and DoT listeners are disabled");
@@ -100,15 +100,22 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
             if !config.server.do_tcp {
                 continue;
             }
+            // DoH shares the TCP/DoT connection pool: like those listeners it
+            // needs the cap, and with incoming-num-tcp = 0 it is disabled too.
+            let Some(connections) = connections.as_ref() else {
+                continue;
+            };
             match TcpListener::bind(addr).await {
                 Ok(listener) => {
                     let pipeline = Arc::clone(&pipeline);
                     let shutdown = shutdown.clone();
                     let acceptor = acceptor.clone();
                     let endpoint = config.server.http_endpoint.clone();
+                    let connections = Arc::clone(connections);
                     tokio::spawn(async move {
                         if let Err(err) =
-                            doh::run(listener, acceptor, endpoint, pipeline, shutdown).await
+                            doh::run(listener, acceptor, endpoint, pipeline, shutdown, connections)
+                                .await
                         {
                             error!(%addr, %err, "DoH listener failed");
                         }

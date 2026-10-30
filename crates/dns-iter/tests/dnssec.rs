@@ -1044,3 +1044,157 @@ async fn trust_anchor_overrides_domain_insecure() {
         Security::Bogus(dns_dnssec::BogusReason::MissingSignature)
     ));
 }
+
+/// DS evidence that cannot be obtained (upstream SERVFAIL on every probe)
+/// must fail closed instead of downgrading the zone to insecure. Otherwise an
+/// attacker able to blackhole only the DS exchange could serve forged,
+/// unsigned data for a genuinely signed zone.
+#[tokio::test]
+async fn jammed_ds_answers_fail_closed() {
+    let (root, com, _example, now) = build_hierarchy();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let unsigned_www = Record::from_rdata(
+            n("www.unsigned.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 7).into()),
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                // Every DS probe is jammed: SERVFAIL for the delegation proof,
+                // the zone's own status chain, and rarely-reachable parents.
+                (_, RecordType::DS) => reply(query, ResponseCode::ServFail),
+                ("unsigned.com.", RecordType::NS) => {
+                    referral(query, "unsigned.com.", "ns.unsigned.com.")
+                }
+                ("www.unsigned.com.", RecordType::A) => {
+                    answer(query, vec![unsigned_www.clone()])
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "www.unsigned.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    // Without DS proof the unsigned data cannot be classified Insecure; the
+    // validator must fail closed (bogus) rather than serve it.
+    assert!(
+        matches!(resolved.security, Security::Bogus(_)),
+        "jammed DS probes must not downgrade the answer to insecure, got {:?}",
+        resolved.security
+    );
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
+/// A negative proof that cites a zone which does not contain the queried name
+/// must never validate. The RRSIG signer fallback lets an upstream attach
+/// denial material from one of its own signed zones; the bailiwick check
+/// relegates such answers to insecure instead of letting the foreign zone's
+/// signature vouch for a name it does not own.
+#[tokio::test]
+async fn negative_proof_from_foreign_zone_is_not_secure() {
+    let (root, com, example, now) = build_hierarchy();
+    let attacker = SigningKey::generate();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let example_dnskey = signed(
+            vec![example.record("example.com.")],
+            &example,
+            "example.com.",
+            now,
+        );
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let com_ds_example = ds_record(&example, "example.com.", &com, now);
+        // A second, genuinely signed zone under com: the attacker's zone.
+        let attacker_zone = "attacker.com.";
+        let com_ds_attacker = ds_record(&attacker, attacker_zone, &com, now);
+        let attacker_dnskey = signed(vec![attacker.record(attacker_zone)], &attacker, attacker_zone, now);
+        // Denial material signed by the attacker for its own zone: NSEC with
+        // an RRSIG whose signer_name is attacker.com. Attached to an
+        // NXDOMAIN for www.example.com — a name in a different, signed zone.
+        let attacker_nsec = nsec(
+            "aaa.attacker.com.",
+            "zzz.attacker.com.",
+            &[RecordType::NSEC, RecordType::RRSIG],
+            &attacker,
+            attacker_zone,
+            now,
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => {
+                    let mut message = answer(query, root_ds_com.clone());
+                    for record in com_ds_attacker.clone() {
+                        message.add_answers([record]);
+                    }
+                    message
+                }
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("attacker.com.", RecordType::DNSKEY) => answer(query, attacker_dnskey.clone()),
+                // The attacker's zone must validate cleanly: the attack only
+                // matters when the foreign zone IS a trusted, signed chain.
+                ("attacker.com.", RecordType::DS) => answer(query, com_ds_attacker.clone()),
+                ("example.com.", RecordType::DNSKEY) => answer(query, example_dnskey.clone()),
+                ("example.com.", RecordType::DS) => answer(query, com_ds_example.clone()),
+                ("example.com.", RecordType::NS) => {
+                    referral(query, "example.com.", "ns.example.com.")
+                }
+                ("www.example.com.", RecordType::A) => {
+                    // Forged NXDOMAIN: the SOA from example.com is missing;
+                    // only attacker-zone denial records remain in authority.
+                    let mut message = reply(query, ResponseCode::NXDomain);
+                    for record in attacker_nsec.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "www.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    // attacker.com does not contain www.example.com, so its signatures can
+    // never vouch for the name's nonexistence. The gate must classify the
+    // answer insecure (never Secure; and never bogus — the answer itself is
+    // merely unvalidated, not provably wrong).
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+}

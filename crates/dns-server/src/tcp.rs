@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::pipeline::{QueryPipeline, Transport};
+use dns_proto::{decode, encode};
 
 /// Non-consuming readability probe used to notice a client disconnect while a
 /// query is still resolving.
@@ -81,6 +82,16 @@ pub async fn run(
     Ok(())
 }
 
+/// Per-message read window: the length prefix and the message body must both
+/// arrive inside the same window, so a client cannot hold a connection (and
+/// its permit) indefinitely by dripping bytes across two separate timeouts.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Write window for one response. A client that receives but never ACKs can
+/// otherwise park `write_all` forever while holding its connection permit.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum message that fits a 2-byte length prefix.
+const MAX_TCP_MESSAGE: usize = u16::MAX as usize;
+
 /// Serve length-prefixed DNS messages on one connection until it closes.
 pub async fn serve_connection<S>(
     mut stream: S,
@@ -90,20 +101,27 @@ pub async fn serve_connection<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Probe,
 {
-    let mut lenbuf = [0u8; 2];
     loop {
-        match tokio::time::timeout(Duration::from_secs(30), stream.read_exact(&mut lenbuf)).await {
-            Ok(Ok(_)) => {}
+        // One deadline covers the whole message: length prefix + body.
+        let (lenbuf, buf) = match tokio::time::timeout(READ_TIMEOUT, async {
+            let mut lenbuf = [0u8; 2];
+            stream.read_exact(&mut lenbuf).await?;
+            let mut buf = Vec::new();
+            let len = usize::from(u16::from_be_bytes(lenbuf));
+            if len > 0 {
+                buf = vec![0u8; len];
+                stream.read_exact(&mut buf).await?;
+            }
+            Ok::<([u8; 2], Vec<u8>), std::io::Error>((lenbuf, buf))
+        })
+        .await
+        {
+            Ok(Ok(pair)) => pair,
             _ => break,
-        }
+        };
         let len = usize::from(u16::from_be_bytes(lenbuf));
         if len == 0 {
             break;
-        }
-        let mut buf = vec![0u8; len];
-        match tokio::time::timeout(Duration::from_secs(30), stream.read_exact(&mut buf)).await {
-            Ok(Ok(_)) => {}
-            _ => break,
         }
 
         // While the query resolves, watch the socket without consuming data.
@@ -141,10 +159,43 @@ pub async fn serve_connection<S>(
         let Some(response) = response else {
             break;
         };
+        if response.len() > MAX_TCP_MESSAGE {
+            // A message larger than a 2-byte length prefix cannot be framed.
+            // Send a TC-marked question-only stub so the client retries via a
+            // transport that handles the answer, instead of desyncing the
+            // stream when the tail is re-read as a new length prefix.
+            debug!(%client, "response exceeds the TCP message limit");
+            let truncation = match decode(&response) {
+                Ok(mut message) => {
+                    message.answers.clear();
+                    message.authorities.clear();
+                    message.additionals.clear();
+                    message.metadata.truncation = true;
+                    encode(&message).ok()
+                }
+                Err(_) => None,
+            };
+            let Some(truncation) = truncation else { break };
+            let Ok(length) = u16::try_from(truncation.len()) else { break };
+            let mut out = Vec::with_capacity(truncation.len() + 2);
+            out.extend_from_slice(&length.to_be_bytes());
+            out.extend_from_slice(&truncation);
+            if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out))
+                .await
+                .is_err()
+            {
+                debug!(%client, "TCP write timed out");
+            }
+            break;
+        }
         let mut out = Vec::with_capacity(response.len() + 2);
         out.extend_from_slice(&(response.len() as u16).to_be_bytes());
         out.extend_from_slice(&response);
-        if stream.write_all(&out).await.is_err() {
+        if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out))
+            .await
+            .is_err()
+        {
+            debug!(%client, "TCP write timed out");
             break;
         }
     }

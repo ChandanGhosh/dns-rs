@@ -407,6 +407,14 @@ impl IteratorResolver {
         let Some(zone_name) = negative_zone(message) else {
             return Security::Insecure;
         };
+        // The denial must come from a zone that actually contains the queried
+        // name. Without this bailiwick check an upstream can attach NSEC
+        // records from one of its own signed zones (whose RRSIG signer names
+        // resolve the zone for us) and manufacture a "Secure" NXDOMAIN or
+        // NODATA answer for a name it has no authority over.
+        if !zone_name.zone_of(&qname) {
+            return Security::Insecure;
+        }
 
         let zone = self.zone_status(zone_name, context, 0).await;
         if zone.security != Security::Secure {
@@ -447,7 +455,19 @@ impl IteratorResolver {
 
             let response = match self.fetch_internal(&name, RecordType::DS, &context).await {
                 Ok(response) => response,
-                Err(_) => return Security::Insecure,
+                // Transient resolution failure (upstream SERVFAIL/refusal,
+                // network error): probe the parent instead of failing open.
+                // Letting this path return Insecure would let an attacker
+                // downgrade a signed zone by jamming one DS probe; returning
+                // Bogus instead would break genuinely unsigned names whose
+                // proof lives at the delegation level, not the qname.
+                Err(_) => {
+                    if name.num_labels() == 0 {
+                        return Security::Bogus(BogusReason::MissingKey);
+                    }
+                    name = name.base_name();
+                    continue;
+                }
             };
 
             // A DS query for an alias is answered with a CNAME instead of a
@@ -483,6 +503,12 @@ impl IteratorResolver {
                 let Some(parent_name) = negative_zone(&response) else {
                     return Security::Insecure;
                 };
+                // Same bailiwick requirement: the denial of the DS record must
+                // come from a zone containing the name, not from an unrelated
+                // signed zone a hostile upstream supplies.
+                if !parent_name.zone_of(&name) {
+                    return Security::Insecure;
+                }
                 let parent = self.zone_status(parent_name, context.clone(), 0).await;
                 if parent.security != Security::Secure {
                     parent.security
@@ -536,9 +562,37 @@ impl IteratorResolver {
                 return status;
             }
 
+            if let Some(anchor) = self.config.trust_store.anchor_for(&zone) {
+                let status = self.status_from_anchor(&zone, &anchor, &context).await;
+                self.cache_zone(&zone, &status);
+                return status;
+            }
+
+            // A configured stub zone is trusted by appointment: the operator
+            // selected its servers directly, so the public chain of trust does
+            // not reach it (like Unbound, stub zones validate only through an
+            // explicit trust anchor, handled above). Probing DS here would
+            // walk the delegation the stub replaces, which cannot succeed for
+            // private zones and errors out. Forward zones are deliberately
+            // excluded: their upstream is a recursive resolver and DS probes
+            // sent through it are legitimate, so those keep the full chain
+            // below.
+            if self
+                .config
+                .stub_zones
+                .iter()
+                .any(|stub| stub.zone.zone_of(&zone))
+            {
+                return ZoneStatus::insecure();
+            }
+
             let ds_response = match self.fetch_internal(&zone, RecordType::DS, &context).await {
                 Ok(response) => response,
-                Err(_) => return ZoneStatus::insecure(),
+                // Failing closed: without proof of signing status the data
+                // cannot be vouched for, and an attacker able to jam the DS
+                // exchange must not downgrade the zone to Insecure. Not
+                // cached, so recovery after the outage is immediate.
+                Err(_) => return ZoneStatus::bogus(BogusReason::MissingKey),
             };
 
             let ds_records = records_of(&ds_response.answers, &zone, RecordType::DS);
@@ -584,10 +638,14 @@ impl IteratorResolver {
                     Err(error) => ZoneStatus::bogus(error.into()),
                 }
             } else {
-                // No DS: the parent must prove the delegation is unsigned.
+                // No DS: the parent must prove the delegation is unsigned, and
+                // the proof must come from a zone containing the child.
                 let Some(parent_name) = negative_zone(&ds_response) else {
                     return ZoneStatus::insecure();
                 };
+                if !parent_name.zone_of(&zone) {
+                    return ZoneStatus::insecure();
+                }
                 let parent = self
                     .zone_status(parent_name, context.clone(), depth + 1)
                     .await;
