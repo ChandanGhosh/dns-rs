@@ -74,11 +74,7 @@ impl TlsClient {
         let mut use_pool = true;
 
         for _ in 0..2 {
-            let mut stream = match if use_pool {
-                self.take(&key)
-            } else {
-                None
-            } {
+            let mut stream = match if use_pool { self.take(&key) } else { None } {
                 Some(stream) => stream,
                 None => match self.connect(server, tls_name, dur).await {
                     Ok(stream) => stream,
