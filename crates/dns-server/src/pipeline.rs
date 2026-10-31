@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,9 +16,10 @@ use dns_iter::{
     IteratorResolver, ResolveError, ResolveOptions, Security, StubZone,
 };
 use dns_proto::{
-    DNSClass, Edns, EdnsOption, Message, MessageType, Name, OpCode, Query, RecordType,
-    ResponseCode, decode, encode,
+    DNSClass, Edns, EdnsOption, Message, MessageType, Name, OpCode, Query, RData, RecordType,
+    ResponseCode, SVCB, SvcParamValue, decode, encode,
 };
+use ipnet::IpNet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -120,6 +121,126 @@ impl Drop for RefreshGuard {
     }
 }
 
+/// DNS rebinding protection (`private-address` / `private-domain`).
+///
+/// Address records in the configured private ranges are removed from public
+/// names before a response is cached or returned. Local and stub-zone data is
+/// exempt because it is served by configuration, not learned from the public
+/// Internet.
+#[derive(Clone, Debug, Default)]
+struct PrivateAddressFilter {
+    networks: Vec<IpNet>,
+    domains: Vec<Name>,
+    stub_zones: Vec<Name>,
+}
+
+impl PrivateAddressFilter {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            networks: config.server.private_networks(),
+            domains: config.server.private_domains(),
+            stub_zones: config
+                .stub_zones
+                .iter()
+                .filter_map(|zone| Name::from_ascii(&zone.name).ok())
+                .collect(),
+        }
+    }
+
+    /// Whether `name` is covered by a `private-domain` entry.
+    fn is_private_domain(&self, name: &Name) -> bool {
+        self.domains.iter().any(|domain| domain.zone_of(name))
+    }
+
+    /// Whether `name` belongs to a configured stub zone.
+    fn is_stub_zone(&self, name: &Name) -> bool {
+        self.stub_zones.iter().any(|zone| zone.zone_of(name))
+    }
+
+    fn is_private_address(&self, address: IpAddr) -> bool {
+        if self
+            .networks
+            .iter()
+            .any(|network| network.contains(&address))
+        {
+            return true;
+        }
+        // Also catch IPv4 addresses carried in an IPv4-mapped IPv6 AAAA.
+        if let IpAddr::V6(address) = address
+            && let Some(address) = address.to_ipv4_mapped()
+        {
+            return self
+                .networks
+                .iter()
+                .any(|network| network.contains(&IpAddr::V4(address)));
+        }
+        false
+    }
+
+    /// Whether an address record (A, AAAA, SVCB, or HTTPS) points at a private
+    /// address. Unbound drops the whole SVCB/HTTPS record when any hint is
+    /// private, because a client may use the hint without a separate lookup.
+    fn has_private_address(&self, record: &dns_proto::Record) -> bool {
+        match &record.data {
+            RData::A(address) => self.is_private_address(IpAddr::V4(address.0)),
+            RData::AAAA(address) => self.is_private_address(IpAddr::V6(address.0)),
+            RData::SVCB(svcb) => self.svcb_has_private_hint(svcb),
+            RData::HTTPS(https) => self.svcb_has_private_hint(&https.0),
+            _ => false,
+        }
+    }
+
+    fn svcb_has_private_hint(&self, svcb: &SVCB) -> bool {
+        svcb.svc_params.iter().any(|(_, value)| match value {
+            SvcParamValue::Ipv4Hint(hints) => hints
+                .0
+                .iter()
+                .any(|address| self.is_private_address(IpAddr::V4(address.0))),
+            SvcParamValue::Ipv6Hint(hints) => hints
+                .0
+                .iter()
+                .any(|address| self.is_private_address(IpAddr::V6(address.0))),
+            _ => false,
+        })
+    }
+
+    /// Remove private addresses from public names.
+    ///
+    /// Returns true when at least one record was removed. Unbound checks the
+    /// owner name of each RRset, removes only the offending records, and keeps
+    /// the rest of the response; this mirrors that behaviour. Stub zones are
+    /// exempt because their data is configured locally.
+    fn apply(&self, message: &mut Message, qname: &Name) -> bool {
+        if self.networks.is_empty() || self.is_stub_zone(qname) {
+            return false;
+        }
+
+        let mut removed = false;
+        for section in [
+            &mut message.answers,
+            &mut message.authorities,
+            &mut message.additionals,
+        ] {
+            section.retain(|record| {
+                if self.is_private_domain(&record.name) || self.is_stub_zone(&record.name) {
+                    return true;
+                }
+                if self.has_private_address(record) {
+                    debug!(
+                        name = %record.name,
+                        "removing a private address from a public name"
+                    );
+                    removed = true;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        removed
+    }
+}
+
 #[derive(Clone)]
 pub struct QueryPipeline {
     config: Arc<Config>,
@@ -137,6 +258,7 @@ pub struct QueryPipeline {
     local: local::LocalPolicy,
     auth_downstream: local::LocalZones,
     auth_upstream: local::LocalZones,
+    private: PrivateAddressFilter,
 }
 
 impl QueryPipeline {
@@ -354,6 +476,7 @@ impl QueryPipeline {
         let local_policy = local::LocalPolicy::from_config(&config);
         let auth_downstream = local::auth_zones(&config.auth_zones, true);
         let auth_upstream = local::auth_zones(&config.auth_zones, false);
+        let private = PrivateAddressFilter::from_config(&config);
 
         Self {
             rate_limiter: RateLimiter::new(config.server.ratelimit, config.server.ratelimit_slip),
@@ -374,6 +497,7 @@ impl QueryPipeline {
             local: local_policy,
             auth_downstream,
             auth_upstream,
+            private,
         }
     }
 
@@ -499,7 +623,9 @@ impl QueryPipeline {
         }
 
         // A CD client must see the underlying data even if a non-CD query
-        // already cached a SERVFAIL for the same name.
+        // already cached a SERVFAIL for the same name. Cache entries are
+        // written after `prepare_response` runs, so every hit is already
+        // scrubbed by the rebinding filter.
         if !checking_disabled {
             if let Some(hit) =
                 self.messages
@@ -713,7 +839,8 @@ impl QueryPipeline {
                         let cacheable =
                             !checking_disabled && !matches!(resolved.security, Security::Bogus(_));
                         let security = resolved.security.clone();
-                        let (message, ede) = self.apply_security(resolved, checking_disabled);
+                        let (message, ede) =
+                            self.prepare_response(resolved, &query.name, checking_disabled);
                         if cacheable {
                             let ttl = response_ttl(
                                 &message,
@@ -770,6 +897,21 @@ impl QueryPipeline {
                 }
             }
         }
+    }
+
+    /// Apply validation policy and DNS rebinding protection.
+    fn prepare_response(
+        &self,
+        resolved: dns_iter::Resolved,
+        qname: &Name,
+        checking_disabled: bool,
+    ) -> (Message, Option<BogusReason>) {
+        let (mut message, ede) = self.apply_security(resolved, checking_disabled);
+        if self.private.apply(&mut message, qname) {
+            // The answer no longer matches the data that was validated.
+            message.metadata.authentic_data = false;
+        }
+        (message, ede)
     }
 
     /// Convert a validation result into a client-facing response.
@@ -1168,13 +1310,14 @@ fn truncate(mut message: Message, limit: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dns_config::Config;
+    use dns_config::{Config, ServerConfig};
     use dns_proto::{
-        Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType, ResponseCode,
+        CNAME, Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType,
+        ResponseCode,
     };
     use dns_testutil::query_bytes;
 
@@ -1418,5 +1561,171 @@ mod tests {
         assert!(truncated.metadata.truncation);
         assert!(truncated.answers.is_empty());
         assert_eq!(truncated.queries.len(), 1);
+    }
+
+    fn answer(owner: &str, data: RData) -> Record {
+        Record::from_rdata(Name::from_ascii(owner).expect("name"), 60, data)
+    }
+
+    fn resolved_with(answers: Vec<Record>) -> dns_iter::Resolved {
+        let mut message = Message::new(0, MessageType::Response, OpCode::Query);
+        message.metadata.recursion_available = true;
+        for record in answers {
+            message.add_answer(record);
+        }
+        dns_iter::Resolved {
+            message,
+            security: dns_iter::Security::Secure,
+        }
+    }
+
+    #[test]
+    fn rebinding_filter_removes_private_addresses_from_public_names() {
+        let pipeline = pipeline();
+        let qname = Name::from_ascii("evil.example.").expect("name");
+        let resolved = resolved_with(vec![
+            answer(
+                "evil.example.",
+                RData::A(Ipv4Addr::new(192, 168, 1, 10).into()),
+            ),
+            answer(
+                "evil.example.",
+                RData::A(Ipv4Addr::new(203, 0, 113, 5).into()),
+            ),
+            answer(
+                "evil.example.",
+                RData::AAAA(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).into()),
+            ),
+        ]);
+
+        let (message, _) = pipeline.prepare_response(resolved, &qname, false);
+        assert_eq!(message.answers.len(), 1);
+        assert_eq!(message.answers[0].data.to_string(), "203.0.113.5");
+        assert!(!message.metadata.authentic_data);
+    }
+
+    #[test]
+    fn rebinding_filter_keeps_private_addresses_for_private_domains() {
+        let config = Config {
+            server: ServerConfig {
+                private_domain: vec!["home.example".to_owned()],
+                ..ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let pipeline = QueryPipeline::new(Arc::new(config));
+        let qname = Name::from_ascii("printer.home.example.").expect("name");
+        let resolved = resolved_with(vec![answer(
+            "printer.home.example.",
+            RData::A(Ipv4Addr::new(192, 168, 1, 20).into()),
+        )]);
+
+        let (message, _) = pipeline.prepare_response(resolved, &qname, false);
+        assert_eq!(message.answers.len(), 1);
+        assert!(message.metadata.authentic_data);
+    }
+
+    #[test]
+    fn rebinding_filter_checks_the_answer_owner_name() {
+        let config = Config {
+            server: ServerConfig {
+                private_domain: vec!["home.example".to_owned()],
+                ..ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let pipeline = QueryPipeline::new(Arc::new(config));
+        let qname = Name::from_ascii("www.example.").expect("name");
+        let resolved = resolved_with(vec![
+            answer(
+                "www.example.",
+                RData::CNAME(CNAME(
+                    Name::from_ascii("printer.home.example.").expect("target"),
+                )),
+            ),
+            answer(
+                "printer.home.example.",
+                RData::A(Ipv4Addr::new(192, 168, 1, 20).into()),
+            ),
+        ]);
+
+        let (message, _) = pipeline.prepare_response(resolved, &qname, false);
+        assert!(
+            message
+                .answers
+                .iter()
+                .any(|record| matches!(&record.data, RData::A(_)))
+        );
+    }
+
+    #[test]
+    fn rebinding_filter_removes_private_https_hints() {
+        let pipeline = pipeline();
+        let qname = Name::from_ascii("evil.example.").expect("name");
+        let records = dns_proto::parse_zone_records(
+            "evil.example. 60 IN HTTPS 1 . ipv4hint=192.168.1.10",
+            None,
+        )
+        .expect("parse HTTPS record");
+        let (message, _) = pipeline.prepare_response(resolved_with(records), &qname, false);
+        assert!(
+            message.answers.is_empty(),
+            "an HTTPS record with a private hint must be removed"
+        );
+    }
+
+    #[test]
+    fn rebinding_filter_exempts_stub_zone_data() {
+        let config = Config {
+            stub_zones: vec![dns_config::StubZoneConfig {
+                name: "corp.example.".to_owned(),
+                stub_addrs: vec!["192.0.2.1".parse().expect("stub address")],
+                ..dns_config::StubZoneConfig::default()
+            }],
+            ..Config::default()
+        };
+        config.validate().expect("valid stub zone");
+        let pipeline = QueryPipeline::new(Arc::new(config));
+        let qname = Name::from_ascii("host.corp.example.").expect("name");
+        let resolved = resolved_with(vec![answer(
+            "host.corp.example.",
+            RData::A(Ipv4Addr::new(10, 0, 0, 5).into()),
+        )]);
+
+        let (message, _) = pipeline.prepare_response(resolved, &qname, false);
+        assert_eq!(message.answers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_answers_are_stored_without_private_addresses() {
+        let pipeline = pipeline();
+        let name = Name::from_ascii("evil.example.").expect("name");
+        let resolved = resolved_with(vec![
+            answer(
+                "evil.example.",
+                RData::A(Ipv4Addr::new(192, 168, 1, 10).into()),
+            ),
+            answer(
+                "evil.example.",
+                RData::A(Ipv4Addr::new(203, 0, 113, 5).into()),
+            ),
+        ]);
+        let (message, _) = pipeline.prepare_response(resolved, &name, false);
+        pipeline.messages.insert(
+            &name,
+            RecordType::A,
+            false,
+            &message,
+            Duration::from_secs(60),
+        );
+
+        let bytes = query_bytes("evil.example.", RecordType::A);
+        let response = pipeline
+            .handle(&bytes, client(), Transport::Udp)
+            .await
+            .expect("response");
+        let message = Message::from_vec(&response).expect("decode");
+        assert_eq!(message.answers.len(), 1);
+        assert_eq!(message.answers[0].data.to_string(), "203.0.113.5");
     }
 }

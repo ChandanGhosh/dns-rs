@@ -21,6 +21,10 @@ struct MockForwarder {
 
 impl MockForwarder {
     async fn start(delay: Duration, ttl: u32) -> Self {
+        Self::start_with(delay, ttl, Ipv4Addr::new(192, 0, 2, 1)).await
+    }
+
+    async fn start_with(delay: Duration, ttl: u32, address: Ipv4Addr) -> Self {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind"));
         let addr = socket.local_addr().expect("local address");
         let queries = Arc::new(AtomicUsize::new(0));
@@ -38,7 +42,7 @@ impl MockForwarder {
                 };
                 counter.fetch_add(1, Ordering::SeqCst);
 
-                let Some(wire) = encode(&reply(&query, ttl)).ok() else {
+                let Some(wire) = encode(&reply(&query, ttl, address)).ok() else {
                     continue;
                 };
                 let socket = Arc::clone(&listener);
@@ -59,7 +63,7 @@ impl MockForwarder {
     }
 }
 
-fn reply(query: &Message, ttl: u32) -> Message {
+fn reply(query: &Message, ttl: u32, address: Ipv4Addr) -> Message {
     let mut message = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
     message.metadata.recursion_available = true;
     message.metadata.response_code = ResponseCode::NoError;
@@ -68,7 +72,7 @@ fn reply(query: &Message, ttl: u32) -> Message {
         message.add_answer(Record::from_rdata(
             question.name.clone(),
             ttl,
-            RData::A(Ipv4Addr::new(192, 0, 2, 1).into()),
+            RData::A(address.into()),
         ));
     }
     message
@@ -279,4 +283,47 @@ async fn cancelling_a_leader_releases_followers() {
         .expect("follower task");
     let message = decode(&follower_response.expect("SERVFAIL response")).expect("decode");
     assert_eq!(message.metadata.response_code, ResponseCode::ServFail);
+}
+
+#[tokio::test]
+async fn rebinding_filter_blocks_private_answers_end_to_end() {
+    let private = Ipv4Addr::new(192, 168, 1, 10);
+    let forwarder = MockForwarder::start_with(Duration::ZERO, 300, private).await;
+    let pipeline = QueryPipeline::new(Arc::new(config(forwarder.addr)));
+    let bytes = query_bytes("evil.example.", RecordType::A);
+
+    let response = pipeline
+        .handle(&bytes, client(), Transport::Udp)
+        .await
+        .expect("response");
+    let message = decode(&response).expect("decode response");
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        message.answers.is_empty(),
+        "the private address must be removed from a public name"
+    );
+}
+
+#[tokio::test]
+async fn rebinding_filter_allows_private_answers_for_private_domains() {
+    let private = Ipv4Addr::new(192, 168, 1, 20);
+    let forwarder = MockForwarder::start_with(Duration::ZERO, 300, private).await;
+    let mut config = config(forwarder.addr);
+    config.server.private_domain = vec!["home.example".to_owned()];
+    let pipeline = QueryPipeline::new(Arc::new(config));
+    let bytes = query_bytes("printer.home.example.", RecordType::A);
+
+    let response = pipeline
+        .handle(&bytes, client(), Transport::Udp)
+        .await
+        .expect("response");
+    let message = decode(&response).expect("decode response");
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        message
+            .answers
+            .iter()
+            .any(|record| matches!(&record.data, RData::A(address) if address.0 == private)),
+        "private-domain names must keep their private address"
+    );
 }

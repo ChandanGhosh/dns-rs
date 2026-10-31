@@ -11,6 +11,23 @@ access_control = [
     "::/0 refuse",
 ]
 
+# DNS rebinding protection is on by default: A/AAAA records pointing at private
+# ranges are dropped unless the owner name is under one of these local-only
+# namespaces. Set private_address = [] to disable the filter entirely.
+private_domain = [
+    "local",
+    "localdomain",
+    "lan",
+    "home",
+    "home.arpa",
+    "internal",
+    "intranet",
+    "corp",
+    "private",
+    "test",
+    "localhost",
+]
+
 # DNS over TLS (RFC 7858). The name after `#` is verified against the
 # forwarder's certificate and, without `@port`, implies port 853.
 [[forward_zones]]

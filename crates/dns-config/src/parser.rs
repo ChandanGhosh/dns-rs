@@ -35,6 +35,8 @@ struct Parser {
     config: Config,
     warnings: Vec<ConfigWarning>,
     include_stack: Vec<PathBuf>,
+    private_address_explicit: bool,
+    private_domain_explicit: bool,
 }
 
 impl Default for Parser {
@@ -56,6 +58,8 @@ impl Default for Parser {
             },
             warnings: Vec::new(),
             include_stack: Vec::new(),
+            private_address_explicit: false,
+            private_domain_explicit: false,
         }
     }
 }
@@ -326,6 +330,30 @@ impl Parser {
                     return Err(ConfigError::parse(path, line, "domain-insecure is empty"));
                 }
                 self.config.server.domain_insecure.push(domain);
+            }
+            "private-address" => {
+                let address = parse_scalar(value);
+                if address.is_empty() {
+                    return Err(ConfigError::parse(path, line, "private-address is empty"));
+                }
+                // An explicit list replaces the built-in defaults, matching
+                // the TOML configuration where the field is a single list.
+                if !self.private_address_explicit {
+                    self.config.server.private_address.clear();
+                    self.private_address_explicit = true;
+                }
+                self.config.server.private_address.push(address);
+            }
+            "private-domain" => {
+                let domain = parse_scalar(value);
+                if domain.is_empty() {
+                    return Err(ConfigError::parse(path, line, "private-domain is empty"));
+                }
+                if !self.private_domain_explicit {
+                    self.config.server.private_domain.clear();
+                    self.private_domain_explicit = true;
+                }
+                self.config.server.private_domain.push(domain);
             }
             "val-clean-additional" => {
                 self.config.server.val_clean_additional = parse_bool(path, line, key, value)?;
@@ -931,6 +959,10 @@ server:
     access-control: 10.0.0.0/8 refuse
     domain-insecure: docker.com
     domain-insecure: "internal.example."
+    private-address: 10.0.0.0/8
+    private-address: 192.168.1.10
+    private-domain: "home.example."
+    private-domain: corp.example
     tls-service-key: "/tmp/key.pem"
     tls-service-pem: "/tmp/cert.pem"
     tls-port: 8853
@@ -969,6 +1001,15 @@ remote-control:
         assert_eq!(
             config.server.domain_insecure,
             vec!["docker.com".to_owned(), "internal.example.".to_owned()]
+        );
+        // Explicit lists replace the built-in defaults rather than appending.
+        assert_eq!(
+            config.server.private_address,
+            vec!["10.0.0.0/8".to_owned(), "192.168.1.10".to_owned()]
+        );
+        assert_eq!(
+            config.server.private_domain,
+            vec!["home.example.".to_owned(), "corp.example".to_owned()]
         );
         assert_eq!(config.server.tls_port, 8853);
         assert_eq!(config.server.https_port, 8443);

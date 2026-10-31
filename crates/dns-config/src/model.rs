@@ -97,6 +97,18 @@ impl Config {
                 "max-concurrent-queries-per-client must be at least 1".to_owned(),
             ));
         }
+        for address in &server.private_address {
+            parse_private_network(address)?;
+        }
+        let mut private_domains = BTreeSet::new();
+        for domain in &server.private_domain {
+            let name = absolute_name(domain)?;
+            if !private_domains.insert(name.to_ascii().to_ascii_lowercase()) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate private-domain for {domain:?}"
+                )));
+            }
+        }
         let mut insecure_domains = BTreeSet::new();
         for domain in &server.domain_insecure {
             let name = absolute_name(domain)?;
@@ -325,6 +337,21 @@ pub struct ServerConfig {
     pub ratelimit_slip: u32,
     /// Maximum in-flight queries per client IP.
     pub max_concurrent_queries_per_client: usize,
+    /// Address ranges treated as private for DNS rebinding protection.
+    ///
+    /// A or AAAA records whose owner name is not covered by
+    /// [`Self::private_domain`] are removed when the address falls inside one
+    /// of these networks. This is Unbound's `private-address` option. The
+    /// default blocks the standard RFC 1918, link-local, and IPv6 unique-local
+    /// ranges; set an empty list to disable the protection.
+    pub private_address: Vec<String>,
+    /// Domains (and their subdomains) allowed to contain private addresses.
+    ///
+    /// This is Unbound's `private-domain` option. The default covers common
+    /// local-only namespaces (`.local`, `.lan`, `.home.arpa`, and similar)
+    /// that are not delegated in the public DNS. Local zones, auth zones, and
+    /// built-in local data are always allowed to contain private addresses.
+    pub private_domain: Vec<String>,
     /// Maximum concurrent plain-TCP and DoT connections per worker thread.
     ///
     /// The server enforces `incoming_num_tcp * num_threads` connections across
@@ -396,6 +423,8 @@ impl Default for ServerConfig {
             ratelimit: 0,
             ratelimit_slip: 2,
             max_concurrent_queries_per_client: 64,
+            private_address: default_private_address(),
+            private_domain: default_private_domains(),
             incoming_num_tcp: 10,
             tls_service_key: None,
             tls_service_pem: None,
@@ -419,6 +448,34 @@ impl ServerConfig {
             .filter_map(|domain| absolute_name(domain).ok())
             .collect()
     }
+
+    /// Private address ranges for DNS rebinding protection, parsed.
+    ///
+    /// The values are validated by [`Config::validate`]; invalid entries are
+    /// skipped here so the accessor is also safe for hand-built configs.
+    pub fn private_networks(&self) -> Vec<IpNet> {
+        let mut networks = self
+            .private_address
+            .iter()
+            .filter_map(|address| parse_private_network(address).ok())
+            .collect::<Vec<_>>();
+        networks.sort();
+        networks.dedup();
+        networks
+    }
+
+    /// Domains allowed to contain private addresses, in absolute form.
+    ///
+    /// The values are validated by [`Config::validate`]; invalid entries are
+    /// skipped here so the accessor is also safe for hand-built configs.
+    pub fn private_domains(&self) -> Vec<Name> {
+        let mut seen = BTreeSet::new();
+        self.private_domain
+            .iter()
+            .filter_map(|domain| absolute_name(domain).ok())
+            .filter(|name| seen.insert(name.to_ascii().to_ascii_lowercase()))
+            .collect()
+    }
 }
 
 /// Parse a configured domain name, treating an omitted trailing dot as the
@@ -431,6 +488,68 @@ fn absolute_name(value: &str) -> Result<Name, ConfigError> {
     };
     Name::from_ascii(&candidate)
         .map_err(|error| ConfigError::Validation(format!("invalid domain name {value:?}: {error}")))
+}
+
+/// Parse a `private-address` value: either a CIDR prefix or a bare address.
+fn parse_private_network(value: &str) -> Result<IpNet, ConfigError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ConfigError::Validation(
+            "private-address must not be empty".to_owned(),
+        ));
+    }
+    if let Ok(network) = value.parse::<IpNet>() {
+        return Ok(network);
+    }
+    let address = value.parse::<IpAddr>().map_err(|error| {
+        ConfigError::Validation(format!("invalid private-address {value:?}: {error}"))
+    })?;
+    Ok(match address {
+        IpAddr::V4(_) => IpNet::new(address, 32).expect("valid IPv4 prefix length"),
+        IpAddr::V6(_) => IpNet::new(address, 128).expect("valid IPv6 prefix length"),
+    })
+}
+
+/// The private ranges blocked by default, matching Unbound's example config.
+fn default_private_address() -> Vec<String> {
+    [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "fd00::/8",
+        "fe80::/10",
+        "::ffff:0:0/96",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Local-only namespaces allowed to contain private addresses by default.
+///
+/// None of these are delegated in the public DNS: `.local` is mDNS special
+/// use (RFC 6762), `.home.arpa` is the home-network name (RFC 8375),
+/// `.internal` is reserved for private use, and the rest are conventional
+/// local names. `.example` is deliberately absent so documentation names
+/// still exercise the filter.
+fn default_private_domains() -> Vec<String> {
+    [
+        "local",
+        "localdomain",
+        "lan",
+        "home",
+        "home.arpa",
+        "internal",
+        "intranet",
+        "corp",
+        "private",
+        "test",
+        "localhost",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn default_access_control() -> Vec<AccessControl> {
@@ -1496,5 +1615,120 @@ mod tests {
         };
         let error = config.validate().expect_err("duplicate must fail");
         assert!(error.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn private_address_defaults_block_rfc1918_and_ula() {
+        let networks = Config::default().server.private_networks();
+        assert!(
+            networks
+                .iter()
+                .any(|network| network.contains(&IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))))
+        );
+        assert!(
+            networks
+                .iter()
+                .any(|network| network.contains(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))))
+        );
+        assert!(
+            networks.iter().any(
+                |network| network.contains(&"fd00::1".parse::<IpAddr>().expect("IPv6 address"))
+            )
+        );
+    }
+
+    #[test]
+    fn private_domain_defaults_cover_common_local_names() {
+        let domains = Config::default().server.private_domains();
+        for expected in [
+            "local.",
+            "localdomain.",
+            "lan.",
+            "home.",
+            "home.arpa.",
+            "internal.",
+            "intranet.",
+            "corp.",
+            "private.",
+            "test.",
+            "localhost.",
+        ] {
+            assert!(
+                domains.iter().any(|domain| domain.to_ascii() == expected),
+                "missing default private-domain {expected}"
+            );
+        }
+        assert!(
+            !domains.iter().any(|domain| domain.to_ascii() == "example."),
+            ".example must stay filtered so documentation names are still tested"
+        );
+    }
+
+    #[test]
+    fn private_address_accepts_bare_addresses_and_prefixes() {
+        let config = Config {
+            server: super::ServerConfig {
+                private_address: vec!["192.168.1.10".to_owned(), "2001:db8::/32".to_owned()],
+                private_domain: vec!["home.example".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        config.validate().expect("valid private policy");
+
+        let networks = config.server.private_networks();
+        assert!(
+            networks
+                .iter()
+                .any(|network| network.to_string() == "192.168.1.10/32")
+        );
+        assert!(
+            networks
+                .iter()
+                .any(|network| network.to_string() == "2001:db8::/32")
+        );
+        assert_eq!(
+            config.server.private_domains(),
+            vec![super::Name::from_ascii("home.example.").expect("name")]
+        );
+    }
+
+    #[test]
+    fn private_address_rejects_invalid_values() {
+        let config = Config {
+            server: super::ServerConfig {
+                private_address: vec!["not-an-address".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("invalid address must fail");
+        assert!(error.to_string().contains("private-address"));
+    }
+
+    #[test]
+    fn empty_private_address_disables_filtering() {
+        let config = Config {
+            server: super::ServerConfig {
+                private_address: Vec::new(),
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        config.validate().expect("an empty list is valid");
+        assert!(config.server.private_networks().is_empty());
+    }
+
+    #[test]
+    fn private_domain_rejects_duplicates() {
+        let config = Config {
+            server: super::ServerConfig {
+                private_domain: vec!["home.example".to_owned(), "HOME.EXAMPLE.".to_owned()],
+                ..super::ServerConfig::default()
+            },
+            ..Config::default()
+        };
+        let error = config.validate().expect_err("duplicate must fail");
+        assert!(error.to_string().contains("duplicate private-domain"));
     }
 }

@@ -135,6 +135,38 @@ signed CDN zone is insecure by design and resolves without any exclusion.
 `val_permissive_mode` is a different, global escape hatch: it still runs
 validation but returns bogus data with `AD=0` instead of `SERVFAIL`.
 
+**DNS rebinding protection**
+
+Public names must not be able to return addresses on the local network. dns-rs
+removes A and AAAA records (and SVCB/HTTPS address hints) whose address falls in
+`private_address` unless the record's owner name is covered by `private_domain`.
+Local zones, auth zones, and stub zones are exempt because their data is
+configured locally.
+
+```toml
+[server]
+# Names (and their subdomains) allowed to return private addresses. Setting
+# this replaces the defaults; add your own names alongside the local ones.
+private_domain = [
+    "local", "localdomain", "lan", "home", "home.arpa", "internal",
+    "intranet", "corp", "private", "test", "localhost",
+    "home.example", "corp.internal",
+]
+
+# Optional: replace the default ranges. An empty list disables filtering.
+private_address = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fd00::/8"]
+```
+
+The defaults block RFC 1918, link-local, and IPv6 unique-local ranges, and
+allow the common local-only namespaces `.local`, `.localdomain`, `.lan`,
+`.home`, `.home.arpa`, `.internal`, `.intranet`, `.corp`, `.private`, `.test`,
+and `.localhost`. These names are not delegated in the public DNS, so allowing
+them to return private addresses keeps mDNS-style and home-network names
+working without weakening protection for public names. Explicitly setting
+`private_domain` or `private_address` replaces the defaults rather than
+appending to them. The `unbound.conf` equivalents are `private-address:` and
+`private-domain:`.
+
 **Caching**
 
 - Message, RRset, and infrastructure caches with TTL clamping (`cache-min-ttl`,
@@ -155,6 +187,9 @@ validation but returns bogus data with `AD=0` instead of `SERVFAIL`.
   fallback to global local data.
 - Local zones and `local-data` records, plus authoritative zones loaded from
   zonefiles.
+- DNS rebinding protection: A/AAAA answers in the configured private ranges are
+  removed unless the answer name is covered by `private_domain` (stub-zone data
+  is exempt).
 - Per-client rate limiting (`ratelimit`, `ratelimit-slip`) and concurrent-query
   limits.
 - Prometheus text rendering for pipeline counters (`PipelineStats`), not yet
@@ -312,7 +347,8 @@ Supported `unbound.conf` blocks:
   UDP/TCP, outgoing interfaces, access control, access-control-view, local
   zones and data, hardening, DNSSEC validation and per-domain exclusions, trust
   anchors, QNAME minimisation, 0x20, EDNS sizes, TTL bounds, prefetch,
-  serve-expired, rate limiting, and TCP connection limits.
+  serve-expired, rate limiting, private-address/private-domain rebinding
+  protection, and TCP connection limits.
 - `forward-zone:` — name, `forward-addr` (plain, DoT, or DoH targets),
   `forward-first`, `forward-fallback`, and `forward-tls-upstream` (Unbound
   alias `forward-ssl-upstream`). A DoT `#auth-name` without `@port` implies

@@ -13,7 +13,8 @@ pub use hickory_proto::dnssec::{
 };
 pub use hickory_proto::op::{Edns, EdnsFlags, Message, MessageType, OpCode, Query, ResponseCode};
 pub use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
-pub use hickory_proto::rr::rdata::{CNAME, NS, SOA};
+pub use hickory_proto::rr::rdata::svcb::SvcParamValue;
+pub use hickory_proto::rr::rdata::{CNAME, HTTPS, NS, SOA, SVCB};
 pub use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType, SerialNumber};
 pub use hickory_proto::serialize::binary::DecodeError;
 

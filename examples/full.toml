@@ -110,6 +110,37 @@ ratelimit = 0
 ratelimit_slip = 2
 max_concurrent_queries_per_client = 64
 
+# DNS rebinding protection. A/AAAA records and SVCB/HTTPS address hints whose
+# address falls in one of these ranges are removed unless the record's owner
+# name is under private_domain. Local zones, auth zones, and stub zones are
+# exempt. Set [] to disable. Defaults: RFC 1918, link-local, IPv6 unique-local,
+# and IPv4-mapped IPv6.
+private_address = [
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+    "fd00::/8",
+    "fe80::/10",
+    "::ffff:0:0/96",
+]
+# Names (and their subdomains) allowed to contain private addresses. The
+# defaults cover common local-only namespaces; set your own list here to
+# replace them (for example, add "home.example").
+private_domain = [
+    "local",
+    "localdomain",
+    "lan",
+    "home",
+    "home.arpa",
+    "internal",
+    "intranet",
+    "corp",
+    "private",
+    "test",
+    "localhost",
+]
+
 # Maximum concurrent plain-TCP and DoT connections per worker thread.
 # The effective limit is incoming_num_tcp * num_threads. Zero disables the
 # TCP and DoT listeners; DoH keeps its own HTTP connection management.
