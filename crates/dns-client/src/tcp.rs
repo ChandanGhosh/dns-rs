@@ -3,8 +3,8 @@
 //! Truncated UDP answers are retried over TCP. Keeping successful connections
 //! around avoids a fresh three-way handshake for every fallback, which matters
 //! for authoritative servers that truncate large RRsets consistently. As with
-//! the TLS pool, a pooled connection that turns out to be closed is dropped and
-//! the query is retried once on a fresh connection.
+//! the TLS pool, an exchange failure drops every idle connection to that server
+//! and the query is retried once on a fresh connection.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -37,14 +37,16 @@ impl TcpClient {
         dur: Duration,
     ) -> Result<Vec<u8>, ClientError> {
         let mut last_error = None;
+        let mut use_pool = true;
 
         for _ in 0..2 {
-            let mut stream = match self.take(server) {
+            let mut stream = match if use_pool { self.take(server) } else { None } {
                 Some(stream) => stream,
                 None => match self.connect(server, dur).await {
                     Ok(stream) => stream,
                     Err(error) => {
                         last_error = Some(error);
+                        use_pool = false;
                         continue;
                     }
                 },
@@ -56,9 +58,13 @@ impl TcpClient {
                     return Ok(response);
                 }
                 Err(error) => {
-                    // The peer may have closed an idle pooled connection.
-                    // Drop it and try a fresh one on the next iteration.
+                    // The peer may have closed an idle pooled connection. Drop
+                    // every idle connection for this server: the remaining
+                    // ones were likely closed at the same time, and retrying
+                    // on another stale socket would fail the query.
                     last_error = Some(error);
+                    self.clear(server);
+                    use_pool = false;
                 }
             }
         }
@@ -88,5 +94,13 @@ impl TcpClient {
         if idle.len() < MAX_IDLE_PER_SERVER {
             idle.push(stream);
         }
+    }
+
+    /// Drop all idle connections to `server`.
+    fn clear(&self, server: SocketAddr) {
+        self.pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&server);
     }
 }

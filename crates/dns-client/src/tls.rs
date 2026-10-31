@@ -71,14 +71,20 @@ impl TlsClient {
     ) -> Result<Vec<u8>, ClientError> {
         let key = (server, tls_name.map(str::to_owned));
         let mut last_error = None;
+        let mut use_pool = true;
 
         for _ in 0..2 {
-            let mut stream = match self.take(&key) {
+            let mut stream = match if use_pool {
+                self.take(&key)
+            } else {
+                None
+            } {
                 Some(stream) => stream,
                 None => match self.connect(server, tls_name, dur).await {
                     Ok(stream) => stream,
                     Err(error) => {
                         last_error = Some(error);
+                        use_pool = false;
                         continue;
                     }
                 },
@@ -90,9 +96,13 @@ impl TlsClient {
                     return Ok(response);
                 }
                 Err(error) => {
-                    // The pooled connection may have been closed by the peer.
-                    // Drop it and try a fresh one on the next iteration.
+                    // The peer may have closed an idle pooled connection.
+                    // Drop every idle connection for this server: the remaining
+                    // ones were likely closed at the same time, and retrying
+                    // on another stale socket would fail the query.
                     last_error = Some(error);
+                    self.clear(key.clone());
+                    use_pool = false;
                 }
             }
         }
@@ -144,6 +154,16 @@ impl TlsClient {
         if idle.len() < MAX_IDLE_PER_SERVER {
             idle.push(stream);
         }
+    }
+
+    /// Drop all idle connections to `key`. This is called when an exchange
+    /// failure suggests the peer closed idle connections, so that later
+    /// queries open fresh ones instead of retrying on stale pooled sockets.
+    fn clear(&self, key: PoolKey) {
+        self.pool
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&key);
     }
 }
 

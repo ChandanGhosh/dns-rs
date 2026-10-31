@@ -565,8 +565,8 @@ The version is compiled into the binary, so a CI image and its `--version` outpu
 always agree:
 
 ```bash
-docker run --rm chandanghosh/dns-rs:0.1.4 --version
-# dns-rs 0.1.4
+docker run --rm chandanghosh/dns-rs:0.1.5 --version
+# dns-rs 0.1.5
 ```
 
 ### Gate order
@@ -586,7 +586,7 @@ picks up the latest build for that date. Use a release tag or the manifest diges
 when you need a stable reference:
 
 ```bash
-docker buildx imagetools inspect "chandanghosh/dns-rs:0.1.4" \
+docker buildx imagetools inspect "chandanghosh/dns-rs:0.1.5" \
   --format '{{json .Manifest}}'
 docker pull "chandanghosh/dns-rs@sha256:<digest>"
 ```
@@ -596,13 +596,13 @@ requires both `TAG` and `CONFIRM=1`):
 
 ```bash
 docker login
-make image-publish TAG=0.1.4 CONFIRM=1
+make image-publish TAG=0.1.5 CONFIRM=1
 ```
 
 The equivalent raw command is:
 
 ```bash
-TAG=0.1.4
+TAG=0.1.5
 VERSION="$(make -s version)"
 docker login
 docker buildx build \
