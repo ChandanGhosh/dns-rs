@@ -13,8 +13,10 @@ mod udp;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dns_config::Config;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -69,25 +71,57 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
             let Some(connections) = connections.as_ref() else {
                 continue;
             };
-            match TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    let pipeline = Arc::clone(&pipeline);
-                    let shutdown = shutdown.clone();
-                    let acceptor = acceptor.clone();
-                    let connections = Arc::clone(connections);
-                    tokio::spawn(async move {
-                        if let Err(err) =
-                            dot::run(listener, acceptor, pipeline, shutdown, connections).await
-                        {
-                            error!(%addr, %err, "DoT listener failed");
-                        }
-                    });
-                    listeners.push((addr, "dot"));
+            {
+                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                socket.set_reuse_address(true)?;
+                #[cfg(unix)]
+                socket.set_reuse_port(true)?;
+                if config.server.tcp_recv_buffer_size > 0 {
+                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                        warn!(%err, "failed to set TCP receive buffer size");
+                    }
                 }
-                Err(err) => {
-                    error!(%addr, %err, "failed to bind DoT socket");
+                if config.server.tcp_send_buffer_size > 0 {
+                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                        warn!(%err, "failed to set TCP send buffer size");
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                if config.server.tcp_user_timeout_ms > 0 {
+                    let timeout = Duration::from_millis(config.server.tcp_user_timeout_ms as u64);
+                    if let Err(err) = socket.set_tcp_user_timeout(Some(timeout)) {
+                        warn!(%err, "failed to set TCP user timeout");
+                    }
+                }
+                socket.set_nonblocking(true)?;
+                match socket.bind(&addr.into()) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        error!(%addr, %err, "failed to bind DoT socket");
+                        return Err(ServerError::Io(err));
+                    }
+                }
+                if let Err(err) = socket.listen(1024) {
+                    error!(%addr, %err, "failed to listen on DoT socket");
                     return Err(ServerError::Io(err));
                 }
+                let listener = match TcpListener::from_std(socket.into()) {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        error!(%addr, %err, "failed to convert DoT socket");
+                        return Err(ServerError::Io(err));
+                    }
+                };
+                let pipeline = Arc::clone(&pipeline);
+                let shutdown = shutdown.clone();
+                let acceptor = acceptor.clone();
+                let connections = Arc::clone(connections);
+                tokio::spawn(async move {
+                    if let Err(err) = dot::run(listener, acceptor, pipeline, shutdown, connections).await {
+                        error!(%addr, %err, "DoT listener failed");
+                    }
+                });
+                listeners.push((addr, "dot"));
             }
             continue;
         }
@@ -105,39 +139,64 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
             let Some(connections) = connections.as_ref() else {
                 continue;
             };
-            match TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    let pipeline = Arc::clone(&pipeline);
-                    let shutdown = shutdown.clone();
-                    let acceptor = acceptor.clone();
-                    let endpoint = config.server.http_endpoint.clone();
-                    let connections = Arc::clone(connections);
-                    tokio::spawn(async move {
-                        if let Err(err) = doh::run(
-                            listener,
-                            acceptor,
-                            endpoint,
-                            pipeline,
-                            shutdown,
-                            connections,
-                        )
-                        .await
-                        {
-                            error!(%addr, %err, "DoH listener failed");
-                        }
-                    });
-                    listeners.push((addr, "doh"));
+            {
+                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                socket.set_reuse_address(true)?;
+                #[cfg(unix)]
+                socket.set_reuse_port(true)?;
+                if config.server.tcp_recv_buffer_size > 0 {
+                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                        warn!(%err, "failed to set TCP receive buffer size");
+                    }
                 }
-                Err(err) => {
-                    error!(%addr, %err, "failed to bind DoH socket");
+                if config.server.tcp_send_buffer_size > 0 {
+                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                        warn!(%err, "failed to set TCP send buffer size");
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                if config.server.tcp_user_timeout_ms > 0 {
+                    let timeout = Duration::from_millis(config.server.tcp_user_timeout_ms as u64);
+                    if let Err(err) = socket.set_tcp_user_timeout(Some(timeout)) {
+                        warn!(%err, "failed to set TCP user timeout");
+                    }
+                }
+                socket.set_nonblocking(true)?;
+                match socket.bind(&addr.into()) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        error!(%addr, %err, "failed to bind DoH socket");
+                        return Err(ServerError::Io(err));
+                    }
+                }
+                if let Err(err) = socket.listen(1024) {
+                    error!(%addr, %err, "failed to listen on DoH socket");
                     return Err(ServerError::Io(err));
                 }
+                let listener = match TcpListener::from_std(socket.into()) {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        error!(%addr, %err, "failed to convert DoH socket");
+                        return Err(ServerError::Io(err));
+                    }
+                };
+                let pipeline = Arc::clone(&pipeline);
+                let shutdown = shutdown.clone();
+                let acceptor = acceptor.clone();
+                let endpoint = config.server.http_endpoint.clone();
+                let connections = Arc::clone(connections);
+                tokio::spawn(async move {
+                    if let Err(err) = doh::run(listener, acceptor, endpoint, pipeline, shutdown, connections).await {
+                        error!(%addr, %err, "DoH listener failed");
+                    }
+                });
+                listeners.push((addr, "doh"));
             }
             continue;
         }
 
         if config.server.do_udp {
-            match udp::bind(addr) {
+            match udp::bind(addr, config.server.udp_recv_buffer_size) {
                 Ok(socket) => {
                     let pipeline = Arc::clone(&pipeline);
                     let shutdown = shutdown.clone();
@@ -157,23 +216,56 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
         if config.server.do_tcp
             && let Some(connections) = connections.as_ref()
         {
-            match TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    let pipeline = Arc::clone(&pipeline);
-                    let shutdown = shutdown.clone();
-                    let connections = Arc::clone(connections);
-                    tokio::spawn(async move {
-                        if let Err(err) = tcp::run(listener, pipeline, shutdown, connections).await
-                        {
-                            error!(%addr, %err, "TCP listener failed");
-                        }
-                    });
-                    listeners.push((addr, "tcp"));
+            {
+                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                socket.set_reuse_address(true)?;
+                #[cfg(unix)]
+                socket.set_reuse_port(true)?;
+                if config.server.tcp_recv_buffer_size > 0 {
+                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                        warn!(%err, "failed to set TCP receive buffer size");
+                    }
                 }
-                Err(err) => {
-                    error!(%addr, %err, "failed to bind TCP socket");
+                if config.server.tcp_send_buffer_size > 0 {
+                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                        warn!(%err, "failed to set TCP send buffer size");
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                if config.server.tcp_user_timeout_ms > 0 {
+                    let timeout = Duration::from_millis(config.server.tcp_user_timeout_ms as u64);
+                    if let Err(err) = socket.set_tcp_user_timeout(Some(timeout)) {
+                        warn!(%err, "failed to set TCP user timeout");
+                    }
+                }
+                socket.set_nonblocking(true)?;
+                match socket.bind(&addr.into()) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        error!(%addr, %err, "failed to bind TCP socket");
+                        return Err(ServerError::Io(err));
+                    }
+                }
+                if let Err(err) = socket.listen(1024) {
+                    error!(%addr, %err, "failed to listen on TCP socket");
                     return Err(ServerError::Io(err));
                 }
+                let listener = match TcpListener::from_std(socket.into()) {
+                    Ok(listener) => listener,
+                    Err(err) => {
+                        error!(%addr, %err, "failed to convert TCP socket");
+                        return Err(ServerError::Io(err));
+                    }
+                };
+                let pipeline = Arc::clone(&pipeline);
+                let shutdown = shutdown.clone();
+                let connections = Arc::clone(connections);
+                tokio::spawn(async move {
+                    if let Err(err) = tcp::run(listener, pipeline, shutdown, connections).await {
+                        error!(%addr, %err, "TCP listener failed");
+                    }
+                });
+                listeners.push((addr, "tcp"));
             }
         }
     }

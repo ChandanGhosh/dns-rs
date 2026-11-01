@@ -390,6 +390,14 @@ pub struct ServerConfig {
     /// Set to true to reject certificates whose name does not match the expected
     /// server name, providing defense-in-depth against misissued or spoofed certs.
     pub tls_enforce_name_check: bool,
+    /// UDP receive socket buffer size in bytes. Zero uses the OS default.
+    pub udp_recv_buffer_size: usize,
+    /// TCP receive socket buffer size in bytes. Zero uses the OS default.
+    pub tcp_recv_buffer_size: usize,
+    /// TCP send socket buffer size in bytes. Zero uses the OS default.
+    pub tcp_send_buffer_size: usize,
+    /// TCP user timeout in milliseconds. Zero uses the OS default.
+    pub tcp_user_timeout_ms: u32,
 }
 
 impl Default for ServerConfig {
@@ -453,6 +461,10 @@ impl Default for ServerConfig {
             tls_cert_bundle: None,
             tls_use_system_ca: true,
             tls_enforce_name_check: false,
+            udp_recv_buffer_size: 0,
+            tcp_recv_buffer_size: 0,
+            tcp_send_buffer_size: 0,
+            tcp_user_timeout_ms: 0,
         }
     }
 }

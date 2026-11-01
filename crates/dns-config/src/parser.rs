@@ -467,6 +467,18 @@ impl Parser {
             "tls-enforce-name-check" => {
                 self.config.server.tls_enforce_name_check = parse_bool(path, line, key, value)?;
             }
+            "udp-recv-buffer-size" => {
+                self.config.server.udp_recv_buffer_size = parse_usize(path, line, key, value)?;
+            }
+            "tcp-recv-buffer-size" => {
+                self.config.server.tcp_recv_buffer_size = parse_usize(path, line, key, value)?;
+            }
+            "tcp-send-buffer-size" => {
+                self.config.server.tcp_send_buffer_size = parse_usize(path, line, key, value)?;
+            }
+            "tcp-user-timeout" => {
+                self.config.server.tcp_user_timeout_ms = parse_u32(path, line, key, value)?;
+            }
             _ => self.warn(
                 path,
                 line,
