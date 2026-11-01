@@ -14,10 +14,10 @@ pub fn bind(addr: SocketAddr, recv_buffer_size: usize) -> std::io::Result<UdpSoc
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
-    if recv_buffer_size > 0 {
-        if let Err(err) = socket.set_recv_buffer_size(recv_buffer_size) {
-            warn!(%err, "failed to set UDP receive buffer size");
-        }
+    if recv_buffer_size > 0
+        && let Err(err) = socket.set_recv_buffer_size(recv_buffer_size)
+    {
+        warn!(%err, "failed to set UDP receive buffer size");
     }
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;

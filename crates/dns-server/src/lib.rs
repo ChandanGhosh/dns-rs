@@ -77,19 +77,17 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
-                if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_recv_buffer_size > 0
+                    && let Err(err) =
                         socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP receive buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP receive buffer size");
                 }
-                if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_send_buffer_size > 0
+                    && let Err(err) =
                         socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP send buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP send buffer size");
                 }
                 #[cfg(target_os = "linux")]
                 if config.server.tcp_user_timeout_ms > 0 {
@@ -152,19 +150,17 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
-                if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_recv_buffer_size > 0
+                    && let Err(err) =
                         socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP receive buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP receive buffer size");
                 }
-                if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_send_buffer_size > 0
+                    && let Err(err) =
                         socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP send buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP send buffer size");
                 }
                 #[cfg(target_os = "linux")]
                 if config.server.tcp_user_timeout_ms > 0 {
@@ -243,19 +239,17 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
-                if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_recv_buffer_size > 0
+                    && let Err(err) =
                         socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP receive buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP receive buffer size");
                 }
-                if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) =
+                if config.server.tcp_send_buffer_size > 0
+                    && let Err(err) =
                         socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
-                    {
-                        warn!(%err, "failed to set TCP send buffer size");
-                    }
+                {
+                    warn!(%err, "failed to set TCP send buffer size");
                 }
                 #[cfg(target_os = "linux")]
                 if config.server.tcp_user_timeout_ms > 0 {
