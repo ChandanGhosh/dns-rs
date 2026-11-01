@@ -72,17 +72,22 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 continue;
             };
             {
-                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                let socket =
+                    Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
                 if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                    if let Err(err) =
+                        socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP receive buffer size");
                     }
                 }
                 if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                    if let Err(err) =
+                        socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP send buffer size");
                     }
                 }
@@ -117,7 +122,9 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 let acceptor = acceptor.clone();
                 let connections = Arc::clone(connections);
                 tokio::spawn(async move {
-                    if let Err(err) = dot::run(listener, acceptor, pipeline, shutdown, connections).await {
+                    if let Err(err) =
+                        dot::run(listener, acceptor, pipeline, shutdown, connections).await
+                    {
                         error!(%addr, %err, "DoT listener failed");
                     }
                 });
@@ -140,17 +147,22 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 continue;
             };
             {
-                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                let socket =
+                    Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
                 if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                    if let Err(err) =
+                        socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP receive buffer size");
                     }
                 }
                 if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                    if let Err(err) =
+                        socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP send buffer size");
                     }
                 }
@@ -186,7 +198,16 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 let endpoint = config.server.http_endpoint.clone();
                 let connections = Arc::clone(connections);
                 tokio::spawn(async move {
-                    if let Err(err) = doh::run(listener, acceptor, endpoint, pipeline, shutdown, connections).await {
+                    if let Err(err) = doh::run(
+                        listener,
+                        acceptor,
+                        endpoint,
+                        pipeline,
+                        shutdown,
+                        connections,
+                    )
+                    .await
+                    {
                         error!(%addr, %err, "DoH listener failed");
                     }
                 });
@@ -217,17 +238,22 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
             && let Some(connections) = connections.as_ref()
         {
             {
-                let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+                let socket =
+                    Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
                 socket.set_reuse_address(true)?;
                 #[cfg(unix)]
                 socket.set_reuse_port(true)?;
                 if config.server.tcp_recv_buffer_size > 0 {
-                    if let Err(err) = socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size) {
+                    if let Err(err) =
+                        socket.set_recv_buffer_size(config.server.tcp_recv_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP receive buffer size");
                     }
                 }
                 if config.server.tcp_send_buffer_size > 0 {
-                    if let Err(err) = socket.set_send_buffer_size(config.server.tcp_send_buffer_size) {
+                    if let Err(err) =
+                        socket.set_send_buffer_size(config.server.tcp_send_buffer_size)
+                    {
                         warn!(%err, "failed to set TCP send buffer size");
                     }
                 }

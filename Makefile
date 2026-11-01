@@ -127,7 +127,7 @@ tools: ## Install the optional Rust tools used by check/ci/coverage
 version: ## Print the workspace version used for image labels and releases
 	@echo "$(VERSION)"
 
-build: ## Build all workspace crates (debug)
+build: fmt ## Build all workspace crates (debug)
 	$(CARGO) build --workspace --all-features
 
 release: ## Build the daemon with the release profile
