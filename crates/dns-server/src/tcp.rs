@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::pipeline::{QueryPipeline, Transport};
 use dns_proto::{decode, encode};
@@ -54,6 +54,9 @@ pub async fn run(
             result = listener.accept() => {
                 match result {
                     Ok((stream, client)) => {
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!(%err, "failed to set TCP_NODELAY");
+                        }
                         // Wait for a connection slot before spawning. This
                         // applies backpressure to the accept queue instead of
                         // letting idle clients grow unbounded tasks.

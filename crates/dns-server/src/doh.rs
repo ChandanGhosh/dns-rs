@@ -23,7 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::pipeline::{QueryPipeline, Transport};
 
@@ -53,6 +53,9 @@ pub async fn run(
             result = listener.accept() => {
                 match result {
                     Ok((stream, client)) => {
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!(%err, "failed to set TCP_NODELAY");
+                        }
                         // Share the connection permit pool with the TCP and
                         // DoT listeners: without a cap, an idle-connection
                         // flood grows tasks, sockets, and TLS buffers

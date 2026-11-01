@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::pipeline::{QueryPipeline, Transport};
 use crate::tcp;
@@ -25,6 +25,9 @@ pub async fn run(
             result = listener.accept() => {
                 match result {
                     Ok((stream, client)) => {
+                        if let Err(err) = stream.set_nodelay(true) {
+                            warn!(%err, "failed to set TCP_NODELAY");
+                        }
                         let permit = tokio::select! {
                             _ = shutdown.cancelled() => break,
                             permit = Arc::clone(&connections).acquire_owned() => {
