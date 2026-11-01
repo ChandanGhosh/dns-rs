@@ -293,6 +293,11 @@ pub struct ServerConfig {
     pub dnssec_validation: bool,
     /// Reject unsigned data in signed zones (used by the DNSSEC validator).
     pub harden_dnssec_stripped: bool,
+    /// Maximum NSEC3 iteration count accepted by the validator.
+    ///
+    /// Responses whose NSEC3 records exceed this are treated as bogus before
+    /// any hashing (RFC 9276 section 3.2). 150 matches Unbound's default.
+    pub nsec3_max_iterations: u16,
     /// Return bogus data instead of SERVFAIL (validation still runs).
     pub val_permissive_mode: bool,
     /// Domains whose DNSSEC chain of trust is ignored (`domain-insecure`).
@@ -408,6 +413,7 @@ impl Default for ServerConfig {
             harden_glue: true,
             dnssec_validation: true,
             harden_dnssec_stripped: true,
+            nsec3_max_iterations: 150,
             val_permissive_mode: false,
             domain_insecure: Vec::new(),
             val_clean_additional: true,

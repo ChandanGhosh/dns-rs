@@ -78,6 +78,10 @@ access_control = [
 harden_glue = true
 dnssec_validation = true
 harden_dnssec_stripped = true
+# Maximum NSEC3 iteration count accepted during validation. Responses with
+# more iterations are treated as bogus instead of hash-bombing the CPU
+# (RFC 9276 section 3.2).
+nsec3_max_iterations = 150
 val_permissive_mode = false
 # Ignore the DNSSEC chain of trust towards these domains and everything below
 # them. Validation continues for all other names; a trust anchor at or below an

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use dns_cache::{InfraCache, RrsetCache};
 use dns_client::{HttpsClient, TcpClient, TlsClient, UdpClient};
-use dns_dnssec::{Security, TrustStore, rrsig_of};
+use dns_dnssec::{MAX_NSEC3_ITERATIONS, Security, TrustStore, rrsig_of};
 use dns_proto::{
     Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType, ResponseCode,
     decode, encode,
@@ -174,6 +174,11 @@ pub struct IteratorConfig {
     pub domain_insecure: Vec<Name>,
     /// Treat unsigned data in a signed zone as bogus.
     pub harden_dnssec_stripped: bool,
+    /// Maximum NSEC3 iteration count accepted during validation.
+    ///
+    /// Proofs with more iterations are treated as bogus before any hashing, so
+    /// a signed zone cannot force unbounded CPU work (RFC 9276 section 3.2).
+    pub nsec3_max_iterations: u16,
     /// Return bogus data instead of failing (validation still runs).
     pub val_permissive_mode: bool,
     /// Strip additional-section data after validation.
@@ -209,6 +214,7 @@ impl Default for IteratorConfig {
             trust_store: TrustStore::builtin(),
             domain_insecure: Vec::new(),
             harden_dnssec_stripped: true,
+            nsec3_max_iterations: MAX_NSEC3_ITERATIONS,
             val_permissive_mode: false,
             val_clean_additional: true,
             tls_cert_bundle: None,

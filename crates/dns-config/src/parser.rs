@@ -303,6 +303,10 @@ impl Parser {
             "harden-dnssec-stripped" => {
                 self.config.server.harden_dnssec_stripped = parse_bool(path, line, key, value)?;
             }
+            "nsec3-max-iterations" => {
+                // Zero is allowed: RFC 9276 recommends no extra iterations.
+                self.config.server.nsec3_max_iterations = parse_u16(path, line, key, value, false)?;
+            }
             "module-config" => {
                 let modules = parse_scalar(value);
                 let lower = modules.to_ascii_lowercase();
@@ -1041,6 +1045,30 @@ forward-zone:
         // when the feature is wired up.
         assert!(!config.remote_control.enabled);
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_nsec3_max_iterations() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("nsec3.conf");
+        fs::write(
+            &path,
+            "server:\n    interface: 127.0.0.1@5353\n    nsec3-max-iterations: 42\n",
+        )
+        .expect("write config");
+
+        let config = parse_unbound_file(&path).expect("parse config").config;
+        assert_eq!(config.server.nsec3_max_iterations, 42);
+
+        // Zero stays legal: RFC 9276 recommends running without extra
+        // iterations.
+        fs::write(
+            &path,
+            "server:\n    interface: 127.0.0.1@5353\n    nsec3-max-iterations: 0\n",
+        )
+        .expect("write config");
+        let config = parse_unbound_file(&path).expect("parse config").config;
+        assert_eq!(config.server.nsec3_max_iterations, 0);
     }
 
     #[test]

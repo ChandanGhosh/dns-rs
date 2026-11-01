@@ -4,6 +4,14 @@ use data_encoding::BASE32HEX_NOPAD;
 use dns_proto::{NSEC, NSEC3, Name, Nsec3HashAlgorithm, Record, RecordType};
 use sha1::{Digest, Sha1};
 
+use crate::DnssecError;
+
+/// Default maximum NSEC3 iteration count accepted by a validator.
+///
+/// RFC 9276 section 3.2 recommends that validators treat responses with more
+/// iterations as bogus. 150 matches Unbound's `nsec3-max-iterations` default.
+pub const MAX_NSEC3_ITERATIONS: u16 = 150;
+
 /// Whether `name` falls strictly between an NSEC owner and its next name.
 pub fn nsec_covers(owner: &Name, next: &Name, name: &Name) -> bool {
     if owner == next {
@@ -32,7 +40,19 @@ pub fn nsec_proves_nodata(nsec: &NSEC, qtype: RecordType) -> bool {
 /// Compute the NSEC3 hash of a name (RFC 5155 §5).
 ///
 /// Only SHA-1 is defined, so the caller should check the record's algorithm.
-pub fn nsec3_hash(name: &Name, iterations: u16, salt: &[u8]) -> Vec<u8> {
+///
+/// Returns [`DnssecError::IterationLimit`] when `iterations` exceeds
+/// `max_iterations`. The check happens before any hashing so a hostile zone
+/// cannot force unbounded CPU work.
+pub fn nsec3_hash(
+    name: &Name,
+    iterations: u16,
+    salt: &[u8],
+    max_iterations: u16,
+) -> Result<Vec<u8>, DnssecError> {
+    if iterations > max_iterations {
+        return Err(DnssecError::IterationLimit);
+    }
     let wire = canonical_wire(name);
     let mut input = wire;
     input.extend_from_slice(salt);
@@ -42,7 +62,7 @@ pub fn nsec3_hash(name: &Name, iterations: u16, salt: &[u8]) -> Vec<u8> {
         input.extend_from_slice(salt);
         digest = Sha1::digest(&input).to_vec();
     }
-    digest
+    Ok(digest)
 }
 
 /// Decode the hashed owner name from an NSEC3 record's first label.
@@ -98,8 +118,8 @@ mod tests {
     use dns_proto::{NSEC, NSEC3, Name, Record, RecordType};
 
     use super::{
-        nsec_covers, nsec_proves_nodata, nsec3_covers, nsec3_hash, nsec3_owner_hash,
-        nsec3_proves_nodata, wildcard_name,
+        MAX_NSEC3_ITERATIONS, nsec_covers, nsec_proves_nodata, nsec3_covers, nsec3_hash,
+        nsec3_owner_hash, nsec3_proves_nodata, wildcard_name,
     };
 
     fn name(text: &str) -> Name {
@@ -165,7 +185,8 @@ mod tests {
             ("*.example.", "jhsv97rodsnhc4f1ke4jh23egaa5agvp"),
         ];
         for (input, encoded) in expected {
-            let hash = nsec3_hash(&name(input), 12, &salt);
+            let hash = nsec3_hash(&name(input), 12, &salt, MAX_NSEC3_ITERATIONS)
+                .expect("hash within limit");
             assert_eq!(
                 data_encoding::BASE32HEX_NOPAD
                     .encode(&hash)
@@ -174,6 +195,27 @@ mod tests {
                 "hash for {input}"
             );
         }
+    }
+
+    #[test]
+    fn nsec3_hash_rejects_excessive_iterations_before_hashing() {
+        let name = name("a.example.");
+        // One above the limit must fail; the limit itself must succeed.
+        assert_eq!(
+            nsec3_hash(
+                &name,
+                MAX_NSEC3_ITERATIONS + 1,
+                &[0xaa],
+                MAX_NSEC3_ITERATIONS
+            ),
+            Err(crate::DnssecError::IterationLimit)
+        );
+        assert!(nsec3_hash(&name, MAX_NSEC3_ITERATIONS, &[0xaa], MAX_NSEC3_ITERATIONS).is_ok());
+        // The u16 maximum is rejected outright.
+        assert_eq!(
+            nsec3_hash(&name, u16::MAX, &[0xaa], MAX_NSEC3_ITERATIONS),
+            Err(crate::DnssecError::IterationLimit)
+        );
     }
 
     #[test]
@@ -186,7 +228,13 @@ mod tests {
 
     #[test]
     fn nsec3_owner_hash_decodes_first_label() {
-        let hash = nsec3_hash(&name("a.example."), 12, &[0xaa, 0xbb, 0xcc, 0xdd]);
+        let hash = nsec3_hash(
+            &name("a.example."),
+            12,
+            &[0xaa, 0xbb, 0xcc, 0xdd],
+            MAX_NSEC3_ITERATIONS,
+        )
+        .expect("hash within limit");
         let encoded = data_encoding::BASE32HEX_NOPAD.encode(&hash);
         let record = Record::from_rdata(
             name(&format!("{encoded}.example.")),

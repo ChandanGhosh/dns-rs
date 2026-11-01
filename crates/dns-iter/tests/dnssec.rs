@@ -893,6 +893,92 @@ async fn nsec3_opt_out_delegation_apex_is_insecure() {
     assert_eq!(resolved.message.answers.len(), 1);
 }
 
+/// An NSEC3 proof claiming more iterations than the configured limit must be
+/// rejected as bogus before any hashing, so a hostile zone cannot spin the
+/// validator's CPU (RFC 9276 section 3.2).
+#[tokio::test]
+async fn nsec3_proof_with_excessive_iterations_is_bogus() {
+    let (root, com, _example, now) = build_hierarchy();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+
+        // Same shape as the opt-out fixture, but with one iteration above the
+        // limit. The chain to `com.` still validates, so the only reason to
+        // reject the DS denial is the iteration count.
+        let covering = Record::from_rdata(
+            n(&format!(
+                "{}.com.",
+                data_encoding::BASE32HEX_NOPAD.encode(&[0u8; 20])
+            )),
+            60,
+            RData::DNSSEC(DNSSECRData::NSEC3(NSEC3::new(
+                Nsec3HashAlgorithm::SHA1,
+                true,
+                151,
+                Vec::new(),
+                vec![0xff; 20],
+                [
+                    RecordType::NS,
+                    RecordType::DS,
+                    RecordType::RRSIG,
+                    RecordType::NSEC3,
+                ],
+            ))),
+        );
+        let unsigned_ds_denial = signed(vec![covering], &com, "com.", now);
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("unsigned4.com.", RecordType::NS) => {
+                    referral(query, "unsigned4.com.", "ns.unsigned4.com.")
+                }
+                ("unsigned4.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in unsigned_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("unsigned4.com.", RecordType::A) => answer(
+                    query,
+                    vec![Record::from_rdata(
+                        n("unsigned4.com."),
+                        300,
+                        RData::A(Ipv4Addr::new(198, 51, 100, 10).into()),
+                    )],
+                ),
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let mut config = signed_zone_config(server.addr, &root);
+    // Pin the limit so the test pins the contract, not just the default.
+    config.nsec3_max_iterations = 150;
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options("unsigned4.com.", RecordType::A, ResolveOptions::default())
+        .await
+        .expect("resolution completes");
+
+    assert!(matches!(
+        resolved.security,
+        Security::Bogus(dns_dnssec::BogusReason::IterationLimit)
+    ));
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
 /// A signed `example.com` zone holding an unsigned A record, with the DS and
 /// DNSKEY records needed to prove that the zone is signed.
 async fn stripped_signature_fixture() -> (SocketAddr, SigningKey, SigningKey) {

@@ -373,7 +373,12 @@ impl IteratorResolver {
         match verify_rrset(rrset, signatures, &zone.keys, now) {
             Ok(()) => {
                 if wildcard_labels(rrset, signatures).is_some() {
-                    match wildcard_proof(owner, signatures, answer.authorities) {
+                    match wildcard_proof(
+                        owner,
+                        signatures,
+                        answer.authorities,
+                        self.config.nsec3_max_iterations,
+                    ) {
                         Ok(()) => Security::Secure,
                         Err(error) => Security::Bogus(error.into()),
                     }
@@ -421,7 +426,14 @@ impl IteratorResolver {
             return zone.security;
         }
 
-        match verify_negative_proof(message, &qname, qtype, &zone.keys, unix_now()) {
+        match verify_negative_proof(
+            message,
+            &qname,
+            qtype,
+            &zone.keys,
+            unix_now(),
+            self.config.nsec3_max_iterations,
+        ) {
             Ok(Proof::Secure) => Security::Secure,
             Ok(Proof::Insecure) => Security::Insecure,
             Err(error) => Security::Bogus(error.into()),
@@ -519,6 +531,7 @@ impl IteratorResolver {
                         RecordType::DS,
                         &parent.keys,
                         unix_now(),
+                        self.config.nsec3_max_iterations,
                     ) {
                         Ok(Proof::Secure) => Security::Secure,
                         Ok(Proof::Insecure) => Security::Insecure,
@@ -658,6 +671,7 @@ impl IteratorResolver {
                     RecordType::DS,
                     &parent.keys,
                     unix_now(),
+                    self.config.nsec3_max_iterations,
                 ) {
                     Ok(_) => ZoneStatus::insecure(),
                     Err(error) => ZoneStatus::bogus(error.into()),
@@ -781,6 +795,7 @@ fn verify_negative_proof(
     qtype: RecordType,
     keys: &[Record],
     now: u64,
+    max_iterations: u16,
 ) -> Result<Proof, DnssecError> {
     let nsecs: Vec<(&Record, &dns_proto::NSEC)> = message
         .authorities
@@ -802,7 +817,13 @@ fn verify_negative_proof(
     if !nsecs.is_empty() {
         return nsec_proof(&nsecs, qname, qtype, message.metadata.response_code);
     }
-    nsec3_proof(&nsec3s, qname, qtype, message.metadata.response_code)
+    nsec3_proof(
+        &nsec3s,
+        qname,
+        qtype,
+        message.metadata.response_code,
+        max_iterations,
+    )
 }
 
 fn verify_denial_signatures(
@@ -899,6 +920,7 @@ fn nsec3_proof(
     qname: &Name,
     qtype: RecordType,
     rcode: ResponseCode,
+    max_iterations: u16,
 ) -> Result<Proof, DnssecError> {
     let (_, first) = nsec3s[0];
     if !nsec3_algorithm_supported(first) {
@@ -907,7 +929,7 @@ fn nsec3_proof(
     let iterations = first.iterations();
     let salt = first.salt();
 
-    let hash = nsec3_hash(qname, iterations, salt);
+    let hash = nsec3_hash(qname, iterations, salt, max_iterations)?;
     if rcode == ResponseCode::NoError {
         if let Some((_, nsec3)) = nsec3s
             .iter()
@@ -943,22 +965,27 @@ fn nsec3_proof(
         return Err(DnssecError::DenialOfExistence);
     }
 
-    let Some((closest, _)) = ancestors(qname).into_iter().skip(1).find_map(|ancestor| {
-        let ancestor_hash = nsec3_hash(&ancestor, iterations, salt);
-        nsec3s
-            .iter()
-            .find(|(record, _)| {
-                nsec3_owner_hash(record).as_deref() == Some(ancestor_hash.as_slice())
-            })
-            .map(|(_, nsec3)| (ancestor, nsec3))
-    }) else {
+    // The closest encloser is the first ancestor with a matching NSEC3 owner.
+    // Hash each ancestor with the same checked helper so the iteration limit
+    // applies to every hash in the proof.
+    let mut closest = None;
+    for ancestor in ancestors(qname).into_iter().skip(1) {
+        let ancestor_hash = nsec3_hash(&ancestor, iterations, salt, max_iterations)?;
+        if nsec3s.iter().any(|(record, _)| {
+            nsec3_owner_hash(record).as_deref() == Some(ancestor_hash.as_slice())
+        }) {
+            closest = Some(ancestor);
+            break;
+        }
+    }
+    let Some(closest) = closest else {
         return Err(DnssecError::DenialOfExistence);
     };
 
     let Some(next_closer) = next_closer(qname, &closest) else {
         return Err(DnssecError::DenialOfExistence);
     };
-    let next_hash = nsec3_hash(&next_closer, iterations, salt);
+    let next_hash = nsec3_hash(&next_closer, iterations, salt, max_iterations)?;
     let Some((_, next_record)) = nsec3s.iter().find(|(record, nsec3)| {
         let owner = nsec3_owner_hash(record).unwrap_or_default();
         nsec3_covers(&owner, nsec3.next_hashed_owner_name(), &next_hash)
@@ -969,7 +996,7 @@ fn nsec3_proof(
     let Some(wildcard) = wildcard_name(&closest) else {
         return Err(DnssecError::DenialOfExistence);
     };
-    let wildcard_hash = nsec3_hash(&wildcard, iterations, salt);
+    let wildcard_hash = nsec3_hash(&wildcard, iterations, salt, max_iterations)?;
     let wildcard_covered = nsec3s.iter().any(|(record, nsec3)| {
         let owner = nsec3_owner_hash(record).unwrap_or_default();
         nsec3_covers(&owner, nsec3.next_hashed_owner_name(), &wildcard_hash)
@@ -1111,6 +1138,7 @@ fn wildcard_proof(
     owner: &Name,
     signatures: &[Record],
     authorities: &[Record],
+    max_iterations: u16,
 ) -> Result<(), DnssecError> {
     let Some(labels) = signatures.iter().find_map(|record| {
         let sig = rrsig_of(record)?;
@@ -1151,11 +1179,11 @@ fn wildcard_proof(
     };
     let iterations = first.iterations();
     let salt = first.salt();
-    let closest_hash = nsec3_hash(&closest, iterations, salt);
+    let closest_hash = nsec3_hash(&closest, iterations, salt, max_iterations)?;
     let closest_match = nsec3s
         .iter()
         .any(|(record, _)| nsec3_owner_hash(record).as_deref() == Some(closest_hash.as_slice()));
-    let next_hash = nsec3_hash(&next_closer, iterations, salt);
+    let next_hash = nsec3_hash(&next_closer, iterations, salt, max_iterations)?;
     let next_covered = nsec3s.iter().any(|(record, nsec3)| {
         let owner = nsec3_owner_hash(record).unwrap_or_default();
         nsec3_covers(&owner, nsec3.next_hashed_owner_name(), &next_hash)

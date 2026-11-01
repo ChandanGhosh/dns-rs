@@ -449,6 +449,7 @@ impl QueryPipeline {
             trust_store: trust_store.clone(),
             domain_insecure: config.server.insecure_domains(),
             harden_dnssec_stripped: config.server.harden_dnssec_stripped,
+            nsec3_max_iterations: config.server.nsec3_max_iterations,
             val_permissive_mode: config.server.val_permissive_mode,
             val_clean_additional: config.server.val_clean_additional,
             tls_cert_bundle: config.server.tls_cert_bundle.clone(),

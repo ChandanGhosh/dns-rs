@@ -25,8 +25,8 @@ pub use crypto::{
     verify_dnskey_with_anchor, verify_dnskey_with_ds, verify_rrset, verify_rrsig, verify_signature,
 };
 pub use denial::{
-    nsec_covers, nsec_proves_nodata, nsec3_algorithm_supported, nsec3_covers, nsec3_hash,
-    nsec3_owner_hash, nsec3_proves_nodata, wildcard_name,
+    MAX_NSEC3_ITERATIONS, nsec_covers, nsec_proves_nodata, nsec3_algorithm_supported, nsec3_covers,
+    nsec3_hash, nsec3_owner_hash, nsec3_proves_nodata, wildcard_name,
 };
 pub use trust::{
     TrustAnchor, TrustAnchorError, TrustStore, load_trust_anchors, parse_trust_anchors,
@@ -71,6 +71,8 @@ pub enum BogusReason {
     UnsupportedAlgorithm,
     /// The denial-of-existence proof was invalid.
     DenialOfExistence,
+    /// The NSEC3 iteration count exceeded the configured limit.
+    IterationLimit,
     /// The record data was malformed.
     Malformed,
     /// The RRSIG key tag did not match the DNSKEY.
@@ -87,6 +89,7 @@ impl From<DnssecError> for BogusReason {
             DnssecError::NotYetValid => Self::NotYetValid,
             DnssecError::UnsupportedAlgorithm => Self::UnsupportedAlgorithm,
             DnssecError::DenialOfExistence => Self::DenialOfExistence,
+            DnssecError::IterationLimit => Self::IterationLimit,
             DnssecError::KeyTagMismatch => Self::KeyTagMismatch,
             DnssecError::InvalidKey | DnssecError::Malformed => Self::Malformed,
         }
@@ -135,6 +138,13 @@ pub enum DnssecError {
     /// A denial-of-existence proof was invalid.
     #[error("invalid denial-of-existence proof")]
     DenialOfExistence,
+
+    /// The NSEC3 iteration count is above the configured maximum.
+    ///
+    /// A validator must reject such proofs before hashing so that a signed
+    /// zone cannot force unbounded CPU work (RFC 9276 section 3.2).
+    #[error("NSEC3 iteration count exceeds limit")]
+    IterationLimit,
 }
 
 /// Verify an Ed25519 signature.
