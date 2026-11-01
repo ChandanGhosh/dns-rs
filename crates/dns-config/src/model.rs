@@ -87,6 +87,13 @@ impl Config {
                 "cache-min-ttl must not exceed cache-max-ttl".to_owned(),
             ));
         }
+        // remote_control is not yet implemented; enable it only if you
+        // wire a control socket with Status/Stats/Reload support.
+        if self.remote_control.enabled {
+            return Err(ConfigError::Validation(
+                "remote_control is not implemented yet".to_owned(),
+            ));
+        }
         if server.min_ttl > server.max_ttl {
             return Err(ConfigError::Validation(
                 "min-ttl must not exceed max-ttl".to_owned(),
