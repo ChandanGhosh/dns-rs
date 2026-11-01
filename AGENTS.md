@@ -18,7 +18,14 @@ If the code is not fully optimized before handing off to the user, you will be f
 
 ## Preferred Tools
 
-- Use `cargo` for project management, building, and dependency management.
+- **MUST** use `cargo` for building, testing, and dependency management
+- **MUST** use `cargo test` for running tests
+- **MUST** use `cargo doc` for generating documentation
+- For projects which build a Python package, **NEVER** build with `cargo build --features python`: this will always fail. Instead, **ALWAYS** use `maturin`.
+- **MUST** use `rustfmt` for code formatting
+- **MUST** use `clippy` for linting and follow its suggestions
+- **MUST** ensure code compiles with no warnings (use `-D warnings` flag in CI, not `#![deny(warnings)]` in source)
+- **NEVER** uses the `Explore` tool for `Cargo.lock`: it is large and irrelevant. Read `Cargo.lock` **ONLY** if it's extremely relevant.
 - Use `indicatif` to track long-running operations with progress bars. The message should be contextually sensitive.
 - Use `serde` with `serde_json` for JSON serialization/deserialization.
 - Use `ratatui` and `crossterm` for terminal applications/TUIs.
@@ -210,13 +217,14 @@ pub fn calculate_total(items: &[Item], tax_rate: f64) -> Result<f64, Calculation
 - No compiler warnings (`cargo build`)
 - Clippy passes (`cargo clippy -- -D warnings`)
 - Code is formatted (`cargo fmt --check`)
+- Always explicitly ask if semver should be bumped or not. If yes, ask if it would be a patch, minor or a major release.
 - Benchmarks should be run/checked as appropriate for the change (especially hot-path changes). The repo has `scripts/bench-loopback.sh` and benchmarking guidance in the security/IO notes.
 - If the project creates a Python package and Rust code is touched, rebuild the Python package (`source .venv/bin/activate && maturin develop --release --features python`)
 - If the project creates a WASM package and Rust code is touched, rebuild the WASM package (`wasm-pack build --target web --out-dir web/pkg`)
 - All public items have doc comments
 - No commented-out code or debug statements
 - No hardcoded credentials
-- **Before committing:** Show commit message for approval. Do not commit until explicitly approved.
+- **Before committing:** Show detailed commit message for approval. Do not commit until explicitly approved.
 - **Before pushing:** Show what will be pushed and get approval(when asked to push, confirm or follow the exact instruction).
 - **Never** add `Co-authored-by` lines to commit messages.
 - Follow conventional commit style where appropriate (e.g., `fix(security): ...`, `feat(io): ...`, `chore(release): ...`).
@@ -224,20 +232,6 @@ pub fn calculate_total(items: &[Item], tax_rate: f64) -> Result<f64, Calculation
 - Prefer dedicated tools over shell commands when possible.
 - Use the `edit` tool for targeted changes to existing files; use `write` only for new files or full replacements.
 - Do not chain shell commands with separators like `echo ...;` or `printf ...;` as they make output noisy.
-
-## Tools
-
-- **MUST** use `rustfmt` for code formatting
-- **MUST** use `clippy` for linting and follow its suggestions
-- **MUST** ensure code compiles with no warnings (use `-D warnings` flag in CI, not `#![deny(warnings)]` in source)
-- Use `cargo` for building, testing, and dependency management
-- Use `cargo test` for running tests
-- Use `cargo doc` for generating documentation
-- For projects which build a Python package, **NEVER** build with `cargo build --features python`: this will always fail. Instead, **ALWAYS** use `maturin`.
-- **NEVER** uses the `Explore` tool for `Cargo.lock`: it is large and irrelevant. Read `Cargo.lock` **ONLY** if it's extremely relevant.
-
-
-
 
 ## Security or Improvement Workflow
 Work findings in severity order (Critical → Medium → Low/Informational). For each:
