@@ -690,7 +690,7 @@ impl IteratorResolver {
                 .await?
             {
                 if !no_cache {
-                    self.cache_answers(&answer.message);
+                    self.cache_answers(&answer.message, Some(&zone));
                 }
                 return Ok(answer);
             }
@@ -864,6 +864,12 @@ impl IteratorResolver {
     /// `zone` is the authoritative zone that answered `response`, when known.
     /// The owner-to-zone map it produces lets validation start at a real zone
     /// apex instead of probing DS at an alias.
+    ///
+    /// In-message targets are only trusted when `zone` owns them (RFC 2181
+    /// §5.4.1). An authority for `evil.test` must not be able to append
+    /// `victim.test A 6.6.6.6` (or an `NS` RRset) to a CNAME chain: those
+    /// records would otherwise be cached and later used as a delegation. An
+    /// out-of-bailiwick target is resolved through the normal walk instead.
     async fn answer_chain(
         &self,
         qname: &Name,
@@ -909,32 +915,16 @@ impl IteratorResolver {
                     return Ok(None);
                 }
 
-                let sub_context = WalkContext {
-                    depth: context.depth + 1,
-                    ..context.clone()
-                };
-                let WalkAnswer {
-                    message: sub,
-                    origins: sub_origins,
-                } = self
-                    .resolve_inner(current.clone(), qtype, sub_context)
-                    .await?;
-                let authorities = dnssec_authorities(&sub);
-                let rcode = sub.metadata.response_code;
-                chain.extend(sub.answers);
-                origins.extend(sub_origins);
-                return Ok(Some(WalkAnswer {
-                    message: self.build_response(
-                        qname,
-                        qtype,
-                        rcode,
-                        chain,
-                        authorities,
-                        Vec::new(),
-                    ),
-                    origins,
-                }));
+                return self
+                    .resolve_chain_target(qname, qtype, current, chain, origins, context)
+                    .await
+                    .map(Some);
             };
+
+            // Bailiwick: only follow a target that the answering zone owns.
+            // Otherwise the target must be resolved from the delegation tree;
+            // records for it in this response are not authoritative.
+            let in_bailiwick = zone.is_none_or(|zone| zone.zone_of(&target));
 
             if let Some(record) = response
                 .answers
@@ -947,10 +937,55 @@ impl IteratorResolver {
                 note_origins(&mut origins, &signatures, zone);
                 chain.extend(signatures);
             }
+
+            if !in_bailiwick {
+                debug!(
+                    %current,
+                    %target,
+                    "CNAME target is outside the answering zone; resolving it separately"
+                );
+                return self
+                    .resolve_chain_target(qname, qtype, target, chain, origins, context)
+                    .await
+                    .map(Some);
+            }
+
             current = target;
         }
 
         Err(ResolveError::Cycle)
+    }
+
+    /// Finish a CNAME chain by resolving `target` through the normal walk.
+    ///
+    /// Used when the response has no record for the target, or when the target
+    /// is outside the answering zone and its in-message records cannot be
+    /// trusted.
+    async fn resolve_chain_target(
+        &self,
+        qname: &Name,
+        qtype: RecordType,
+        target: Name,
+        mut chain: Vec<Record>,
+        mut origins: HashMap<String, Name>,
+        context: WalkContext<'_>,
+    ) -> Result<WalkAnswer, ResolveError> {
+        let sub_context = WalkContext {
+            depth: context.depth + 1,
+            ..context.clone()
+        };
+        let WalkAnswer {
+            message: sub,
+            origins: sub_origins,
+        } = self.resolve_inner(target, qtype, sub_context).await?;
+        let authorities = dnssec_authorities(&sub);
+        let rcode = sub.metadata.response_code;
+        chain.extend(sub.answers);
+        origins.extend(sub_origins);
+        Ok(WalkAnswer {
+            message: self.build_response(qname, qtype, rcode, chain, authorities, Vec::new()),
+            origins,
+        })
     }
 
     /// Return the most specific forward zone covering `name`.
@@ -1027,7 +1062,9 @@ impl IteratorResolver {
                 .answer_chain(name, qtype, &response, context.clone(), None)
                 .await?
             {
-                self.cache_answers(&answer.message);
+                // Forwarders are configured and trusted to have resolved and
+                // scrubbed the response, so its answer RRsets may span zones.
+                self.cache_answers(&answer.message, None);
                 return Ok(answer);
             }
 
@@ -1911,11 +1948,30 @@ impl IteratorResolver {
         }
     }
 
-    fn cache_answers(&self, message: &Message) {
+    /// Cache answer RRsets, optionally restricted to the answering zone.
+    ///
+    /// RFC 2181 §5.4.1: only data at or below the zone that answered is
+    /// authoritative. Restricting writes here keeps an authority for one zone
+    /// from injecting NS or address RRsets for a foreign name into the shared
+    /// RRset cache, where delegation selection would later trust them.
+    ///
+    /// `zone` is `None` for recursive forwarders, whose answers are already
+    /// trusted to have been resolved and scrubbed on our behalf.
+    fn cache_answers(&self, message: &Message, zone: Option<&Name>) {
         let Some(cache) = &self.rrsets else {
             return;
         };
         for (name, qtype, records, ttl) in group_rrsets(&message.answers) {
+            if let Some(zone) = zone
+                && !zone.zone_of(&name)
+            {
+                debug!(
+                    name = %name,
+                    zone = %zone,
+                    "not caching an out-of-bailiwick answer RRset"
+                );
+                continue;
+            }
             cache.insert(name, qtype, records, Duration::from_secs(u64::from(ttl)));
         }
     }
