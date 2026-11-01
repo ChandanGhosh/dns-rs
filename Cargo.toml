@@ -16,7 +16,7 @@ members = [
 default-members = ["crates/dns-daemon"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.88"
 license = "BSD-3-Clause"
@@ -59,16 +59,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Internal crates
-dns-cache = { version = "0.1.5", path = "crates/dns-cache" }
-dns-client = { version = "0.1.5", path = "crates/dns-client" }
-dns-config = { version = "0.1.5", path = "crates/dns-config" }
-dns-control = { version = "0.1.5", path = "crates/dns-control" }
-dns-dnssec = { version = "0.1.5", path = "crates/dns-dnssec" }
-dns-filter = { version = "0.1.5", path = "crates/dns-filter" }
-dns-iter = { version = "0.1.5", path = "crates/dns-iter" }
-dns-proto = { version = "0.1.5", path = "crates/dns-proto" }
-dns-server = { version = "0.1.5", path = "crates/dns-server" }
-dns-testutil = { version = "0.1.5", path = "crates/dns-testutil" }
+dns-cache = { version = "0.1.6", path = "crates/dns-cache" }
+dns-client = { version = "0.1.6", path = "crates/dns-client" }
+dns-config = { version = "0.1.6", path = "crates/dns-config" }
+dns-control = { version = "0.1.6", path = "crates/dns-control" }
+dns-dnssec = { version = "0.1.6", path = "crates/dns-dnssec" }
+dns-filter = { version = "0.1.6", path = "crates/dns-filter" }
+dns-iter = { version = "0.1.6", path = "crates/dns-iter" }
+dns-proto = { version = "0.1.6", path = "crates/dns-proto" }
+dns-server = { version = "0.1.6", path = "crates/dns-server" }
+dns-testutil = { version = "0.1.6", path = "crates/dns-testutil" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
