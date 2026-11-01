@@ -47,11 +47,6 @@ tls_service_pem = "/etc/dns-rs/tls/server.pem"
 # query with cache hit/miss), 4-5 = trace. -v/-vv or RUST_LOG override it.
 verbosity = 1
 num_threads = 2
-do_daemonize = false
-# username = "dns-rs"
-# chroot = "/var/lib/dns-rs"
-# directory = "/var/lib/dns-rs"
-# logfile = "/var/log/dns-rs.log"
 # pidfile = "/run/dns-rs.pid"
 use_syslog = false
 

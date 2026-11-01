@@ -178,6 +178,18 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
         }
     }
 
+    // TODO(#5): Drop privileges to the configured user.
+    // The `username` config field is parsed in dns-config but the setuid/
+    // setgid implementation is pending (requires root + nix user feature).
+    // For now, log a warning so operators know the setting is active but
+    // not effective. Unbound-like behavior: full privilege-drop is a future
+    // improvement.
+    if config.server.username.is_some() {
+        warn!(
+            "server.username is configured but privilege-drop is not yet implemented;
+             run as root and configure appropriate setuid hooks for Unbound-like behavior"
+        );
+    }
     if listeners.is_empty() {
         warn!("no listeners started");
     } else {

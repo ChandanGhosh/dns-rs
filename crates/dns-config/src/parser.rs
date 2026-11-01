@@ -464,6 +464,9 @@ impl Parser {
             "tls-use-system-ca" => {
                 self.config.server.tls_use_system_ca = parse_bool(path, line, key, value)?;
             }
+            "tls-enforce-name-check" => {
+                self.config.server.tls_enforce_name_check = parse_bool(path, line, key, value)?;
+            }
             _ => self.warn(
                 path,
                 line,

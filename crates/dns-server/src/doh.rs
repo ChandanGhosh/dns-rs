@@ -71,42 +71,52 @@ pub async fn run(
                         let endpoint = endpoint.clone();
                         tokio::spawn(async move {
                             // Held for the whole connection lifetime, like the
-                            // TCP and DoT listeners.
-                            let _permit = permit;
-                            let stream: tokio_rustls::server::TlsStream<TcpStream> =
-                                match tokio::time::timeout(
-                                    Duration::from_secs(10),
-                                    acceptor.accept(stream),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(stream)) => stream,
-                                    Ok(Err(error)) => {
-                                        debug!(%client, %error, "DoH handshake failed");
-                                        return;
-                                    }
-                                    Err(_) => {
-                                        debug!(%client, "DoH handshake timed out");
-                                        return;
-                                    }
-                                };
+                            // TCP and DoT listeners. A timeout ensures that idle
+                            // connections do not hold the connection permit
+                            // indefinitely, which would starve other clients.
+                            let _permit = tokio::time::timeout(
+                                Duration::from_secs(30),
+                                async {
+                                    let _permit = permit;
+                                    let stream: tokio_rustls::server::TlsStream<TcpStream> =
+                                        match tokio::time::timeout(
+                                            Duration::from_secs(10),
+                                            acceptor.accept(stream),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(stream)) => stream,
+                                            Ok(Err(error)) => {
+                                                debug!(%client, %error, "DoH handshake failed");
+                                                return;
+                                            }
+                                            Err(_) => {
+                                                debug!(%client, "DoH handshake timed out");
+                                                return;
+                                            }
+                                        };
 
-                            let service = service_fn(move |request| {
-                                handle(request, Arc::clone(&pipeline), client, endpoint.clone())
-                            });
-                            let mut builder = Builder::new(TokioExecutor::new());
-                            // Without a timer, hyper enforces no header-read or
-                            // keep-alive deadlines and an idle connection lives
-                            // forever. The 10s handshake timeout above only
-                            // covers the TLS setup.
-                            builder.http1().timer(TokioTimer::new());
-                            builder.http2().timer(TokioTimer::new());
-                            if let Err(error) = builder
-                                .serve_connection(TokioIo::new(stream), service)
-                                .await
-                            {
-                                debug!(%client, %error, "DoH connection closed with an error");
-                            }
+                                    let service = service_fn(move |request| {
+                                        handle(request, Arc::clone(&pipeline), client, endpoint.clone())
+                                    });
+                                    let mut builder = Builder::new(TokioExecutor::new());
+                                    // Without a timer, hyper enforces no header-read or
+                                    // keep-alive deadlines and an idle connection lives
+                                    // forever. The 10s handshake timeout above only
+                                    // covers the TLS setup.
+                                    builder.http1().timer(TokioTimer::new());
+                                    builder.http2().timer(TokioTimer::new());
+                                    if let Err(error) = builder
+                                        .serve_connection(TokioIo::new(stream), service)
+                                        .await
+                                    {
+                                        debug!(%client, %error, "DoH connection closed with an error");
+                                    }
+                                },
+                            )
+                            .await;
+                            // If the timeout expires, the task ends and the
+                            // permit is released back to the semaphore pool.
                         });
                     }
                     Err(error) => {

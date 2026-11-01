@@ -384,6 +384,12 @@ pub struct ServerConfig {
     pub tls_cert_bundle: Option<PathBuf>,
     /// Trust the system (webpki) roots for upstream encrypted transports.
     pub tls_use_system_ca: bool,
+    /// When true, enforce TLS server name check even when the forwarder has no
+    /// `#auth-name` / `tls_name`. Defaults to false (match Unbound behavior:
+    /// any name is accepted as long as the certificate chains to a configured CA).
+    /// Set to true to reject certificates whose name does not match the expected
+    /// server name, providing defense-in-depth against misissued or spoofed certs.
+    pub tls_enforce_name_check: bool,
 }
 
 impl Default for ServerConfig {
@@ -446,6 +452,7 @@ impl Default for ServerConfig {
             http_endpoint: "/dns-query".to_owned(),
             tls_cert_bundle: None,
             tls_use_system_ca: true,
+            tls_enforce_name_check: false,
         }
     }
 }

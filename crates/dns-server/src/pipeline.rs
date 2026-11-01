@@ -535,7 +535,7 @@ impl QueryPipeline {
         cancel: CancellationToken,
     ) -> Option<Vec<u8>> {
         let started = Instant::now();
-        let request = match decode(bytes) {
+        let mut request = match decode(bytes) {
             Ok(message) => message,
             Err(error) => {
                 debug!(%client, %error, "dropping malformed query");
@@ -556,7 +556,13 @@ impl QueryPipeline {
             Decision::Refuse | Decision::DenyNonLocal | Decision::RefuseNonLocal => {
                 return self.error(&request, ResponseCode::Refused, client, transport);
             }
-            Decision::Allow | Decision::AllowSnoop => {}
+            Decision::Allow => {}
+            Decision::AllowSnoop => {
+                // Snoop mode: cache-only access, no recursion sent upstream
+                // (Unbound-like: RD=0, serve from message cache if available,
+                //  otherwise NXDOMAIN/SERVFAIL without recursive resolution).
+                request.metadata.recursion_desired = false;
+            }
         }
 
         if request.queries.len() != 1 {
