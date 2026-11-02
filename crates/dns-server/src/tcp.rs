@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
 use dns_proto::{decode, encode};
 
@@ -48,6 +49,7 @@ pub async fn run(
     shutdown: CancellationToken,
     connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
+    let pool = BufferPool::default();
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -70,9 +72,10 @@ pub async fn run(
                             }
                         };
                         let pipeline = Arc::clone(&pipeline);
+                        let pool = pool.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            serve_connection(stream, client, pipeline, Transport::Tcp).await;
+                            serve_connection(stream, client, pipeline, Transport::Tcp, pool).await;
                         });
                     }
                     Err(err) => {
@@ -101,28 +104,30 @@ pub async fn serve_connection<S>(
     client: SocketAddr,
     pipeline: Arc<QueryPipeline>,
     transport: Transport,
+    pool: BufferPool,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Probe,
 {
     loop {
+        // One pooled buffer per message, released back to the pool when this
+        // iteration ends or the connection returns early.
+        let mut buf = pool.get();
         // One deadline covers the whole message: length prefix + body.
-        let (lenbuf, buf) = match tokio::time::timeout(READ_TIMEOUT, async {
+        let len = match tokio::time::timeout(READ_TIMEOUT, async {
             let mut lenbuf = [0u8; 2];
             stream.read_exact(&mut lenbuf).await?;
-            let mut buf = Vec::new();
             let len = usize::from(u16::from_be_bytes(lenbuf));
             if len > 0 {
-                buf = vec![0u8; len];
-                stream.read_exact(&mut buf).await?;
+                stream.read_exact(&mut buf[0..len]).await?;
             }
-            Ok::<([u8; 2], Vec<u8>), std::io::Error>((lenbuf, buf))
+            Ok::<usize, std::io::Error>(len)
         })
         .await
         {
-            Ok(Ok(pair)) => pair,
-            _ => break,
+            Ok(Ok(len)) => len,
+            Ok(Err(_)) => break,
+            Err(_) => break,
         };
-        let len = usize::from(u16::from_be_bytes(lenbuf));
         if len == 0 {
             break;
         }
@@ -133,7 +138,7 @@ pub async fn serve_connection<S>(
         // in that case stop probing and let the current query finish.
         let cancel = CancellationToken::new();
         let mut handle =
-            Box::pin(pipeline.handle_with_cancel(&buf, client, transport, cancel.clone()));
+            Box::pin(pipeline.handle_with_cancel(&buf[..len], client, transport, cancel.clone()));
         let mut probing = true;
         let response = loop {
             if !probing {

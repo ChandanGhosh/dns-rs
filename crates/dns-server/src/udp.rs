@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
 
+use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
 
 pub fn bind(addr: SocketAddr, recv_buffer_size: usize) -> std::io::Result<UdpSocket> {
@@ -30,22 +31,25 @@ pub async fn run(
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     let socket = Arc::new(socket);
-    let mut buf = vec![0u8; 65_535];
+    let pool = BufferPool::default();
 
     loop {
+        // Receive straight into a pooled buffer: the datagram is moved into
+        // the query task without a copy, and the task returns the buffer to
+        // the pool when it drops `query`.
+        let mut query = pool.get();
         tokio::select! {
             _ = shutdown.cancelled() => break,
-            result = socket.recv_from(&mut buf) => {
+            result = socket.recv_from(&mut query) => {
                 match result {
                     Ok((len, client)) => {
                         // Handle each datagram in its own task so a slow
                         // upstream cannot block the receive loop.
                         let socket = Arc::clone(&socket);
                         let pipeline = Arc::clone(&pipeline);
-                        let query = buf[..len].to_vec();
                         tokio::spawn(async move {
                             if let Some(response) =
-                                pipeline.handle(&query, client, Transport::Udp).await
+                                pipeline.handle(&query[..len], client, Transport::Udp).await
                             {
                                 let _ = socket.send_to(&response, client).await;
                             }

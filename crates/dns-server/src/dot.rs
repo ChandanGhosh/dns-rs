@@ -9,6 +9,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
 use crate::tcp;
 
@@ -19,6 +20,7 @@ pub async fn run(
     shutdown: CancellationToken,
     connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
+    let pool = BufferPool::default();
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -39,6 +41,7 @@ pub async fn run(
                         };
                         let acceptor = acceptor.clone();
                         let pipeline = Arc::clone(&pipeline);
+                        let pool = pool.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
                             let stream = match tokio::time::timeout(
@@ -57,7 +60,8 @@ pub async fn run(
                                     return;
                                 }
                             };
-                            tcp::serve_connection(stream, client, pipeline, Transport::Tls).await;
+                            tcp::serve_connection(stream, client, pipeline, Transport::Tls, pool)
+                                .await;
                         });
                     }
                     Err(error) => {
