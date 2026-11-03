@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use dns_proto::{Message, Name, RData, RecordType, encode};
+use dns_proto::{Message, Name, Query, RData, RecordType, encode};
 use moka::sync::Cache;
 
 /// Default stale window when `serve-expired-ttl` is zero (Unbound semantics).
@@ -18,7 +18,6 @@ pub const DEFAULT_STALE_TTL: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 struct CachedWire {
     wire: Arc<Vec<u8>>,
-    question_name: String,
     inserted_at: Instant,
     expires_at: Instant,
     stale_until: Instant,
@@ -39,11 +38,10 @@ pub struct CacheStats {
 
 /// Per-client fields needed to patch a cached wire response.
 #[derive(Clone, Copy, Debug)]
-pub struct WireRequest<'a> {
+pub struct WireRequest {
     pub id: u16,
     pub recursion_desired: bool,
     pub checking_disabled: bool,
-    pub question_name: &'a Name,
 }
 
 /// A cache hit, already patched for the requesting client.
@@ -52,8 +50,6 @@ pub struct CacheHit {
     pub wire: Vec<u8>,
     pub remaining: Duration,
     pub original_ttl: Duration,
-    /// Question name exactly as it was stored.
-    pub question_name: String,
     pub stale: bool,
     /// Whether the stored wire already contains an OPT record.
     pub has_edns: bool,
@@ -61,7 +57,7 @@ pub struct CacheHit {
 
 #[derive(Clone)]
 pub struct MessageCache {
-    cache: Cache<String, CachedWire>,
+    cache: Cache<(Name, u16, bool), CachedWire>,
     hits: Arc<AtomicU64>,
     misses: Arc<AtomicU64>,
     stale_hits: Arc<AtomicU64>,
@@ -90,15 +86,23 @@ impl MessageCache {
         }
     }
 
-    fn key(name: &Name, record_type: RecordType, do_bit: bool) -> String {
-        format!(
-            "{}|{}|{}",
-            name.to_ascii().to_lowercase(),
-            u16::from(record_type),
-            u8::from(do_bit)
-        )
+    /// Build the cache key for one query.
+    ///
+    /// `Name` hashes and compares case-insensitively, so this matches the
+    /// lowercased string keys without formatting or allocating the name.
+    fn key(name: &Name, record_type: RecordType, do_bit: bool) -> (Name, u16, bool) {
+        (name.clone(), u16::from(record_type), do_bit)
     }
 
+    /// Encode `message` and store it under the key for `name`/`record_type`/`do_bit`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Query name the entry is stored under
+    /// * `record_type` - Query type the entry is stored under
+    /// * `do_bit` - Whether the query had the EDNS DO bit set
+    /// * `message` - Response to encode and store
+    /// * `ttl` - Time until the entry expires
     pub fn insert(
         &self,
         name: &Name,
@@ -110,20 +114,41 @@ impl MessageCache {
         let Ok(wire) = encode(message) else {
             return;
         };
-        let question_name = message
-            .queries
-            .first()
-            .map(|query| query.name.to_ascii())
-            .unwrap_or_default();
+        self.insert_encoded(name, record_type, do_bit, Arc::new(wire), ttl);
+    }
+
+    /// Store a response that has already been encoded.
+    ///
+    /// The pre-encoded `wire` is shared with the single-flight broadcast, so
+    /// a cache miss encodes the response once instead of once per
+    /// destination. The entry's `has_edns` flag is derived from the wire
+    /// itself, keeping the cache-hit fast path safe for responses that
+    /// already contain an OPT record.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Query name the entry is stored under
+    /// * `record_type` - Query type the entry is stored under
+    /// * `do_bit` - Whether the query had the EDNS DO bit set
+    /// * `wire` - The encoded response, shared with the callers that answer
+    ///   clients from the same bytes
+    /// * `ttl` - Time until the entry expires
+    pub fn insert_encoded(
+        &self,
+        name: &Name,
+        record_type: RecordType,
+        do_bit: bool,
+        wire: Arc<Vec<u8>>,
+        ttl: Duration,
+    ) {
         let now = Instant::now();
         let entry = CachedWire {
-            wire: Arc::new(wire),
-            question_name,
+            has_edns: wire_has_opt(&wire),
+            wire,
             inserted_at: now,
             expires_at: now + ttl,
             stale_until: now + ttl + self.stale_for,
             original_ttl: ttl,
-            has_edns: message.edns.is_some(),
         };
         self.cache
             .insert(Self::key(name, record_type, do_bit), entry);
@@ -135,7 +160,7 @@ impl MessageCache {
         name: &Name,
         record_type: RecordType,
         do_bit: bool,
-        request: WireRequest<'_>,
+        request: WireRequest,
     ) -> Option<CacheHit> {
         let key = Self::key(name, record_type, do_bit);
         let Some(entry) = self.cache.get(&key) else {
@@ -164,7 +189,6 @@ impl MessageCache {
             wire,
             remaining: entry.expires_at.saturating_duration_since(now),
             original_ttl: entry.original_ttl,
-            question_name: entry.question_name,
             stale: false,
             has_edns: entry.has_edns,
         })
@@ -178,7 +202,7 @@ impl MessageCache {
         name: &Name,
         record_type: RecordType,
         do_bit: bool,
-        request: WireRequest<'_>,
+        request: WireRequest,
         reply_ttl: u32,
     ) -> Option<CacheHit> {
         let key = Self::key(name, record_type, do_bit);
@@ -200,7 +224,6 @@ impl MessageCache {
             wire,
             remaining: Duration::ZERO,
             original_ttl: entry.original_ttl,
-            question_name: entry.question_name,
             stale: true,
             has_edns: entry.has_edns,
         })
@@ -238,7 +261,11 @@ impl MessageCache {
 }
 
 /// Patch the header fields that are specific to one client.
-fn patch_wire(wire: &mut [u8], request: WireRequest<'_>) {
+///
+/// Used both for cache hits and for client replies built from the canonical
+/// miss wire, so both paths set the same ID, QR, RD, RA, CD, and AD bits a
+/// full re-encode would produce.
+pub fn patch_wire(wire: &mut [u8], request: WireRequest) {
     if wire.len() < 12 {
         return;
     }
@@ -255,6 +282,126 @@ fn patch_wire(wire: &mut [u8], request: WireRequest<'_>) {
     if request.checking_disabled {
         wire[3] &= !0x20;
     }
+}
+
+/// Verify the wire's single question matches `question` and copy the
+/// client's exact label bytes onto it.
+///
+/// Matching is case-insensitive as DNS requires; a match overwrites the
+/// stored label bytes with `question`'s, so the reply echoes the client's
+/// casing byte for byte exactly as a re-encode would. The question section
+/// is first in the wire, so its name can never use a backward compression
+/// pointer and is safe to patch in place.
+///
+/// # Returns
+///
+/// `true` when the wire carried exactly this question. `false` when the
+/// question count, name, type, or class differ, or the wire is malformed,
+/// in which case the caller must fall back to a full decode and re-encode.
+pub fn patch_question(wire: &mut [u8], question: &Query) -> bool {
+    if wire.len() < 12 {
+        return false;
+    }
+    if u16::from_be_bytes([wire[4], wire[5]]) != 1 {
+        return false;
+    }
+    let mut offset = 12usize;
+    for label in question.name.iter() {
+        let Some(&length) = wire.get(offset) else {
+            return false;
+        };
+        if usize::from(length) != label.len() {
+            return false;
+        }
+        offset += 1;
+        let end = offset + label.len();
+        let Some(bytes) = wire.get(offset..end) else {
+            return false;
+        };
+        if !bytes.eq_ignore_ascii_case(label) {
+            return false;
+        }
+        wire[offset..end].copy_from_slice(label);
+        offset = end;
+    }
+    if wire.get(offset) != Some(&0) {
+        return false;
+    }
+    offset += 1;
+    let mut expected = [0u8; 4];
+    expected[..2].copy_from_slice(&u16::from(question.query_type).to_be_bytes());
+    expected[2..].copy_from_slice(&u16::from(question.query_class).to_be_bytes());
+    wire.get(offset..offset + 4) == Some(&expected)
+}
+
+/// Whether the wire contains an OPT record.
+///
+/// Callers that answer a client from an already-encoded wire use this to
+/// decide whether an OPT record may be appended without producing a second
+/// OPT.
+pub fn wire_has_opt(wire: &[u8]) -> bool {
+    if wire.len() < 12 {
+        return false;
+    }
+    let qdcount = u16::from_be_bytes([wire[4], wire[5]]);
+    let ancount = u16::from_be_bytes([wire[6], wire[7]]);
+    let nscount = u16::from_be_bytes([wire[8], wire[9]]);
+    let arcount = u16::from_be_bytes([wire[10], wire[11]]);
+
+    let mut offset = 12usize;
+    for _ in 0..qdcount {
+        let Some(next) = skip_name(wire, offset) else {
+            return false;
+        };
+        offset = next.checked_add(4).unwrap_or(wire.len());
+        if offset > wire.len() {
+            return false;
+        }
+    }
+    for count in [ancount, nscount] {
+        for _ in 0..count {
+            let Some(next) = skip_name(wire, offset) else {
+                return false;
+            };
+            offset = next;
+            let Some(rdlength) = rdlength_at(wire, offset) else {
+                return false;
+            };
+            offset = offset
+                .checked_add(10 + usize::from(rdlength))
+                .unwrap_or(wire.len());
+            if offset > wire.len() {
+                return false;
+            }
+        }
+    }
+    for _ in 0..arcount {
+        let Some(next) = skip_name(wire, offset) else {
+            return false;
+        };
+        offset = next;
+        let Some(rdlength) = rdlength_at(wire, offset) else {
+            return false;
+        };
+        if wire.get(offset..offset + 2) == Some(&41u16.to_be_bytes()) {
+            return true;
+        }
+        offset = offset
+            .checked_add(10 + usize::from(rdlength))
+            .unwrap_or(wire.len());
+        if offset > wire.len() {
+            return false;
+        }
+    }
+    false
+}
+
+/// Read the RDLENGTH of the record at `offset`, or `None` when truncated.
+fn rdlength_at(wire: &[u8], offset: usize) -> Option<u16> {
+    if offset + 10 > wire.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([wire[offset + 8], wire[offset + 9]]))
 }
 
 /// Age (or overwrite) every record TTL in a DNS message.
@@ -368,11 +515,12 @@ pub fn response_ttl(message: &Message, min_ttl: u32, max_ttl: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use dns_proto::{Message, MessageType, Name, OpCode, RData, Record, RecordType};
+    use dns_proto::{Message, MessageType, Name, OpCode, RData, Record, RecordType, encode};
 
-    use super::{MessageCache, WireRequest, response_ttl};
+    use super::{MessageCache, WireRequest, patch_question, response_ttl, wire_has_opt};
 
     fn answer(ttl: u32) -> Message {
         let name = Name::from_ascii("example.com.").expect("name");
@@ -386,12 +534,11 @@ mod tests {
         message
     }
 
-    fn request<'a>(name: &'a Name) -> WireRequest<'a> {
+    fn request() -> WireRequest {
         WireRequest {
             id: 0x1234,
             recursion_desired: true,
             checking_disabled: false,
-            question_name: name,
         }
     }
 
@@ -408,7 +555,7 @@ mod tests {
         );
 
         let hit = cache
-            .get(&name, RecordType::A, false, request(&name))
+            .get(&name, RecordType::A, false, request())
             .expect("hit");
         let message = Message::from_vec(&hit.wire).expect("decode");
         assert!(message.answers[0].ttl <= 60);
@@ -441,7 +588,6 @@ mod tests {
                     id: 7,
                     recursion_desired: false,
                     checking_disabled: true,
-                    question_name: &name,
                 },
             )
             .expect("hit");
@@ -464,11 +610,7 @@ mod tests {
             &answer(60),
             Duration::from_secs(60),
         );
-        assert!(
-            cache
-                .get(&name, RecordType::A, true, request(&name))
-                .is_none()
-        );
+        assert!(cache.get(&name, RecordType::A, true, request()).is_none());
         assert_eq!(cache.stats().misses, 1);
     }
 
@@ -483,11 +625,7 @@ mod tests {
         let cache = MessageCache::new(16);
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(&name, RecordType::A, false, &answer(60), Duration::ZERO);
-        assert!(
-            cache
-                .get(&name, RecordType::A, false, request(&name))
-                .is_none()
-        );
+        assert!(cache.get(&name, RecordType::A, false, request()).is_none());
     }
 
     #[test]
@@ -497,7 +635,7 @@ mod tests {
         cache.insert(&name, RecordType::A, false, &answer(60), Duration::ZERO);
 
         let hit = cache
-            .get_stale(&name, RecordType::A, false, request(&name), 30)
+            .get_stale(&name, RecordType::A, false, request(), 30)
             .expect("stale hit");
         assert!(hit.stale);
         let message = Message::from_vec(&hit.wire).expect("decode");
@@ -517,7 +655,7 @@ mod tests {
             Duration::from_secs(60),
         );
         let hit = cache
-            .get(&name, RecordType::A, false, request(&name))
+            .get(&name, RecordType::A, false, request())
             .expect("hit");
         assert!(!MessageCache::should_prefetch(&hit));
 
@@ -532,5 +670,113 @@ mod tests {
         stale.remaining = Duration::from_secs(2);
         stale.original_ttl = Duration::from_secs(60);
         assert!(MessageCache::should_prefetch(&stale));
+    }
+
+    #[test]
+    fn lookups_match_names_case_insensitively() {
+        let cache = MessageCache::new(16);
+        let mixed = Name::from_ascii("ExAmPlE.CoM.").expect("name");
+        cache.insert(
+            &mixed,
+            RecordType::A,
+            false,
+            &answer(60),
+            Duration::from_secs(60),
+        );
+
+        let lowercase = Name::from_ascii("example.com.").expect("name");
+        assert!(
+            cache
+                .get(&lowercase, RecordType::A, false, request())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn insert_encoded_stores_the_shared_wire() {
+        let cache = MessageCache::new(16);
+        let name = Name::from_ascii("example.com.").expect("name");
+        let mut message = answer(60);
+        message.edns = Some(dns_proto::Edns::new());
+        let wire = Arc::new(encode(&message).expect("encode"));
+
+        cache.insert_encoded(
+            &name,
+            RecordType::A,
+            false,
+            Arc::clone(&wire),
+            Duration::from_secs(60),
+        );
+
+        let hit = cache
+            .get(&name, RecordType::A, false, request())
+            .expect("hit");
+        let mut expected = (*wire).clone();
+        super::patch_wire(&mut expected, request());
+        assert_eq!(
+            hit.wire, expected,
+            "the stored bytes must be the shared wire"
+        );
+        assert!(hit.has_edns, "the OPT flag must be derived from the wire");
+    }
+
+    #[test]
+    fn patch_question_copies_the_client_casing() {
+        let mut stored = Message::new(1, MessageType::Response, OpCode::Query);
+        stored.add_query(dns_proto::Query::query(
+            Name::from_ascii("ExAmPlE.CoM.").expect("name"),
+            RecordType::A,
+        ));
+        let mut wire = encode(&stored).expect("encode");
+
+        let question = dns_proto::Query::query(
+            Name::from_ascii("example.com.").expect("name"),
+            RecordType::A,
+        );
+        assert!(patch_question(&mut wire, &question));
+        let decoded = Message::from_vec(&wire).expect("decode");
+        assert_eq!(decoded.queries[0].name.to_ascii(), "example.com.");
+    }
+
+    #[test]
+    fn patch_question_rejects_mismatched_questions() {
+        let mut stored = Message::new(1, MessageType::Response, OpCode::Query);
+        stored.add_query(dns_proto::Query::query(
+            Name::from_ascii("example.com.").expect("name"),
+            RecordType::A,
+        ));
+        let mut wire = encode(&stored).expect("encode");
+
+        // Same label lengths but a different name must not be patched over.
+        let other_name = dns_proto::Query::query(
+            Name::from_ascii("example.org.").expect("name"),
+            RecordType::A,
+        );
+        assert!(!patch_question(&mut wire, &other_name));
+
+        let other_type = dns_proto::Query::query(
+            Name::from_ascii("example.com.").expect("name"),
+            RecordType::AAAA,
+        );
+        assert!(!patch_question(&mut wire, &other_type));
+
+        let question = dns_proto::Query::query(
+            Name::from_ascii("example.com.").expect("name"),
+            RecordType::A,
+        );
+        assert!(!patch_question(&mut wire[..11], &question));
+        assert!(!patch_question(&mut [], &question));
+    }
+
+    #[test]
+    fn wire_has_opt_detects_an_opt_record() {
+        let without_opt = encode(&answer(60)).expect("encode");
+        assert!(!wire_has_opt(&without_opt));
+
+        let mut with_opt = answer(60);
+        with_opt.edns = Some(dns_proto::Edns::new());
+        assert!(wire_has_opt(&encode(&with_opt).expect("encode")));
+
+        assert!(!wire_has_opt(&[0u8; 11]));
     }
 }

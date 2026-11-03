@@ -7,7 +7,8 @@ mod rrset;
 
 pub use infra::InfraCache;
 pub use message::{
-    CacheHit, CacheStats, DEFAULT_STALE_TTL, MessageCache, WireRequest, response_ttl,
+    CacheHit, CacheStats, DEFAULT_STALE_TTL, MessageCache, WireRequest, patch_question, patch_wire,
+    response_ttl, wire_has_opt,
 };
 pub use registry::{LeaderGuard, QueryKey, QueryRegistry, RegistryEntry};
 pub use rrset::{CachedRrset, RrsetCache};

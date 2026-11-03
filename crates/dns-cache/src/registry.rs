@@ -3,11 +3,14 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use dns_proto::Name;
 use tokio::sync::{Mutex, watch};
 
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct QueryKey {
-    pub name: String,
+    /// Query name; `Name` compares case-insensitively, so keys match without
+    /// formatting the name into a lowercased string.
+    pub name: Name,
     pub qtype: u16,
     pub qclass: u16,
     /// EDNS DO bit, which changes whether signatures are included.
@@ -127,11 +130,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use dns_proto::Name;
+
     use super::{QueryKey, QueryRegistry, RegistryEntry};
 
     fn key() -> QueryKey {
         QueryKey {
-            name: "example.com.".to_owned(),
+            name: Name::from_ascii("example.com.").expect("name"),
             qtype: 1,
             qclass: 1,
             do_bit: false,

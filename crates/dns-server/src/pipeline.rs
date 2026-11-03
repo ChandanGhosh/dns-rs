@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use dns_cache::{
     CacheHit, CacheStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey, QueryRegistry,
-    RegistryEntry, RrsetCache, WireRequest, response_ttl,
+    RegistryEntry, RrsetCache, WireRequest, patch_question, patch_wire, response_ttl, wire_has_opt,
 };
 use dns_config::{Config, ForwardTarget};
 use dns_dnssec::{AutoTrustAnchor, AutoTrustError, TrustStore, root_trust_anchor, unix_now};
@@ -45,8 +45,18 @@ pub enum Transport {
 }
 
 /// A resolved response plus an optional Extended DNS Error.
+///
+/// Misses carry the canonical encoding shared by the message cache, the
+/// single-flight broadcast, and the client reply, so the response is encoded
+/// once and patched per client instead of re-encoded at every step.
 struct Resolution {
-    message: Message,
+    /// The prepared response. Followers that can answer from `wire` alone
+    /// decode it lazily, and only when the wire cannot be patched.
+    message: Option<Message>,
+    /// The canonical encoding, when one could be produced.
+    wire: Option<Arc<Vec<u8>>>,
+    /// Whether the canonical wire already carries an OPT record.
+    has_opt: bool,
     ede: Option<BogusReason>,
 }
 
@@ -108,8 +118,8 @@ impl PipelineStats {
 
 /// Removes the in-flight marker when a background refresh ends.
 struct RefreshGuard {
-    inflight: Arc<Mutex<HashSet<String>>>,
-    key: String,
+    inflight: Arc<Mutex<HashSet<QueryKey>>>,
+    key: QueryKey,
 }
 
 impl Drop for RefreshGuard {
@@ -253,7 +263,7 @@ pub struct QueryPipeline {
     prefetch: bool,
     serve_expired: bool,
     stale_reply_ttl: u32,
-    prefetch_inflight: Arc<Mutex<HashSet<String>>>,
+    prefetch_inflight: Arc<Mutex<HashSet<QueryKey>>>,
     prefetches: Arc<AtomicU64>,
     local: local::LocalPolicy,
     auth_downstream: local::LocalZones,
@@ -610,7 +620,6 @@ impl QueryPipeline {
             id: request.metadata.id,
             recursion_desired: request.metadata.recursion_desired,
             checking_disabled,
-            question_name: &query.name,
         };
         // Local zones are answered before the cache, like Unbound. They are
         // never stored in the message cache because they are policy, not data.
@@ -711,13 +720,7 @@ impl QueryPipeline {
             }
         };
 
-        let response = self.finalize_with_ede(
-            resolution.message,
-            &request,
-            client,
-            transport,
-            resolution.ede,
-        );
+        let response = self.client_reply(resolution, &request, client, transport);
         debug!(
             %client,
             qname = %query.name,
@@ -783,12 +786,7 @@ impl QueryPipeline {
     /// query that is already resolving the same name instead of issuing a
     /// duplicate upstream request.
     fn spawn_refresh(&self, query: &Query, do_bit: bool) {
-        let key = format!(
-            "{}|{}|{}",
-            query.name.to_ascii().to_lowercase(),
-            u16::from(query.query_type),
-            u8::from(do_bit)
-        );
+        let key = Self::coalesce_key(query, do_bit, false);
         {
             let mut inflight = self
                 .prefetch_inflight
@@ -814,6 +812,21 @@ impl QueryPipeline {
         });
     }
 
+    /// Build the single-flight key for one client query.
+    ///
+    /// The name is cloned directly into the key: `Name` compares
+    /// case-insensitively and stores short names inline, so this matches the
+    /// old lowercased string keys without formatting or allocating.
+    fn coalesce_key(query: &Query, do_bit: bool, checking_disabled: bool) -> QueryKey {
+        QueryKey {
+            name: query.name.clone(),
+            qtype: u16::from(query.query_type),
+            qclass: u16::from(DNSClass::IN),
+            do_bit,
+            checking_disabled,
+        }
+    }
+
     async fn resolve_coalesced(
         &self,
         query: &Query,
@@ -821,13 +834,7 @@ impl QueryPipeline {
         checking_disabled: bool,
         cancel: &CancellationToken,
     ) -> Option<Resolution> {
-        let key = QueryKey {
-            name: query.name.to_ascii().to_lowercase(),
-            qtype: u16::from(query.query_type),
-            qclass: u16::from(DNSClass::IN),
-            do_bit,
-            checking_disabled,
-        };
+        let key = Self::coalesce_key(query, do_bit, checking_disabled);
 
         match self.registry.wait_or_register(key).await {
             RegistryEntry::Leader(leader) => {
@@ -846,26 +853,36 @@ impl QueryPipeline {
                         let cacheable =
                             !checking_disabled && !matches!(resolved.security, Security::Bogus(_));
                         let security = resolved.security.clone();
-                        let (message, ede) =
+                        let (mut message, ede) =
                             self.prepare_response(resolved, &query.name, checking_disabled);
-                        if cacheable {
-                            let ttl = response_ttl(
-                                &message,
-                                self.config.server.cache_min_ttl,
-                                self.config.server.cache_max_ttl,
-                            );
-                            if ttl > Duration::ZERO {
-                                self.messages.insert(
-                                    &query.name,
-                                    query.query_type,
-                                    do_bit,
+                        // Answer with the client's exact question bytes:
+                        // patching a reply from this wire then matches a full
+                        // re-encode byte for byte, including name-compression
+                        // decisions, which hickory makes case-sensitively.
+                        message.queries = vec![query.clone()];
+                        // Encode once: the cache entry, the follower
+                        // broadcast, and this client's reply all patch these
+                        // bytes instead of each re-encoding the message.
+                        let has_opt = message.edns.is_some();
+                        let wire = encode(&message).ok().map(Arc::new);
+                        if let Some(wire) = &wire {
+                            if cacheable {
+                                let ttl = response_ttl(
                                     &message,
-                                    ttl,
+                                    self.config.server.cache_min_ttl,
+                                    self.config.server.cache_max_ttl,
                                 );
+                                if ttl > Duration::ZERO {
+                                    self.messages.insert_encoded(
+                                        &query.name,
+                                        query.query_type,
+                                        do_bit,
+                                        Arc::clone(wire),
+                                        ttl,
+                                    );
+                                }
                             }
-                        }
-                        if let Ok(wire) = encode(&message) {
-                            leader.complete(Arc::new(wire));
+                            leader.complete(Arc::clone(wire));
                         }
                         if let Security::Bogus(reason) = &security
                             && (checking_disabled || self.config.server.val_permissive_mode)
@@ -876,7 +893,12 @@ impl QueryPipeline {
                                 "returning bogus data because validation is disabled or permissive"
                             );
                         }
-                        Some(Resolution { message, ede })
+                        Some(Resolution {
+                            message: Some(message),
+                            wire,
+                            has_opt,
+                            ede,
+                        })
                     }
                     Err(error) => {
                         warn!(qname = %query.name, qtype = ?query.query_type, %error, "resolution failed");
@@ -897,8 +919,13 @@ impl QueryPipeline {
                 match result {
                     Ok(Ok(value)) => {
                         let wire = value.as_ref()?.clone();
-                        let message = Message::from_vec(&wire).ok()?;
-                        Some(Resolution { message, ede: None })
+                        let has_opt = wire_has_opt(&wire);
+                        Some(Resolution {
+                            message: None,
+                            wire: Some(wire),
+                            has_opt,
+                            ede: None,
+                        })
                     }
                     _ => None,
                 }
@@ -982,6 +1009,138 @@ impl QueryPipeline {
         transport: Transport,
     ) -> Option<Vec<u8>> {
         self.finalize_with_ede(message, request, client, transport, None)
+    }
+
+    /// Answer a client from a cache-miss resolution.
+    ///
+    /// When the canonical wire can be patched for this client, the reply is a
+    /// clone of those bytes with the header bits, question casing, and an
+    /// empty OPT record fixed up; otherwise the response is decoded (only
+    /// followers need that) and rebuilt by [`Self::finalize_with_ede`].
+    ///
+    /// # Arguments
+    ///
+    /// * `resolution` - The resolved response, its canonical encoding, and
+    ///   any Extended DNS Error
+    /// * `request` - The client's query, supplying the ID, flags, question,
+    ///   and EDNS state to patch in
+    /// * `client` - Client socket address, used for cookie answers on the
+    ///   full path
+    /// * `transport` - Client transport, which decides the size limit
+    ///
+    /// # Returns
+    ///
+    /// The encoded reply, or `None` when neither path can encode one
+    fn client_reply(
+        &self,
+        resolution: Resolution,
+        request: &Message,
+        client: SocketAddr,
+        transport: Transport,
+    ) -> Option<Vec<u8>> {
+        let Resolution {
+            message,
+            wire,
+            has_opt,
+            ede,
+        } = resolution;
+        let Some(wire) = wire else {
+            let message = message?;
+            return self.finalize_with_ede(message, request, client, transport, ede);
+        };
+
+        // The full path rebuilds EDNS options (cookies, EDE) and extended
+        // rcodes from the message: the canonical wire carries no OPT to hold
+        // an extended rcode, so replies with either must go through it.
+        let patchable = ede.is_none()
+            && message
+                .as_ref()
+                .is_none_or(|message| message.metadata.response_code.high() == 0);
+        if patchable
+            && let Some(reply) = self.finalize_canonical(&wire, has_opt, request, transport)
+        {
+            return Some(reply);
+        }
+
+        let message = match message {
+            Some(message) => message,
+            None => Message::from_vec(&wire).ok()?,
+        };
+        self.finalize_with_ede(message, request, client, transport, ede)
+    }
+
+    /// Build a client reply by patching the canonical miss wire.
+    ///
+    /// The canonical wire already holds the full answer; only the
+    /// client-specific header bits, the question's exact casing, and—when the
+    /// client sent EDNS—a fresh empty OPT record differ from what a full
+    /// re-encode would produce, so each is fixed up in place. The question
+    /// section is first in the wire and can never use a backward compression
+    /// pointer, which makes patching its labels safe.
+    ///
+    /// # Arguments
+    ///
+    /// * `wire` - The canonical, already-encoded response
+    /// * `has_opt` - Whether `wire` already contains an OPT record
+    /// * `request` - The client's query to patch in
+    /// * `transport` - Client transport, which decides the size limit
+    ///
+    /// # Returns
+    ///
+    /// The patched reply, or `None` when the reply needs per-client EDNS
+    /// work (a cookie answer), a per-client OPT rebuild, truncation, or the
+    /// wire does not carry this question, and the caller must fall back to
+    /// [`Self::finalize_with_ede`]
+    fn finalize_canonical(
+        &self,
+        wire: &[u8],
+        has_opt: bool,
+        request: &Message,
+        transport: Transport,
+    ) -> Option<Vec<u8>> {
+        // An existing OPT holds upstream options the full path would strip
+        // and rebuild, and a client cookie needs an answer computed here.
+        if has_opt || edns::requested_cookie(request).is_some() {
+            return None;
+        }
+        // Intake guarantees opcode Query, so a canonical wire with any other
+        // opcode cannot answer this client without a rebuild.
+        if wire.len() < 12 || wire[2] & 0x78 != 0 {
+            return None;
+        }
+
+        let advertised = self.config.server.max_udp_size.max(512);
+        let limit = match transport {
+            Transport::Udp => usize::from(edns::payload_size(request).min(advertised)),
+            Transport::Tcp | Transport::Tls | Transport::Https => usize::MAX,
+        };
+        let needs_opt = request.edns.is_some();
+        let length = if needs_opt {
+            wire.len().checked_add(edns::EMPTY_OPT_LEN)?
+        } else {
+            wire.len()
+        };
+        if length > limit {
+            // The full path truncates to the client's payload size.
+            return None;
+        }
+
+        let mut reply = wire.to_vec();
+        patch_wire(
+            &mut reply,
+            WireRequest {
+                id: request.metadata.id,
+                recursion_desired: request.metadata.recursion_desired,
+                checking_disabled: request.metadata.checking_disabled,
+            },
+        );
+        if !patch_question(&mut reply, request.queries.first()?) {
+            return None;
+        }
+        if needs_opt && !edns::append_empty_opt(&mut reply, advertised, edns::dnssec_ok(request)) {
+            return None;
+        }
+        Some(reply)
     }
 
     fn finalize_with_ede(
@@ -1328,7 +1487,7 @@ mod tests {
     };
     use dns_testutil::query_bytes;
 
-    use super::{QueryPipeline, Transport};
+    use super::{QueryPipeline, Resolution, Transport};
 
     fn pipeline() -> QueryPipeline {
         QueryPipeline::new(Arc::new(Config::default()))
@@ -1734,5 +1893,387 @@ mod tests {
         let message = Message::from_vec(&response).expect("decode");
         assert_eq!(message.answers.len(), 1);
         assert_eq!(message.answers[0].data.to_string(), "203.0.113.5");
+    }
+
+    /// A prepared miss response with a mixed-case stored question, plus its
+    /// canonical encoding as the leader broadcasts it.
+    ///
+    /// The answer owner is deliberately all-caps: hickory compresses label
+    /// pointers by exact (case-sensitive) byte match, so an owner matching
+    /// one question's case but not the other's would let the two reply paths
+    /// make different compression decisions and break byte comparison.
+    fn canonical() -> (Message, Arc<Vec<u8>>) {
+        let owner = Name::from_ascii("WWW.EXAMPLE.COM.").expect("name");
+        let mut message = Message::new(0x7777, MessageType::Response, OpCode::Query);
+        message.metadata.recursion_available = true;
+        message.metadata.authentic_data = true;
+        message.add_query(Query::query(
+            Name::from_ascii("WwW.Example.Com.").expect("name"),
+            RecordType::A,
+        ));
+        message.add_answer(Record::from_rdata(
+            owner,
+            60,
+            RData::A(Ipv4Addr::new(192, 0, 2, 1).into()),
+        ));
+        let wire = Arc::new(message.to_vec().expect("encode"));
+        (message, wire)
+    }
+
+    fn miss_request() -> Message {
+        let mut request = Message::new(0x4242, MessageType::Query, OpCode::Query);
+        request.metadata.recursion_desired = true;
+        request.add_query(Query::query(
+            Name::from_ascii("www.example.com.").expect("name"),
+            RecordType::A,
+        ));
+        request
+    }
+
+    /// Run one miss reply through both reply paths and assert they produce
+    /// identical bytes.
+    ///
+    /// The first `Resolution` carries the canonical wire, so a patchable
+    /// reply takes the fast path; the second carries only the message, which
+    /// forces the full decode/re-encode. When `expect_fast_path` is set the
+    /// wire-patch path is invoked directly first, so equality cannot pass
+    /// vacuously with both paths falling back.
+    fn assert_reply_paths_match(
+        pipeline: &QueryPipeline,
+        message: &Message,
+        request: &Message,
+        transport: Transport,
+        expect_fast_path: bool,
+    ) -> Vec<u8> {
+        let wire = Arc::new(message.to_vec().expect("encode"));
+        if expect_fast_path {
+            assert!(
+                pipeline
+                    .finalize_canonical(&wire, message.edns.is_some(), request, transport)
+                    .is_some(),
+                "expected the reply to be patched from the canonical wire",
+            );
+        }
+        let fast = pipeline
+            .client_reply(
+                Resolution {
+                    message: Some(message.clone()),
+                    wire: Some(Arc::clone(&wire)),
+                    has_opt: message.edns.is_some(),
+                    ede: None,
+                },
+                request,
+                client(),
+                transport,
+            )
+            .expect("fast-path reply");
+        let full = pipeline
+            .client_reply(
+                Resolution {
+                    message: Some(message.clone()),
+                    wire: None,
+                    has_opt: false,
+                    ede: None,
+                },
+                request,
+                client(),
+                transport,
+            )
+            .expect("full-path reply");
+        assert_eq!(fast, full, "both reply paths must produce identical bytes");
+        fast
+    }
+
+    #[test]
+    fn miss_reply_without_edns_matches_full_reencode() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let request = miss_request();
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, true);
+        let response = Message::from_vec(&reply).expect("decode");
+        assert_eq!(response.metadata.id, 0x4242);
+        assert!(response.metadata.recursion_desired);
+        assert!(response.metadata.recursion_available);
+        assert!(response.metadata.authentic_data);
+        assert!(response.edns.is_none());
+    }
+
+    #[test]
+    fn miss_reply_with_edns_matches_full_reencode() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let mut request = miss_request();
+        let mut edns = Edns::new();
+        edns.set_max_payload(1400);
+        edns.set_dnssec_ok(true);
+        request.edns = Some(edns);
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, true);
+        let response = Message::from_vec(&reply).expect("decode");
+        let response_edns = response.edns.as_ref().expect("OPT in response");
+        assert_eq!(response_edns.max_payload(), 1232);
+        assert_eq!(response_edns.version(), 0);
+        assert!(response_edns.flags().dnssec_ok);
+    }
+
+    #[test]
+    fn miss_reply_echoes_the_client_question_case() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let mut request = miss_request();
+        request.queries[0] = Query::query(
+            Name::from_ascii("WwW.eXaMpLe.CoM.").expect("name"),
+            RecordType::A,
+        );
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, true);
+        let response = Message::from_vec(&reply).expect("decode");
+        assert_eq!(response.queries[0].name.to_ascii(), "WwW.eXaMpLe.CoM.");
+    }
+
+    #[test]
+    fn miss_reply_with_cd_matches_full_reencode_and_clears_ad() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let mut request = miss_request();
+        request.metadata.checking_disabled = true;
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, true);
+        let response = Message::from_vec(&reply).expect("decode");
+        assert!(response.metadata.checking_disabled);
+        assert!(!response.metadata.authentic_data);
+    }
+
+    #[test]
+    fn miss_reply_falls_back_for_client_cookies() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let mut request = miss_request();
+        let mut edns = Edns::new();
+        edns.options_mut()
+            .insert(dns_proto::EdnsOption::Unknown(10, vec![9u8; 8]));
+        request.edns = Some(edns);
+        let wire = message.to_vec().expect("encode");
+
+        assert!(
+            pipeline
+                .finalize_canonical(&wire, false, &request, Transport::Udp)
+                .is_none(),
+            "a client cookie must be answered by the full path",
+        );
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, false);
+        let response = Message::from_vec(&reply).expect("decode");
+        assert!(
+            response
+                .edns
+                .expect("OPT")
+                .option(dns_proto::EDNS_COOKIE)
+                .is_some(),
+            "the cookie answer proves the fallback ran",
+        );
+    }
+
+    #[test]
+    fn miss_reply_falls_back_when_the_wire_has_an_opt() {
+        let pipeline = pipeline();
+        let (mut message, _) = canonical();
+        message.edns = Some(Edns::new());
+        let wire = message.to_vec().expect("encode");
+        let request = miss_request();
+
+        assert!(
+            pipeline
+                .finalize_canonical(&wire, true, &request, Transport::Udp)
+                .is_none(),
+            "an upstream OPT record must be stripped by the full path",
+        );
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, false);
+        let response = Message::from_vec(&reply).expect("decode");
+        assert!(
+            response.edns.is_none(),
+            "the client sent no EDNS, so the rebuilt reply carries no OPT",
+        );
+    }
+
+    #[test]
+    fn miss_reply_falls_back_for_extended_rcodes() {
+        let pipeline = pipeline();
+        let (mut message, _) = canonical();
+        message.metadata.response_code = ResponseCode::BADVERS;
+        let mut request = miss_request();
+        request.edns = Some(Edns::new());
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, false);
+        let response = Message::from_vec(&reply).expect("decode");
+        // rcode 16 decodes as BADSIG, hickory's name for the shared value;
+        // what matters is that the OPT-extended high bits survived.
+        assert_eq!(
+            response.metadata.response_code.high(),
+            1,
+            "the extended rcode only survives when the full path rebuilds the OPT",
+        );
+    }
+
+    #[test]
+    fn miss_reply_falls_back_when_an_ede_is_attached() {
+        let pipeline = pipeline();
+        let (message, _) = canonical();
+        let mut request = miss_request();
+        request.edns = Some(Edns::new());
+        let wire = Arc::new(message.to_vec().expect("encode"));
+
+        let reply = pipeline
+            .client_reply(
+                Resolution {
+                    message: Some(message),
+                    wire: Some(wire),
+                    has_opt: false,
+                    ede: Some(dns_iter::BogusReason::Signature),
+                },
+                &request,
+                client(),
+                Transport::Udp,
+            )
+            .expect("reply");
+        let response = Message::from_vec(&reply).expect("decode");
+        let edns = response.edns.as_ref().expect("OPT");
+        let option = edns
+            .option(dns_proto::EdnsCode::Unknown(15))
+            .expect("EDE option");
+        match option {
+            dns_proto::EdnsOption::Unknown(code, data) => {
+                assert_eq!(*code, 15);
+                assert_eq!(&data[..2], &6u16.to_be_bytes());
+            }
+            other => panic!("unexpected EDE option: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn miss_reply_falls_back_when_truncation_is_needed() {
+        let pipeline = pipeline();
+        let owner = Name::from_ascii("www.example.com.").expect("name");
+        let mut message = Message::new(0x7777, MessageType::Response, OpCode::Query);
+        message.metadata.recursion_available = true;
+        message.add_query(Query::query(owner.clone(), RecordType::A));
+        for octet in 0..40 {
+            message.add_answer(Record::from_rdata(
+                owner.clone(),
+                60,
+                RData::A(Ipv4Addr::new(192, 0, 2, octet).into()),
+            ));
+        }
+        let request = miss_request();
+        let wire = message.to_vec().expect("encode");
+        assert!(
+            pipeline
+                .finalize_canonical(&wire, false, &request, Transport::Udp)
+                .is_none(),
+            "an oversized reply must be truncated by the full path",
+        );
+
+        let reply = assert_reply_paths_match(&pipeline, &message, &request, Transport::Udp, false);
+        assert!(reply.len() <= 512, "the reply must fit the 512-byte limit");
+        let response = Message::from_vec(&reply).expect("decode");
+        assert!(response.metadata.truncation);
+    }
+
+    #[test]
+    fn miss_reply_falls_back_for_mismatched_questions() {
+        let pipeline = pipeline();
+        let (_, wire) = canonical();
+        let mut request = miss_request();
+        request.queries[0] = Query::query(
+            Name::from_ascii("other.example.").expect("name"),
+            RecordType::A,
+        );
+
+        assert!(
+            pipeline
+                .finalize_canonical(&wire, false, &request, Transport::Udp)
+                .is_none(),
+            "the canonical wire cannot answer a different question",
+        );
+    }
+
+    #[test]
+    fn miss_reply_falls_back_for_a_non_query_opcode() {
+        let pipeline = pipeline();
+        let (mut message, _) = canonical();
+        message.metadata.op_code = OpCode::Notify;
+        let wire = message.to_vec().expect("encode");
+
+        assert!(
+            pipeline
+                .finalize_canonical(&wire, false, &miss_request(), Transport::Udp)
+                .is_none(),
+            "only opcode Query replies may be patched in place",
+        );
+    }
+
+    #[test]
+    fn followers_answer_from_the_shared_wire() {
+        let pipeline = pipeline();
+        let (message, wire) = canonical();
+        let request = miss_request();
+
+        let follower = pipeline
+            .client_reply(
+                Resolution {
+                    message: None,
+                    wire: Some(Arc::clone(&wire)),
+                    has_opt: false,
+                    ede: None,
+                },
+                &request,
+                client(),
+                Transport::Udp,
+            )
+            .expect("follower reply");
+        let leader = pipeline
+            .client_reply(
+                Resolution {
+                    message: Some(message),
+                    wire: Some(Arc::clone(&wire)),
+                    has_opt: false,
+                    ede: None,
+                },
+                &request,
+                client(),
+                Transport::Udp,
+            )
+            .expect("leader reply");
+        assert_eq!(follower, leader, "both must come from the same bytes");
+
+        // A cookie forces a fallback, which must decode the shared wire.
+        let mut cookie_request = miss_request();
+        let mut edns = Edns::new();
+        edns.options_mut()
+            .insert(dns_proto::EdnsOption::Unknown(10, vec![9u8; 8]));
+        cookie_request.edns = Some(edns);
+        let reply = pipeline
+            .client_reply(
+                Resolution {
+                    message: None,
+                    wire: Some(wire),
+                    has_opt: false,
+                    ede: None,
+                },
+                &cookie_request,
+                client(),
+                Transport::Udp,
+            )
+            .expect("follower reply with cookie");
+        let response = Message::from_vec(&reply).expect("decode");
+        assert!(
+            response
+                .edns
+                .expect("OPT")
+                .option(dns_proto::EDNS_COOKIE)
+                .is_some()
+        );
     }
 }

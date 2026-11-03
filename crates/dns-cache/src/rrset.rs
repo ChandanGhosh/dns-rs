@@ -14,7 +14,7 @@ pub struct CachedRrset {
 
 #[derive(Clone)]
 pub struct RrsetCache {
-    cache: Cache<String, CachedRrset>,
+    cache: Cache<(Name, u16), CachedRrset>,
 }
 
 impl RrsetCache {
@@ -27,8 +27,12 @@ impl RrsetCache {
         }
     }
 
-    fn key(name: &Name, record_type: RecordType) -> String {
-        format!("{}|{}", name.to_ascii().to_lowercase(), record_type)
+    /// Build the cache key for one rrset.
+    ///
+    /// `Name` hashes and compares case-insensitively, so this matches the
+    /// lowercased string keys without formatting or allocating the name.
+    fn key(name: &Name, record_type: RecordType) -> (Name, u16) {
+        (name.clone(), u16::from(record_type))
     }
 
     pub fn insert(&self, name: Name, record_type: RecordType, records: Vec<Record>, ttl: Duration) {
@@ -45,9 +49,10 @@ impl RrsetCache {
     }
 
     pub fn get(&self, name: &Name, record_type: RecordType) -> Option<CachedRrset> {
-        let entry = self.cache.get(&Self::key(name, record_type))?;
+        let key = Self::key(name, record_type);
+        let entry = self.cache.get(&key)?;
         if entry.expires_at <= Instant::now() {
-            self.cache.invalidate(&Self::key(name, record_type));
+            self.cache.invalidate(&key);
             return None;
         }
         Some(entry)
@@ -55,5 +60,31 @@ impl RrsetCache {
 
     pub fn clear(&self) {
         self.cache.invalidate_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    use dns_proto::{Name, RData, Record, RecordType};
+
+    use super::RrsetCache;
+
+    #[test]
+    fn lookups_match_names_case_insensitively() {
+        let cache = RrsetCache::new(16);
+        let mixed = Name::from_ascii("ExAmPlE.CoM.").expect("name");
+        let record = Record::from_rdata(
+            mixed.clone(),
+            60,
+            RData::A(Ipv4Addr::new(192, 0, 2, 1).into()),
+        );
+        cache.insert(mixed, RecordType::A, vec![record], Duration::from_secs(60));
+
+        let lowercase = Name::from_ascii("example.com.").expect("name");
+        assert!(cache.get(&lowercase, RecordType::A).is_some());
+        assert!(cache.get(&lowercase, RecordType::AAAA).is_none());
     }
 }
