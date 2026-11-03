@@ -103,7 +103,11 @@ pub struct LeaderGuard {
 
 impl LeaderGuard {
     pub fn complete(mut self, response: Arc<Vec<u8>>) {
-        let _ = self.tx.send(Some(response));
+        // `send` refuses to store the value while no follower is subscribed,
+        // but a follower may subscribe between this publish and the entry's
+        // removal below. `send_replace` always stores, so such a follower
+        // reads the result instead of a closed channel.
+        self.tx.send_replace(Some(response));
         self.completed = true;
         self.registry.remove(&self.key);
     }
@@ -198,5 +202,54 @@ mod tests {
         leader.complete(Arc::new(vec![1]));
         let entry = registry.wait_or_register(key()).await;
         assert!(matches!(entry, RegistryEntry::Leader(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn follower_racing_completion_still_sees_the_result() {
+        let registry = QueryRegistry::new();
+        let RegistryEntry::Leader(leader) = registry.wait_or_register(key()).await else {
+            panic!("first caller must lead");
+        };
+
+        // Hold the entry's inner lock so the racing caller parks inside
+        // `wait_or_register` while holding the DashMap shard guard. The
+        // leader's `complete` then publishes and blocks on that shard,
+        // pinning the follower's subscription to after the publish.
+        let cell = Arc::clone(
+            &registry
+                .inflight
+                .get(&key())
+                .expect("leader entry is registered"),
+        );
+        let inner = cell.lock().await;
+
+        let racing = tokio::spawn({
+            let registry = registry.clone();
+            async move { registry.wait_or_register(key()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let completing = tokio::spawn(async move {
+            leader.complete(Arc::new(vec![7]));
+        });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        drop(inner);
+
+        match racing.await.expect("task joins") {
+            RegistryEntry::Follower { mut rx } => {
+                let value = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    rx.wait_for(|value| value.is_some()),
+                )
+                .await
+                .expect("a completed leader must publish to racing followers")
+                .expect("follower channel stays open");
+                assert_eq!(value.as_deref(), Some(&vec![7]));
+            }
+            // The entry was already removed, so this caller leads instead.
+            RegistryEntry::Leader(leader) => leader.complete(Arc::new(vec![7])),
+        }
+        completing.await.expect("task joins");
     }
 }
