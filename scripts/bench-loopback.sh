@@ -21,6 +21,9 @@
 #   BENCH_CLIENT_CPUS  CPU list for the load generator (default the rest)
 #   BENCH_SERVER_IMAGE run the resolver from this image instead of the host
 #                      binary (Linux host networking; see README)
+#   BENCH_BINARY       host-mode resolver binary to run (skips the build;
+#                      defaults to target/release/dns-rs; ignored when
+#                      BENCH_SERVER_IMAGE is set)
 #   SKIP_BUILD=1       use an existing host binary (host mode only)
 #
 # The resolver serves a stub zone backed by a local mock authority. Both the
@@ -52,6 +55,12 @@ port="${BENCH_PORT:-15353}"
 mock_port="${BENCH_MOCK_PORT:-15354}"
 zone="bench.test"
 server_image="${BENCH_SERVER_IMAGE:-}"
+binary="${BENCH_BINARY:-target/release/dns-rs}"
+
+if [ -n "$server_image" ] && [ -n "${BENCH_BINARY:-}" ]; then
+    echo "BENCH_BINARY and BENCH_SERVER_IMAGE both select the resolver; set only one" >&2
+    exit 1
+fi
 
 # Capacity of the message cache (dns-server MESSAGE_CACHE_ENTRIES). Above it
 # the working set no longer fits and most queries go upstream.
@@ -69,8 +78,13 @@ if [ -n "$server_image" ]; then
         echo "BENCH_SERVER_IMAGE is set but docker is not available" >&2
         exit 1
     fi
-elif [ "${SKIP_BUILD:-0}" != "1" ]; then
+elif [ -z "${BENCH_BINARY:-}" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
     cargo build --release -p dns-daemon
+fi
+
+if [ -z "$server_image" ] && [ ! -x "$binary" ]; then
+    echo "resolver binary not found or not executable: $binary" >&2
+    exit 1
 fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/dns-rs-bench.XXXXXX")"
@@ -163,7 +177,7 @@ EOF
             }
         server_pid="$(docker inspect -f '{{.State.Pid}}' "$container_name" 2>/dev/null || echo 0)"
     else
-        "${pin_server[@]}" target/release/dns-rs -c "$config" run >"$tmp/server-$workers.log" 2>&1 &
+        "${pin_server[@]}" "$binary" -c "$config" run >"$tmp/server-$workers.log" 2>&1 &
         server_pid=$!
     fi
 
@@ -176,7 +190,7 @@ EOF
                 ready=1
                 break
             fi
-        elif target/release/dns-rs -c "$config" healthcheck \
+        elif "$binary" -c "$config" healthcheck \
             --name "n00000.$zone" --port "$port" >/dev/null 2>&1; then
             ready=1
             break
