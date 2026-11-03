@@ -218,7 +218,7 @@ pub fn calculate_total(items: &[Item], tax_rate: f64) -> Result<f64, Calculation
 - Clippy passes (`cargo clippy -- -D warnings`)
 - Code is formatted (`cargo fmt --check`)
 - Always explicitly ask if semver should be bumped or not. If yes, ask if it would be a patch, minor or a major release.
-- Benchmarks should be run/checked as appropriate for the change (especially hot-path changes). The repo has `scripts/bench-loopback.sh` and benchmarking guidance in the security/IO notes.
+- Benchmarks should be run/checked as appropriate for the change (especially hot-path changes). The repo has `scripts/bench-loopback.sh`, the interleaved A/B runner `scripts/bench-compare.sh`, and benchmarking guidance (switches, methodology, interpretation) in `docs/benchmarking.md`.
 - If the project creates a Python package and Rust code is touched, rebuild the Python package (`source .venv/bin/activate && maturin develop --release --features python`)
 - If the project creates a WASM package and Rust code is touched, rebuild the WASM package (`wasm-pack build --target web --out-dir web/pkg`)
 - All public items have doc comments

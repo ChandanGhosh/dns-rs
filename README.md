@@ -251,7 +251,8 @@ per-query allocation path fast.
 The runner is [`scripts/bench-loopback.sh`](scripts/bench-loopback.sh); the
 load generator is [`scripts/dns-bench.rs`](scripts/dns-bench.rs). The runner
 builds the release binary, starts a local mock authority, and loops over the
-thread counts.
+thread counts. Every environment switch, the A/B compare workflow, and the
+methodology rules are catalogued in [`docs/benchmarking.md`](docs/benchmarking.md).
 
 The script needs a Rust toolchain; host mode uses `cargo` to build the
 resolver, and every mode uses `rustc` to build the load generator. Container
@@ -426,8 +427,10 @@ multi-arch image to Docker Hub. The `delv` corpus-parity test in
 `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
 
 The Unbound replay harness design is in
-[`docs/replay-harness.md`](docs/replay-harness.md), and container deployment is
-covered in [`docs/container.md`](docs/container.md).
+[`docs/replay-harness.md`](docs/replay-harness.md), container deployment is
+covered in [`docs/container.md`](docs/container.md), and benchmarking
+switches and methodology are in
+[`docs/benchmarking.md`](docs/benchmarking.md).
 
 ## License
 
