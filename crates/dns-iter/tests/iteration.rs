@@ -518,9 +518,15 @@ async fn wrong_id_is_rejected() {
     .await;
     let resolver = resolver(server.addr);
 
+    // The UDP transport discards datagrams that do not echo the query's
+    // transaction ID, so a server that only ever replies with the wrong ID
+    // makes the exchange fail instead of returning the poisoned message.
     let result = resolver.resolve("www.example.com.", RecordType::A).await;
     assert!(
-        matches!(result, Err(ResolveError::InvalidResponse(_))),
+        matches!(
+            result,
+            Err(ResolveError::InvalidResponse(_) | ResolveError::NoNameservers)
+        ),
         "wrong ID must not be accepted: {result:?}"
     );
 }
