@@ -5,6 +5,7 @@
 #
 #   make checkconf CONFIG=examples/full.toml
 #   make bench THREADS="1 2" BENCH_DURATION=30
+#   make bench-compare BASE_REF=e4176ff THREADS="1 2 4"
 #   make image IMAGE=dns-rs:local
 #   make image-publish TAG=dev CONFIRM=1
 
@@ -17,6 +18,7 @@ TRIVY ?= trivy
 
 CONFIG ?= examples/minimal.toml
 THREADS ?= 1 2 4
+BASE_REF ?= origin/main
 
 IMAGE ?= dns-rs:dev
 CONTAINER ?= dns-rs-smoke
@@ -53,7 +55,7 @@ DOCKER_BUILD_ARGS = \
 	clean clean-image \
 	fmt fmt-check clippy test test-doc test-all deny audit fuzz check ci \
 	coverage coverage-html \
-	bench bench-container bench-ci \
+	bench bench-container bench-ci bench-compare \
 	image image-multiarch image-smoke image-size image-scan image-publish \
 	docker-run container-check ci-container ci-all \
 	compose-up compose-up-local compose-down compose-clean compose-logs compose-ps \
@@ -75,6 +77,8 @@ help: ## Show this help
 	@printf '  %-24s %s\n' 'CONFIG' 'configuration file (default: $(CONFIG))'
 	@printf '  %-24s %s\n' 'THREADS' 'benchmark worker counts (default: $(THREADS))'
 	@printf '  %-24s %s\n' 'BENCH_*' 'passed to scripts/bench-loopback.sh'
+	@printf '  %-24s %s\n' 'BASE_REF' 'bench-compare baseline ref (default: $(BASE_REF))'
+	@printf '  %-24s %s\n' 'AB_*' 'bench-compare pair/load controls (AB_REPEATS, AB_LOAD_LIMIT)'
 	@printf '  %-24s %s\n' 'IMAGE' 'local image tag (default: $(IMAGE))'
 	@printf '  %-24s %s\n' 'CONTAINER' 'smoke-test container name (default: $(CONTAINER))'
 	@printf '  %-24s %s\n' 'PORT' 'smoke-test and docker-run host port (default: $(PORT))'
@@ -231,6 +235,9 @@ bench-container: image ## Build IMAGE and run the loopback benchmark against it
 bench-ci: image ## Reproduce the CI one- and two-worker load stats
 	BENCH_SERVER_IMAGE="$(IMAGE)" BENCH_NAMES=4000 BENCH_CONCURRENCY=8 \
 		BENCH_WARMUP=5 BENCH_DURATION=15 scripts/bench-loopback.sh 1 2
+
+bench-compare: ## Interleaved A/B benchmark of BASE_REF vs. the working tree
+	scripts/bench-compare.sh $(BASE_REF) $(THREADS)
 
 ##@ Container
 
