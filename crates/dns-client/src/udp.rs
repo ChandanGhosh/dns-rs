@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use dns_proto::buffer_pool::{BufferPool, PooledReply};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -30,11 +31,14 @@ type SocketPool = Arc<Mutex<HashMap<SocketAddr, Vec<UdpSocket>>>>;
 /// datagrams that do not echo the query's transaction ID, so a stale reply
 /// left over from an earlier exchange cannot be mistaken for this answer.
 /// A timed-out or failed exchange drops its socket instead of returning it
-/// to the pool, so a late reply has nowhere to land.
+/// to the pool, so a late reply has nowhere to land. Responses are read into
+/// buffers borrowed from a shared [`BufferPool`], so steady-state exchanges
+/// do not allocate and zero-fill a 64 KiB receive buffer per query.
 #[derive(Clone, Debug, Default)]
 pub struct UdpClient {
     bind_addr: Option<IpAddr>,
     pool: SocketPool,
+    recv_pool: BufferPool,
 }
 
 impl UdpClient {
@@ -43,6 +47,7 @@ impl UdpClient {
         Ok(Self {
             bind_addr: bind_addr.map(|addr| addr.ip()),
             pool: SocketPool::default(),
+            recv_pool: BufferPool::default(),
         })
     }
 
@@ -71,7 +76,8 @@ impl UdpClient {
     ///
     /// # Returns
     ///
-    /// The response datagram, truncated to the bytes received
+    /// The response datagram backed by a pooled buffer, exposing exactly the
+    /// bytes received; dropping it returns the buffer to the pool
     ///
     /// # Errors
     ///
@@ -82,21 +88,23 @@ impl UdpClient {
         server: SocketAddr,
         query: &[u8],
         dur: Duration,
-    ) -> Result<Vec<u8>, ClientError> {
+    ) -> Result<PooledReply, ClientError> {
         let socket = match self.take(server) {
             Some(socket) => socket,
             None => self.connect(server).await?,
         };
         socket.send(query).await?;
 
-        // EDNS can advertise up to 65535 bytes, so do not cap the read buffer.
-        let mut buf = vec![0u8; 65_535];
+        // EDNS can advertise up to 65535 bytes, so the receive buffer spans a
+        // full-size message; it comes from the pool instead of being freshly
+        // allocated and zero-filled on every exchange.
+        let mut buf = self.recv_pool.get();
         let received = timeout(dur, async {
             loop {
                 let len = socket.recv(&mut buf).await?;
                 // Skip stale datagrams left over from an earlier exchange on
                 // this pooled socket. `len >= 2` ensures the compared bytes
-                // were actually received rather than zero-fill.
+                // were actually received rather than stale buffer contents.
                 if len >= 2 && query.len() >= 2 && buf[..2] == query[..2] {
                     return Ok(len);
                 }
@@ -106,9 +114,8 @@ impl UdpClient {
 
         match received {
             Ok(Ok(len)) => {
-                buf.truncate(len);
                 self.put(server, socket);
-                Ok(buf)
+                Ok(PooledReply::new(buf, len))
             }
             Ok(Err(error)) => Err(ClientError::Io(error)),
             Err(_) => Err(ClientError::Timeout),

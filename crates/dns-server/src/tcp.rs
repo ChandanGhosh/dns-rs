@@ -8,8 +8,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
+use dns_proto::buffer_pool::BufferPool;
 use dns_proto::{decode, encode};
 
 /// Non-consuming readability probe used to notice a client disconnect while a

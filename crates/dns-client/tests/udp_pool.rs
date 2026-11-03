@@ -45,7 +45,7 @@ async fn sequential_queries_reuse_one_socket() {
             .send_recv(server, &query, Duration::from_secs(2))
             .await
             .expect("response");
-        assert_eq!(response, query);
+        assert_eq!(&response[..], &query[..]);
     }
     server_task.await.expect("server task");
 
@@ -85,7 +85,11 @@ async fn stale_wrong_txid_datagram_is_skipped() {
         .send_recv(server, &query, Duration::from_secs(2))
         .await
         .expect("response");
-    assert_eq!(response, query, "only the matching txid may be returned");
+    assert_eq!(
+        &response[..],
+        &query[..],
+        "only the matching txid may be returned"
+    );
 }
 
 #[tokio::test]
@@ -124,7 +128,7 @@ async fn timed_out_exchange_socket_is_not_reused() {
         .send_recv(server, &[2, 0, 0, 0], Duration::from_secs(2))
         .await
         .expect("response");
-    assert_eq!(response, vec![2, 0, 0, 0]);
+    assert_eq!(&response[..], &[2, 0, 0, 0][..]);
     server_task.await.expect("server task");
 
     let sources = sources_of(&sources);

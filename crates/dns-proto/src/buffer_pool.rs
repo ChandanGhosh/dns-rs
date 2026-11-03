@@ -6,6 +6,7 @@
 //! memory. The RAII wrapper also covers early returns and panics, which manual
 //! put-back calls tend to miss.
 
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 
@@ -16,8 +17,9 @@ const MAX_CAPACITY: usize = 256;
 
 /// A pool of reusable message buffers.
 ///
-/// Cloning shares the same pool; every listener owns one pool, and the clones
-/// handed to connection tasks all return buffers to it.
+/// Cloning shares the same pool; listeners and upstream clients each own one
+/// pool, and the clones handed to connection tasks and replies all return
+/// buffers to it.
 #[derive(Clone)]
 pub struct BufferPool {
     inner: Arc<PoolInner>,
@@ -86,6 +88,24 @@ impl Default for BufferPool {
     }
 }
 
+/// Report the pool's sizing and free count; buffered bytes are never dumped.
+impl fmt::Debug for BufferPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let free = self
+            .inner
+            .free
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        formatter
+            .debug_struct("BufferPool")
+            .field("buffer_size", &self.inner.buffer_size)
+            .field("max_capacity", &self.inner.max_capacity)
+            .field("free", &free)
+            .finish()
+    }
+}
+
 /// A buffer borrowed from a [`BufferPool`].
 ///
 /// Returns its allocation to the pool on drop, including on early returns and
@@ -112,6 +132,50 @@ impl DerefMut for PooledBuffer {
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
         self.pool.release(std::mem::take(&mut self.buf));
+    }
+}
+
+/// A received DNS datagram backed by a pooled buffer.
+///
+/// Derefs to exactly the bytes that were received; the underlying allocation
+/// stays at full length so dropping the reply returns it to the pool. Decode
+/// (or otherwise consume) the reply before letting it go out of scope, since
+/// its bytes may be handed to another exchange once it is dropped.
+pub struct PooledReply {
+    buf: PooledBuffer,
+    len: usize,
+}
+
+impl PooledReply {
+    /// Wrap `buf` as a datagram of `len` received bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Pooled buffer the datagram was received into
+    /// * `len` - Number of bytes received, clamped to the buffer's length
+    pub fn new(buf: PooledBuffer, len: usize) -> Self {
+        Self {
+            len: len.min(buf.len()),
+            buf,
+        }
+    }
+}
+
+impl Deref for PooledReply {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.buf[..self.len]
+    }
+}
+
+/// Print only the received length; the full 64 KiB buffer is never dumped.
+impl fmt::Debug for PooledReply {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PooledReply")
+            .field("len", &self.len)
+            .finish()
     }
 }
 
@@ -146,5 +210,33 @@ mod tests {
         buf.truncate(8);
         drop(buf);
         assert!(pool.inner.free.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn reply_exposes_only_received_bytes_and_recycles() {
+        let pool = BufferPool::new(64, 1);
+        let mut buf = pool.get();
+        buf[..4].copy_from_slice(&[9, 8, 7, 6]);
+        let addr = buf.as_ptr();
+        let reply = PooledReply::new(buf, 4);
+
+        assert_eq!(&reply[..], &[9, 8, 7, 6][..]);
+        assert_eq!(reply.len(), 4);
+
+        drop(reply);
+        let recycled = pool.get();
+        assert_eq!(
+            recycled.as_ptr(),
+            addr,
+            "the reply's buffer must return to the pool on drop"
+        );
+    }
+
+    #[test]
+    fn reply_debug_reports_only_the_length() {
+        let pool = BufferPool::new(64, 1);
+        let reply = PooledReply::new(pool.get(), 7);
+        let debug = format!("{reply:?}");
+        assert_eq!(debug, "PooledReply { len: 7 }");
     }
 }

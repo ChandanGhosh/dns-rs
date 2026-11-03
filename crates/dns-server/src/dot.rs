@@ -9,9 +9,9 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
 use crate::tcp;
+use dns_proto::buffer_pool::BufferPool;
 
 pub async fn run(
     listener: TcpListener,

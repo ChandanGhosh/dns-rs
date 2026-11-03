@@ -1,7 +1,6 @@
 //! DNS listeners and the client-facing query pipeline.
 
 mod acl;
-mod buffer_pool;
 mod doh;
 mod dot;
 mod edns;

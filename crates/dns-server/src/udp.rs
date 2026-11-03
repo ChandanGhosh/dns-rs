@@ -7,8 +7,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
 
-use crate::buffer_pool::BufferPool;
 use crate::pipeline::{QueryPipeline, Transport};
+use dns_proto::buffer_pool::BufferPool;
 
 pub fn bind(addr: SocketAddr, recv_buffer_size: usize) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;

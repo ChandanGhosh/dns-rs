@@ -24,6 +24,8 @@ pub const EDNS_COOKIE: EdnsCode = EdnsCode::Cookie;
 /// Length of a client cookie in bytes (RFC 7873).
 pub const CLIENT_COOKIE_LEN: usize = 8;
 
+pub mod buffer_pool;
+
 /// Errors produced while decoding or encoding DNS messages.
 #[derive(Debug, thiserror::Error)]
 pub enum WireError {
