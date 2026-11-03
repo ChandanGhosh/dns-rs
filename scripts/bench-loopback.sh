@@ -8,7 +8,9 @@
 #
 # Environment overrides:
 #   BENCH_NAMES        unique cache entries (default 4000; the message cache
-#                      holds 8192 entries, so keep this below that limit)
+#                      holds 8192 entries, so keep this below that limit —
+#                      above it the run thrashes the cache and measures
+#                      upstream misses instead of cache hits)
 #   BENCH_CONCURRENCY  queries in flight (default 8; enough to pipeline
 #                      loopback queries without queueing behind one worker)
 #   BENCH_WARMUP       warm-up seconds (default 5)
@@ -23,8 +25,11 @@
 #
 # The resolver serves a stub zone backed by a local mock authority. Both the
 # name set and the TTLs are fixed, so every measured query is a message-cache
-# hit. Results depend on the host; run on an otherwise idle machine for
-# comparable numbers.
+# hit as long as BENCH_NAMES fits in the cache. Results depend on the host;
+# run on an otherwise idle machine for comparable numbers.
+#
+# A miss-heavy run that exercises the upstream path instead:
+#   BENCH_NAMES=20000 scripts/bench-loopback.sh
 #
 # Container mode example:
 #   docker build -t dns-rs:bench .
@@ -47,6 +52,17 @@ port="${BENCH_PORT:-15353}"
 mock_port="${BENCH_MOCK_PORT:-15354}"
 zone="bench.test"
 server_image="${BENCH_SERVER_IMAGE:-}"
+
+# Capacity of the message cache (dns-server MESSAGE_CACHE_ENTRIES). Above it
+# the working set no longer fits and most queries go upstream.
+cache_entries=8192
+if [ "$names" -gt "$cache_entries" ]; then
+    cache_mode="thrash"
+    echo "warning: BENCH_NAMES=$names exceeds the $cache_entries-entry message cache;" \
+        "this run measures upstream misses, not cache hits" >&2
+else
+    cache_mode="fit"
+fi
 
 if [ -n "$server_image" ]; then
     if ! command -v docker >/dev/null 2>&1; then
@@ -106,8 +122,8 @@ if ! kill -0 "$mock_pid" 2>/dev/null; then
     exit 1
 fi
 
-printf 'names=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
-    "$names" "$concurrency" "$warmup" "$duration" "${server_cpus:-any}" \
+printf 'names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
+    "$names" "$cache_mode" "$concurrency" "$warmup" "$duration" "${server_cpus:-any}" \
     "${client_cpus:-any}" "${server_image:-host}"
 
 for workers in "${threads[@]}"; do
