@@ -138,6 +138,18 @@ async fn one_thousand_identical_queries_use_one_upstream_query() {
         1,
         "all concurrent identical queries must coalesce into one upstream query"
     );
+
+    let stats = pipeline.stats();
+    let coalesce = stats.coalesce;
+    assert_eq!(
+        coalesce.leaders + coalesce.followers,
+        1_000,
+        "every query is counted exactly once as leader or follower"
+    );
+    assert_eq!(coalesce.abandoned, 0, "every leader published its result");
+    let metrics = stats.render_prometheus();
+    assert!(metrics.contains("dns_rs_coalesce_followers_total"));
+    assert!(metrics.contains("dns_rs_coalesce_abandoned_total 0"));
 }
 
 #[tokio::test]

@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dns_cache::{
-    CacheHit, CacheStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey, QueryRegistry,
-    RegistryEntry, RrsetCache, WireRequest, patch_question, patch_wire, response_ttl, wire_has_opt,
+    CacheHit, CacheStats, CoalesceStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey,
+    QueryRegistry, RegistryEntry, RrsetCache, WireRequest, patch_question, patch_wire,
+    response_ttl, wire_has_opt,
 };
 use dns_config::{Config, ForwardTarget};
 use dns_dnssec::{AutoTrustAnchor, AutoTrustError, TrustStore, root_trust_anchor, unix_now};
@@ -69,6 +70,8 @@ pub struct PipelineStats {
     pub cache_entries: u64,
     /// Background refreshes started by prefetch or serve-expired.
     pub prefetches: u64,
+    /// Single-flight coalescing counters (leaders, followers, abandoned).
+    pub coalesce: CoalesceStats,
 }
 
 impl PipelineStats {
@@ -111,6 +114,27 @@ impl PipelineStats {
              # TYPE dns_rs_prefetches_total counter\n\
              dns_rs_prefetches_total {}",
             self.prefetches
+        );
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_coalesce_leaders_total Queries that started an upstream resolution.\n\
+             # TYPE dns_rs_coalesce_leaders_total counter\n\
+             dns_rs_coalesce_leaders_total {}",
+            self.coalesce.leaders
+        );
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_coalesce_followers_total Queries that joined an in-flight resolution.\n\
+             # TYPE dns_rs_coalesce_followers_total counter\n\
+             dns_rs_coalesce_followers_total {}",
+            self.coalesce.followers
+        );
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_coalesce_abandoned_total Leaders dropped before publishing.\n\
+             # TYPE dns_rs_coalesce_abandoned_total counter\n\
+             dns_rs_coalesce_abandoned_total {}",
+            self.coalesce.abandoned
         );
         output
     }
@@ -512,12 +536,13 @@ impl QueryPipeline {
         }
     }
 
-    /// Return a snapshot of cache and refresh counters.
+    /// Return a snapshot of cache, refresh, and coalescing counters.
     pub fn stats(&self) -> PipelineStats {
         PipelineStats {
             cache: self.messages.stats(),
             cache_entries: self.messages.entry_count(),
             prefetches: self.prefetches.load(Ordering::Relaxed),
+            coalesce: self.registry.stats(),
         }
     }
 

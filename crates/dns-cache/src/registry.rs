@@ -1,6 +1,7 @@
 //! Single-flight registry: coalesce identical concurrent queries.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use dns_proto::Name;
@@ -19,6 +20,36 @@ pub struct QueryKey {
     pub checking_disabled: bool,
 }
 
+/// Point-in-time snapshot of single-flight registry counters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CoalesceStats {
+    /// Queries that started their own upstream resolution.
+    pub leaders: u64,
+    /// Queries that joined an in-flight resolution instead of starting one.
+    pub followers: u64,
+    /// Leaders dropped without publishing, e.g. because the client went away.
+    pub abandoned: u64,
+}
+
+/// Shared counters behind [`CoalesceStats`]; relaxed ordering is enough
+/// because the values are only ever read for reporting.
+#[derive(Default)]
+struct RegistryCounters {
+    leaders: AtomicU64,
+    followers: AtomicU64,
+    abandoned: AtomicU64,
+}
+
+impl RegistryCounters {
+    fn snapshot(&self) -> CoalesceStats {
+        CoalesceStats {
+            leaders: self.leaders.load(Ordering::Relaxed),
+            followers: self.followers.load(Ordering::Relaxed),
+            abandoned: self.abandoned.load(Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct InFlight {
     tx: watch::Sender<Option<Arc<Vec<u8>>>>,
@@ -27,6 +58,7 @@ struct InFlight {
 #[derive(Clone)]
 pub struct QueryRegistry {
     inflight: Arc<DashMap<QueryKey, Arc<Mutex<Option<InFlight>>>>>,
+    counters: Arc<RegistryCounters>,
 }
 
 impl std::fmt::Debug for QueryRegistry {
@@ -42,7 +74,13 @@ impl QueryRegistry {
     pub fn new() -> Self {
         Self {
             inflight: Arc::new(DashMap::new()),
+            counters: Arc::new(RegistryCounters::default()),
         }
+    }
+
+    /// Return the current leader, follower, and abandoned-leader counts.
+    pub fn stats(&self) -> CoalesceStats {
+        self.counters.snapshot()
     }
 
     /// Join an in-flight query for `key`, or become its leader.
@@ -58,6 +96,7 @@ impl QueryRegistry {
         let mut guard = entry.lock().await;
 
         if let Some(inflight) = guard.as_ref() {
+            self.counters.followers.fetch_add(1, Ordering::Relaxed);
             let rx = inflight.tx.subscribe();
             drop(guard);
             return RegistryEntry::Follower { rx };
@@ -66,6 +105,7 @@ impl QueryRegistry {
         let (tx, _) = watch::channel(None);
         *guard = Some(InFlight { tx: tx.clone() });
         drop(guard);
+        self.counters.leaders.fetch_add(1, Ordering::Relaxed);
 
         RegistryEntry::Leader(LeaderGuard {
             key,
@@ -120,6 +160,10 @@ impl Drop for LeaderGuard {
     fn drop(&mut self) {
         if !self.completed {
             // Closing the sender releases followers with an error.
+            self.registry
+                .counters
+                .abandoned
+                .fetch_add(1, Ordering::Relaxed);
             self.registry.remove(&self.key);
         }
     }
@@ -142,6 +186,36 @@ mod tests {
             do_bit: false,
             checking_disabled: false,
         }
+    }
+
+    #[tokio::test]
+    async fn stats_count_leaders_followers_and_abandoned_leaders() {
+        let registry = QueryRegistry::new();
+        assert_eq!(registry.stats().leaders, 0);
+
+        let RegistryEntry::Leader(leader) = registry.wait_or_register(key()).await else {
+            panic!("first caller must lead");
+        };
+        let RegistryEntry::Follower { rx: _ } = registry.wait_or_register(key()).await else {
+            panic!("second caller must follow");
+        };
+        let stats = registry.stats();
+        assert_eq!(stats.leaders, 1);
+        assert_eq!(stats.followers, 1);
+        assert_eq!(stats.abandoned, 0);
+
+        // Dropping the leader without completing it counts as abandoned.
+        drop(leader);
+        let stats = registry.stats();
+        assert_eq!(stats.abandoned, 1);
+        assert_eq!(stats.leaders, 1, "counters are cumulative");
+
+        // A completed leader is not abandoned.
+        let RegistryEntry::Leader(leader) = registry.wait_or_register(key()).await else {
+            panic!("entry was removed, so the caller leads");
+        };
+        leader.complete(Arc::new(vec![1]));
+        assert_eq!(registry.stats().abandoned, 1);
     }
 
     #[tokio::test]

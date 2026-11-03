@@ -10,7 +10,7 @@ pub use message::{
     CacheHit, CacheStats, DEFAULT_STALE_TTL, MessageCache, WireRequest, patch_question, patch_wire,
     response_ttl, wire_has_opt,
 };
-pub use registry::{LeaderGuard, QueryKey, QueryRegistry, RegistryEntry};
+pub use registry::{CoalesceStats, LeaderGuard, QueryKey, QueryRegistry, RegistryEntry};
 pub use rrset::{CachedRrset, RrsetCache};
 
 use std::hash::Hash;
