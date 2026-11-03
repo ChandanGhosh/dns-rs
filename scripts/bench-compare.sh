@@ -25,9 +25,8 @@
 # with the percentage delta. Repeated pairs beat single runs: judge small
 # deltas against the README's variance note.
 #
-# Example (cache-miss A/B at high concurrency):
-#   AB_REPEATS=3 BENCH_CONCURRENCY=32 BENCH_NAMES=20000 \
-#       scripts/bench-compare.sh origin/main 1 2 4
+# Example (honest cache-miss A/B, TTL-0 upstream):
+#   AB_REPEATS=3 BENCH_SCENARIO=miss scripts/bench-compare.sh origin/main 1 2 4
 
 set -euo pipefail
 

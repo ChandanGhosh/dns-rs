@@ -290,9 +290,8 @@ difference, which absorbs run-to-run drift that single runs cannot:
 # Working tree vs. origin/main, three pairs at each thread count.
 scripts/bench-compare.sh origin/main
 
-# A cache-miss comparison at high concurrency.
-AB_REPEATS=3 BENCH_CONCURRENCY=32 BENCH_NAMES=20000 \
-    scripts/bench-compare.sh origin/main 1 2 4
+# An honest cache-miss comparison (TTL-0 upstream).
+AB_REPEATS=3 BENCH_SCENARIO=miss scripts/bench-compare.sh origin/main 1 2 4
 ```
 
 The baseline is built once into a worktree under `target/ab/` and reused by

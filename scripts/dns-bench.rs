@@ -5,6 +5,7 @@
 use std::env;
 use std::net::{SocketAddr, UdpSocket};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,12 +63,25 @@ fn question_end(message: &[u8]) -> Option<usize> {
     offset.checked_add(4).filter(|end| *end <= message.len())
 }
 
-fn serve(addr: SocketAddr) -> ! {
+/// Answer queries until killed, stamping answers with `ttl` seconds.
+///
+/// A TTL of 0 makes the resolver's `cache_min_ttl` clamp keep the entry at 0,
+/// so nothing is stored and every query is a genuine cache miss. Prints
+/// `stats upstream_queries=N` on stdout every 250 ms so the runner can
+/// snapshot the count around a measurement window.
+fn serve(addr: SocketAddr, ttl: u32) -> ! {
     let socket = UdpSocket::bind(addr).unwrap_or_else(|e| {
         eprintln!("mock: bind {addr}: {e}");
         process::exit(1);
     });
-    eprintln!("mock: listening on {addr}");
+    eprintln!("mock: listening on {addr} ttl={ttl}");
+    let answered = Arc::new(AtomicU64::new(0));
+    let reporter = Arc::clone(&answered);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(250));
+        println!("stats upstream_queries={}", reporter.load(Ordering::Relaxed));
+    });
+    let ttl_bytes = ttl.to_be_bytes();
     let mut buf = [0u8; 1500];
     loop {
         let (len, peer) = match socket.recv_from(&mut buf) {
@@ -91,11 +105,14 @@ fn serve(addr: SocketAddr) -> ! {
             0xC0, 0x0C, // name pointer to the question
             0x00, 0x01, // A
             0x00, 0x01, // IN
-            0x00, 0x00, 0x0E, 0x10, // TTL 3600
+        ]);
+        response.extend_from_slice(&ttl_bytes);
+        response.extend_from_slice(&[
             0x00, 0x04, // RDLENGTH
             192, 0, 2, 1,
         ]);
         let _ = socket.send_to(&response, peer);
+        answered.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -110,6 +127,7 @@ struct ThreadResult {
     samples: Vec<u64>,
     errors: u64,
     rcode_errors: u64,
+    sent: u64,
 }
 
 fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
@@ -125,6 +143,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
     let mut samples = Vec::with_capacity(250_000);
     let mut errors = 0u64;
     let mut rcode_errors = 0u64;
+    let mut sent = 0u64;
     let mut buf = [0u8; 2048];
 
     let start = Instant::now();
@@ -139,6 +158,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
         let id = seq as u16;
         let mut wire = packet.clone();
         wire[0..2].copy_from_slice(&id.to_be_bytes());
+        sent += 1;
         if socket.send(&wire).is_err() {
             errors += 1;
             continue;
@@ -168,6 +188,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
         samples,
         errors,
         rcode_errors,
+        sent,
     }
 }
 
@@ -211,16 +232,18 @@ fn load(
     let mut samples = Vec::new();
     let mut errors = 0u64;
     let mut rcode_errors = 0u64;
+    let mut sent = 0u64;
     for result in results {
         samples.extend(result.samples);
         errors += result.errors;
         rcode_errors += result.rcode_errors;
+        sent += result.sent;
     }
     samples.sort_unstable();
     let count = samples.len() as f64;
     let qps = count / elapsed;
     println!(
-        "RESULT concurrency={concurrency} samples={} qps={qps:.0} errors={errors} rcode={rcode_errors} p50_us={:.1} p75_us={:.1} p90_us={:.1} p95_us={:.1} p99_us={:.1} max_us={:.1}",
+        "RESULT concurrency={concurrency} samples={} qps={qps:.0} sent={sent} errors={errors} rcode={rcode_errors} p50_us={:.1} p75_us={:.1} p90_us={:.1} p95_us={:.1} p99_us={:.1} max_us={:.1}",
         samples.len(),
         percentile(&samples, 50.0) as f64 / 1000.0,
         percentile(&samples, 75.0) as f64 / 1000.0,
@@ -236,14 +259,17 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "usage: dnsbench serve ADDR | dnsbench load ADDR NAMES ZONE CONCURRENCY [WARMUP_SECS] [DURATION_SECS]"
+            "usage: dnsbench serve ADDR [TTL_SECS] | dnsbench load ADDR NAMES ZONE CONCURRENCY [WARMUP_SECS] [DURATION_SECS]"
         );
         process::exit(2);
     }
     match args[1].as_str() {
         "serve" => {
             let addr: SocketAddr = args[2].parse().expect("mock address");
-            serve(addr);
+            let ttl: u32 = args
+                .get(3)
+                .map_or(3600, |value| value.parse().expect("ttl"));
+            serve(addr, ttl);
         }
         "load" => {
             let target: SocketAddr = args[2].parse().expect("target address");

@@ -16,8 +16,7 @@ make bench-compare
 make bench-compare BASE_REF=e4176ff THREADS="1 2 4"
 
 # Cache-miss A/B at high concurrency (see "Cache misses" below).
-make bench-compare THREADS="1 2 4" AB_REPEATS=3 \
-    BENCH_CONCURRENCY=32 BENCH_NAMES=20000
+make bench-compare THREADS="1 2 4" AB_REPEATS=3 BENCH_SCENARIO=miss
 
 # Longer sample for one worker count.
 make bench THREADS="2" BENCH_DURATION=30
@@ -36,9 +35,12 @@ scripts/bench-compare.sh [BASE_REF] [THREADS...]
 
 Builds the release resolver, starts a local mock authority, and for each
 worker count writes a stub-zone config, starts the resolver on loopback,
-warms it up, and measures with `scripts/dns-bench.rs`. Both the name set and
-TTLs are fixed, so every measured query is a message-cache hit as long as
-`BENCH_NAMES` fits in the 8,192-entry cache.
+warms it up, and measures with `scripts/dns-bench.rs`. `BENCH_SCENARIO`
+selects the workload: `hit` (default) fixes the name set and 3600 s TTLs so
+every measured query is a message-cache hit as long as `BENCH_NAMES` fits in
+the 8,192-entry cache; `miss` answers with TTL 0 so nothing is cached and
+every query is a genuine miss, reporting how many reached the mock upstream
+and how many were coalesced away.
 
 ### `scripts/bench-compare.sh` - interleaved A/B against a git ref
 
@@ -57,12 +59,15 @@ The runner scripts build the generator for you; to run it by hand:
 
 ```bash
 rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
-/tmp/dns-bench serve 127.0.0.1:15354 &
+/tmp/dns-bench serve 127.0.0.1:15354 &        # optional TTL seconds, default 3600
 /tmp/dns-bench load 127.0.0.1:15353 4000 bench.test 8 5 10
 ```
 
-`load` arguments are address, distinct names, zone, concurrency, warm-up
-seconds, and measured seconds. The resolver needs a `bench.test.` stub zone
+`serve` arguments are address and the answer TTL in seconds (pass `0` for
+the miss scenario). `load` arguments are address, distinct names, zone,
+concurrency, warm-up seconds, and measured seconds. The mock prints
+`stats upstream_queries=N` every 250 ms, which the runner uses to bracket
+the load window in miss mode. The resolver needs a `bench.test.` stub zone
 pointing at the mock (both runners write this config for you).
 
 ## Environment reference
@@ -71,7 +76,8 @@ pointing at the mock (both runners write this config for you).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BENCH_NAMES` | 4000 | Unique cache entries. Keep at or below 8192 for cache hits; above it the run thrashes the message cache and measures upstream misses |
+| `BENCH_SCENARIO` | `hit` | `hit` fixes TTLs at 3600 s so every query is a cache hit; `miss` uses a TTL-0 mock so every query is a genuine miss and the RESULT line gains `upstream=`/`saved=` |
+| `BENCH_NAMES` | 4000 | Distinct query names. For `hit`, keep at or below 8192 so the working set fits the message cache (above it the run thrashes the cache); for `miss` it controls coalescing - 1 maximizes it, a large value with low concurrency nearly eliminates it |
 | `BENCH_CONCURRENCY` | 8 | Queries in flight |
 | `BENCH_WARMUP` | 5 | Warm-up seconds before measuring |
 | `BENCH_DURATION` | 10 | Measured seconds |
@@ -114,14 +120,28 @@ Fits 4,000 names in the 8,192-entry message cache; every query is a hit.
 ### Cache misses
 
 ```bash
-make bench-compare THREADS="1 2 4" BENCH_CONCURRENCY=32 BENCH_NAMES=20000
+# Honest misses: every query goes upstream through a TTL-0 mock.
+make bench-compare THREADS="1 2 4" AB_REPEATS=3 BENCH_SCENARIO=miss
+
+# Maximal single-flight coalescing: all in-flight queries share one name.
+BENCH_SCENARIO=miss BENCH_NAMES=1 scripts/bench-loopback.sh
+
+# Almost no coalescing: 4000 distinct names, 8 in flight.
+BENCH_SCENARIO=miss BENCH_NAMES=4000 scripts/bench-loopback.sh
 ```
 
-`BENCH_NAMES=20000` exceeds the cache so most queries go upstream. This is a
-proxy: it thrashes the cache rather than issuing clean misses with a
-controlled upstream. The runner warns when `BENCH_NAMES` exceeds 8192. Use
-it consistently for A/B comparisons and it remains useful; an honest
-TTL-0-upstream miss scenario is planned (see "Known limitations").
+`BENCH_SCENARIO=miss` makes the mock answer with TTL 0. The default
+`cache_min_ttl` of 0 keeps the stored TTL at 0, so the resolver never caches
+the answer and every query is a genuine miss - no cache thrashing involved.
+The RESULT line then reports `upstream=` (mock queries during the load
+window) and `saved=` (queries sent that did not reach the mock, i.e.
+coalesced away). Measured on this host: `BENCH_NAMES=1` at concurrency 8
+coalesces ~87% of queries, while `BENCH_NAMES=4000` saves ~0.
+
+The older `BENCH_NAMES=20000` cache-thrash proxy still works in hit mode
+(the runner warns that it exceeds the 8192-entry cache), but prefer the miss
+scenario: it measures the upstream path with a controlled upstream instead
+of evicting the cache.
 
 ### Container mode
 
@@ -179,8 +199,10 @@ threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
 | Field | Meaning |
 |---|---|
 | `qps` | Queries per second over the measured window |
+| `sent` | Total queries sent by the load generator (warm-up plus measured) |
 | `p50_us` .. `p99_us`, `max_us` | Client-side send-to-response RTT percentiles, microseconds |
 | `errors` / `rcode` | Timed-out or malformed responses / non-zero response codes - any non-zero value makes the run suspect |
+| `upstream` / `saved` | Miss scenario only: mock queries observed during the load window, and `sent - upstream` - queries answered without reaching the mock (coalesced away) |
 | `idle_rss_kib` / `peak_rss_kib` | Resolver `VmRSS` at idle and `VmHWM` after the run |
 
 `bench-compare.sh` adds per-run `== A/B ... load=` headers, `waiting...` gate
@@ -189,8 +211,6 @@ deltas. Warnings are printed if a variant reported query errors.
 
 ## Known limitations
 
-- The miss scenario is cache-thrash based (see above); an honest
-  TTL-0-upstream scenario with coalescing counters is planned.
 - There is no TCP/DoT, DNSSEC-validation, large-response, or mixed-workload
   scenario yet.
 - Only the hit-path scenario feeds the README performance table.

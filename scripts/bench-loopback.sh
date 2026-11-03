@@ -1,12 +1,16 @@
 #!/bin/bash
-# Loopback benchmark for the cache-hit path. Builds the release binary and a
-# standalone load generator, then reports latency percentiles, throughput, and
-# RSS for 1, 2, and 4 worker threads.
+# Loopback benchmark for the cache-hit and cache-miss paths. Builds the
+# release binary and a standalone load generator, then reports latency
+# percentiles, throughput, and RSS for 1, 2, and 4 worker threads.
 #
 # Usage: scripts/bench-loopback.sh [THREADS...]
 #   THREADS defaults to "1 2 4".
 #
 # Environment overrides:
+#   BENCH_SCENARIO      hit (default) or miss. hit uses a 3600 s mock TTL so
+#                      every measured query is a cache hit; miss uses a TTL-0
+#                      mock so nothing is cached and every query is a genuine
+#                      miss, with upstream/saved reported (see below)
 #   BENCH_NAMES        unique cache entries (default 4000; the message cache
 #                      holds 8192 entries, so keep this below that limit —
 #                      above it the run thrashes the cache and measures
@@ -26,12 +30,20 @@
 #                      BENCH_SERVER_IMAGE is set)
 #   SKIP_BUILD=1       use an existing host binary (host mode only)
 #
-# The resolver serves a stub zone backed by a local mock authority. Both the
-# name set and the TTLs are fixed, so every measured query is a message-cache
-# hit as long as BENCH_NAMES fits in the cache. Results depend on the host;
-# run on an otherwise idle machine for comparable numbers.
+# The resolver serves a stub zone backed by a local mock authority. In hit
+# mode both the name set and the TTLs are fixed, so every measured query is a
+# message-cache hit as long as BENCH_NAMES fits in the cache. Results depend
+# on the host; run on an otherwise idle machine for comparable numbers.
 #
-# A miss-heavy run that exercises the upstream path instead:
+# In miss mode the mock answers with TTL 0 (the default cache_min_ttl keeps
+# the entry at 0, so nothing is stored) and the RESULT line gains
+#   upstream=N  mock queries observed during the load window
+#   saved=M     queries sent that did not reach the mock (coalesced away)
+# Names repeat across the name set, so BENCH_NAMES=1 maximizes coalescing
+# (saved close to sent) while a large BENCH_NAMES with a small concurrency
+# coalesces almost nothing (saved near 0).
+#
+# A cache-thrash run (not recommended; prefer BENCH_SCENARIO=miss):
 #   BENCH_NAMES=20000 scripts/bench-loopback.sh
 #
 # Container mode example:
@@ -48,6 +60,7 @@ if [ ${#threads[@]} -eq 0 ]; then
 fi
 
 names="${BENCH_NAMES:-4000}"
+scenario="${BENCH_SCENARIO:-hit}"
 concurrency="${BENCH_CONCURRENCY:-8}"
 warmup="${BENCH_WARMUP:-5}"
 duration="${BENCH_DURATION:-10}"
@@ -65,13 +78,28 @@ fi
 # Capacity of the message cache (dns-server MESSAGE_CACHE_ENTRIES). Above it
 # the working set no longer fits and most queries go upstream.
 cache_entries=8192
-if [ "$names" -gt "$cache_entries" ]; then
-    cache_mode="thrash"
-    echo "warning: BENCH_NAMES=$names exceeds the $cache_entries-entry message cache;" \
-        "this run measures upstream misses, not cache hits" >&2
-else
-    cache_mode="fit"
-fi
+case "$scenario" in
+    hit)
+        mock_ttl=3600
+        if [ "$names" -gt "$cache_entries" ]; then
+            cache_mode="thrash"
+            echo "warning: BENCH_NAMES=$names exceeds the $cache_entries-entry message cache;" \
+                "this run measures upstream misses, not cache hits" >&2
+        else
+            cache_mode="fit"
+        fi
+        ;;
+    miss)
+        # TTL 0 is clamped to 0 by the default cache_min_ttl, so the resolver
+        # never stores the answer and every query is a genuine miss.
+        mock_ttl=0
+        cache_mode="miss"
+        ;;
+    *)
+        echo "BENCH_SCENARIO must be 'hit' or 'miss' (got: $scenario)" >&2
+        exit 1
+        ;;
+esac
 
 if [ -n "$server_image" ]; then
     if ! command -v docker >/dev/null 2>&1; then
@@ -127,7 +155,7 @@ if [ -n "$client_cpus" ]; then
     pin_client=(taskset -c "$client_cpus")
 fi
 
-"$tmp/dns-bench" serve "127.0.0.1:$mock_port" >"$tmp/mock.log" 2>&1 &
+"$tmp/dns-bench" serve "127.0.0.1:$mock_port" "$mock_ttl" >"$tmp/mock.log" 2>&1 &
 mock_pid=$!
 sleep 0.3
 if ! kill -0 "$mock_pid" 2>/dev/null; then
@@ -136,9 +164,9 @@ if ! kill -0 "$mock_pid" 2>/dev/null; then
     exit 1
 fi
 
-printf 'names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
-    "$names" "$cache_mode" "$concurrency" "$warmup" "$duration" "${server_cpus:-any}" \
-    "${client_cpus:-any}" "${server_image:-host}"
+printf 'scenario=%s names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
+    "$scenario" "$names" "$cache_mode" "$concurrency" "$warmup" "$duration" \
+    "${server_cpus:-any}" "${client_cpus:-any}" "${server_image:-host}"
 
 for workers in "${threads[@]}"; do
     config="$tmp/bench-$workers.toml"
@@ -208,8 +236,25 @@ EOF
     fi
 
     idle_kib="$(awk '/^VmRSS:/ {print $2}' "/proc/$server_pid/status")"
+    # In miss mode the mock's cumulative query counter brackets the load
+    # window: the snapshot after the healthcheck excludes readiness queries,
+    # and the delta over the run measures how many queries actually went
+    # upstream versus being coalesced or answered from cache.
+    if [ "$scenario" = "miss" ]; then
+        up0="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
+        up0="${up0:-0}"
+    fi
     result="$("${pin_client[@]}" "$tmp/dns-bench" load "127.0.0.1:$port" "$names" \
         "$zone" "$concurrency" "$warmup" "$duration")"
+    if [ "$scenario" = "miss" ]; then
+        # The mock reports every 250 ms; wait for the post-load reading.
+        sleep 1
+        up1="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
+        upstream=$((up1 - up0))
+        sent="$(printf '%s\n' "$result" | sed -n 's/.* sent=\([0-9]*\).*/\1/p')"
+        saved=$((sent - upstream))
+        result="$result upstream=$upstream saved=$saved"
+    fi
     peak_kib="$(awk '/^VmHWM:/ {print $2}' "/proc/$server_pid/status")"
 
     echo "threads=$workers idle_rss_kib=$idle_kib peak_rss_kib=$peak_kib $result"
