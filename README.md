@@ -292,13 +292,18 @@ scripts/bench-compare.sh origin/main
 
 # An honest cache-miss comparison (TTL-0 upstream).
 AB_REPEATS=3 BENCH_SCENARIO=miss scripts/bench-compare.sh origin/main 1 2 4
+
+# An allocation comparison: both variants build with the counting allocator.
+BENCH_ALLOCS=1 scripts/bench-compare.sh origin/main 1 2 4
 ```
 
 The baseline is built once into a worktree under `target/ab/` and reused by
 later invocations; every `BENCH_*` variable passes through to the main runner.
 `AB_REPEATS` sets the number of pairs per thread count (default 3) and
 `AB_LOAD_LIMIT` the 1-minute load average each run waits for (default a
-quarter of the CPU count).
+quarter of the CPU count). `BENCH_ALLOCS=1` instruments the allocator on
+both sides and adds `allocs_per_query` per run and to the summary (the
+baseline ref must contain that feature).
 
 On Linux hosts with at least eight CPUs it pins the resolver to CPUs 0-3 and
 the generator to the rest. Override this with `BENCH_SERVER_CPUS` and

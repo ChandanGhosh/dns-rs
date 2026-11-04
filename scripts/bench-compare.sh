@@ -14,6 +14,9 @@
 #   AB_LOAD_LIMIT  wait for the 1-minute load average to fall below this
 #                  before each run (default: a quarter of the CPU count, so
 #                  the script's own builds settle before measuring)
+#   BENCH_ALLOCS   1 builds both variants with --features alloc-stats and
+#                  adds an allocs/query column to the summary (the baseline
+#                  ref must contain that feature)
 #   All BENCH_* variables pass through to scripts/bench-loopback.sh
 #   (BENCH_NAMES, BENCH_CONCURRENCY, BENCH_WARMUP, BENCH_DURATION, ...)
 #
@@ -45,6 +48,13 @@ repeats="${AB_REPEATS:-3}"
 cpus="$(nproc 2>/dev/null || echo 1)"
 load_limit="${AB_LOAD_LIMIT:-$((cpus / 4))}"
 
+# Allocation-count mode instruments both variants so the A/B compares
+# allocation requests per query, not only throughput.
+bench_features=()
+if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+    bench_features=(--features alloc-stats)
+fi
+
 if ! base_sha="$(git rev-parse --verify "$base_ref^{commit}" 2>/dev/null)"; then
     echo "cannot resolve BASE_REF '$base_ref'" >&2
     exit 1
@@ -69,10 +79,16 @@ trap cleanup EXIT INT TERM
 
 # --- build both variants up front so no build runs between measurements ---
 echo "building candidate (working tree)..."
-cargo build --release -p dns-daemon
+cargo build --release -p dns-daemon "${bench_features[@]}"
 bin_b="$PWD/target/release/dns-rs"
 
-ab_root="$PWD/target/ab/$base_sha"
+ab_suffix=""
+if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+    # Instrumented baselines cache separately so toggling BENCH_ALLOCS does
+    # not rebuild the plain baseline (and vice versa).
+    ab_suffix="-allocs"
+fi
+ab_root="$PWD/target/ab/${base_sha}${ab_suffix}"
 bin_a="$ab_root/cargo/release/dns-rs"
 if [ ! -x "$bin_a" ]; then
     echo "building baseline $base_sha (first run for this ref; cached afterwards)..."
@@ -80,8 +96,15 @@ if [ ! -x "$bin_a" ]; then
     if [ ! -d "$ab_root/src/.git" ]; then
         git worktree add --detach "$ab_root/src" "$base_sha" >/dev/null 2>&1
     fi
+    if [ "${BENCH_ALLOCS:-0}" = "1" ] \
+        && ! grep -q 'alloc-stats' "$ab_root/src/crates/dns-daemon/Cargo.toml"; then
+        echo "BENCH_ALLOCS=1: baseline $base_ref predates the alloc-stats feature;" \
+            "pick a BASE_REF that contains it" >&2
+        exit 1
+    fi
     CARGO_TARGET_DIR="$ab_root/cargo" \
-        cargo build --release -p dns-daemon --manifest-path "$ab_root/src/Cargo.toml"
+        cargo build --release -p dns-daemon --manifest-path "$ab_root/src/Cargo.toml" \
+        "${bench_features[@]}"
 fi
 
 # --- measurement helpers -------------------------------------------------
@@ -127,7 +150,7 @@ delta_pct() {
 # Usage: run_one LABEL BINARY WORKERS
 run_one() {
     local label="$1" bin="$2" workers="$3"
-    local out line load_before load_after qps p50
+    local out line load_before load_after qps p50 apq
     wait_for_capacity
     load_before="$(awk '{print $1}' /proc/loadavg)"
     echo "== $label workers=$workers load=$load_before"
@@ -149,6 +172,15 @@ run_one() {
     fi
     printf '%s\n' "$qps" >>"$tmp/qps-$label-$workers"
     printf '%s\n' "$p50" >>"$tmp/p50-$label-$workers"
+    if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+        apq="$(printf '%s' "$line" | sed -n 's/.* allocs_per_query=\([0-9.]*\).*/\1/p')"
+        if [ -z "$apq" ]; then
+            echo "error: $label produced no allocs_per_query; both variants need" \
+                "--features alloc-stats" >&2
+            exit 1
+        fi
+        printf '%s\n' "$apq" >>"$tmp/apq-$label-$workers"
+    fi
     if printf '%s' "$line" | grep -qE 'errors=[1-9]|rcode=[1-9]'; then
         echo "warning: $label reported query errors; its numbers are suspect" >&2
         echo 1 >>"$tmp/err-$label-$workers"
@@ -196,6 +228,15 @@ for workers in "${threads[@]}"; do
     printf '%-8s %11s %11s %9s %10s %10s %9s\n' \
         "$workers" "$a" "$b" "$(delta_pct "$a" "$b")" "$pa" "$pb" "$(delta_pct "$pa" "$pb")"
 done
+if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+    echo
+    printf '%-8s %14s %14s %9s\n' "threads" "A allocs/query" "B allocs/query" "delta"
+    for workers in "${threads[@]}"; do
+        a="$(median <"$tmp/apq-A-$workers")"
+        b="$(median <"$tmp/apq-B-$workers")"
+        printf '%-8s %14s %14s %9s\n' "$workers" "$a" "$b" "$(delta_pct "$a" "$b")"
+    done
+fi
 for workers in "${threads[@]}"; do
     for label in A B; do
         if [ -f "$tmp/err-$label-$workers" ]; then

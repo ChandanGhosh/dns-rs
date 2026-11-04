@@ -28,6 +28,11 @@
 #   BENCH_BINARY       host-mode resolver binary to run (skips the build;
 #                      defaults to target/release/dns-rs; ignored when
 #                      BENCH_SERVER_IMAGE is set)
+#   BENCH_ALLOCS       1 reports allocation counts: builds with --features
+#                      alloc-stats and appends allocs=/allocs_per_query= to
+#                      RESULT (host mode only; the counter adds an atomic to
+#                      every allocation, so read the allocs fields from these
+#                      runs, not their QPS)
 #   SKIP_BUILD=1       use an existing host binary (host mode only)
 #
 # The resolver serves a stub zone backed by a local mock authority. In hit
@@ -42,6 +47,12 @@
 # Names repeat across the name set, so BENCH_NAMES=1 maximizes coalescing
 # (saved close to sent) while a large BENCH_NAMES with a small concurrency
 # coalesces almost nothing (saved near 0).
+#
+# With BENCH_ALLOCS=1 the resolver runs a counting allocator (mimalloc
+# underneath) that prints `stats allocs=N` every 250 ms; the runner brackets
+# the load window the same way and the RESULT line gains
+#   allocs=N        allocation requests (alloc, alloc_zeroed, realloc) in the window
+#   allocs_per_query=X.Y  allocs divided by queries sent
 #
 # A cache-thrash run (not recommended; prefer BENCH_SCENARIO=miss):
 #   BENCH_NAMES=20000 scripts/bench-loopback.sh
@@ -72,6 +83,10 @@ binary="${BENCH_BINARY:-target/release/dns-rs}"
 
 if [ -n "$server_image" ] && [ -n "${BENCH_BINARY:-}" ]; then
     echo "BENCH_BINARY and BENCH_SERVER_IMAGE both select the resolver; set only one" >&2
+    exit 1
+fi
+if [ -n "$server_image" ] && [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+    echo "BENCH_ALLOCS=1 needs a host binary; unset BENCH_SERVER_IMAGE" >&2
     exit 1
 fi
 
@@ -107,7 +122,11 @@ if [ -n "$server_image" ]; then
         exit 1
     fi
 elif [ -z "${BENCH_BINARY:-}" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
-    cargo build --release -p dns-daemon
+    if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+        cargo build --release -p dns-daemon --features alloc-stats
+    else
+        cargo build --release -p dns-daemon
+    fi
 fi
 
 if [ -z "$server_image" ] && [ ! -x "$binary" ]; then
@@ -244,16 +263,45 @@ EOF
         up0="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
         up0="${up0:-0}"
     fi
+    # In alloc mode the resolver's reporter prints its cumulative counter
+    # every 250 ms; snapshot the latest reading before the load so the delta
+    # covers only the measured window. A binary built without
+    # --features alloc-stats never prints one, so poll briefly and fail fast.
+    if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+        allocs0=""
+        for _ in $(seq 1 20); do
+            allocs0="$(sed -n 's/^stats allocs=//p' "$tmp/server-$workers.log" | tail -1)"
+            if [ -n "$allocs0" ]; then
+                break
+            fi
+            sleep 0.1
+        done
+        if [ -z "$allocs0" ]; then
+            echo "BENCH_ALLOCS=1 but the resolver reported no alloc stats; build with" \
+                "--features alloc-stats (or unset BENCH_ALLOCS/SKIP_BUILD)" >&2
+            exit 1
+        fi
+    fi
     result="$("${pin_client[@]}" "$tmp/dns-bench" load "127.0.0.1:$port" "$names" \
         "$zone" "$concurrency" "$warmup" "$duration")"
-    if [ "$scenario" = "miss" ]; then
-        # The mock reports every 250 ms; wait for the post-load reading.
+    if [ "$scenario" = "miss" ] || [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+        # The mock and the alloc reporter both print every 250 ms; wait for
+        # the post-load reading before snapshotting.
         sleep 1
+        sent="$(printf '%s\n' "$result" | sed -n 's/.* sent=\([0-9]*\).*/\1/p')"
+    fi
+    if [ "$scenario" = "miss" ]; then
         up1="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
         upstream=$((up1 - up0))
-        sent="$(printf '%s\n' "$result" | sed -n 's/.* sent=\([0-9]*\).*/\1/p')"
         saved=$((sent - upstream))
         result="$result upstream=$upstream saved=$saved"
+    fi
+    if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+        allocs1="$(sed -n 's/^stats allocs=//p' "$tmp/server-$workers.log" | tail -1)"
+        allocs=$((allocs1 - allocs0))
+        allocs_per_query="$(awk -v a="$allocs" -v s="$sent" \
+            'BEGIN { printf "%.1f", (s > 0) ? a / s : 0 }')"
+        result="$result allocs=$allocs allocs_per_query=$allocs_per_query"
     fi
     peak_kib="$(awk '/^VmHWM:/ {print $2}' "/proc/$server_pid/status")"
 
