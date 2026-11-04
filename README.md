@@ -233,18 +233,19 @@ iteration. Four thousand names stays below the 8,192-entry message cache;
 
 | `num_threads` | p50 | p75 | p90 | p95 | p99 | Throughput | Idle RSS | Peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 0.058 ms | 0.074 ms | 0.080 ms | 0.085 ms | 0.114 ms | 83,206 qps | 15.9 MiB | 24.1 MiB |
-| 2 | 0.039 ms | 0.046 ms | 0.053 ms | 0.056 ms | 0.064 ms | 124,703 qps | 18.2 MiB | 26.3 MiB |
-| 4 | 0.031 ms | 0.036 ms | 0.042 ms | 0.045 ms | 0.052 ms | 139,494 qps | 18.3 MiB | 28.4 MiB |
+| 1 | 0.042 ms | 0.053 ms | 0.056 ms | 0.060 ms | 0.075 ms | 107,095 qps | 16.0 MiB | 24.1 MiB |
+| 2 | 0.031 ms | 0.033 ms | 0.037 ms | 0.039 ms | 0.045 ms | 157,755 qps | 18.1 MiB | 26.2 MiB |
+| 4 | 0.019 ms | 0.026 ms | 0.031 ms | 0.039 ms | 0.115 ms | 171,849 qps | 18.0 MiB | 28.2 MiB |
 
 Values are from a 10-second run after a 5-second warm-up. Latency is the
 client-side send-to-response RTT at 8 queries in flight. The host was shared
 with desktop workloads, so tail latency is indicative rather than a strict
 upper bound and repeated runs varied by up to 15% as background load rose.
 RSS is `VmRSS` at idle and `VmHWM` after the 4,000-name cache was
-filled; `num_threads` sets the Tokio worker count. The daemon uses mimalloc,
-which raises idle RSS compared with the system allocator but keeps the
-per-query allocation path fast.
+filled; `num_threads` sets the Tokio worker count (on unix it also binds one
+`SO_REUSEPORT` UDP socket per worker, so the kernel fans datagrams out across
+workers lock-free). The daemon uses mimalloc, which raises idle RSS compared
+with the system allocator but keeps the per-query allocation path fast.
 
 ### Running it
 

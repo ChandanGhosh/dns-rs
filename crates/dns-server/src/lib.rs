@@ -219,22 +219,34 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
         }
 
         if config.server.do_udp {
-            match udp::bind(addr, config.server.udp_recv_buffer_size) {
-                Ok(socket) => {
-                    let pipeline = Arc::clone(&pipeline);
-                    let shutdown = shutdown.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = udp::run(socket, pipeline, shutdown).await {
-                            error!(%addr, %err, "UDP listener failed");
-                        }
-                    });
-                    listeners.push((addr, "udp"));
-                }
-                Err(err) => {
-                    error!(%addr, %err, "failed to bind UDP socket");
-                    return Err(ServerError::Io(err));
+            // SO_REUSEPORT lets the kernel fan datagrams out across several
+            // sockets bound to the same address, so each worker gets its own
+            // receive loop and the inline hit path runs in parallel instead
+            // of through a single loop. Without SO_REUSEPORT (non-unix), only
+            // one socket can bind, matching the previous behavior.
+            let socket_count = if cfg!(unix) {
+                config.server.num_threads.max(1)
+            } else {
+                1
+            };
+            for _ in 0..socket_count {
+                match udp::bind(addr, config.server.udp_recv_buffer_size) {
+                    Ok(socket) => {
+                        let pipeline = Arc::clone(&pipeline);
+                        let shutdown = shutdown.clone();
+                        tokio::spawn(async move {
+                            if let Err(err) = udp::run(socket, pipeline, shutdown).await {
+                                error!(%addr, %err, "UDP listener failed");
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        error!(%addr, %err, "failed to bind UDP socket");
+                        return Err(ServerError::Io(err));
+                    }
                 }
             }
+            listeners.push((addr, "udp"));
         }
         if config.server.do_tcp
             && let Some(connections) = connections.as_ref()

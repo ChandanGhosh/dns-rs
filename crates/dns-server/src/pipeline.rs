@@ -62,6 +62,85 @@ struct Resolution {
     ede: Option<BogusReason>,
 }
 
+/// Outcome of the synchronous front half of a query ([`QueryPipeline::prepare`]).
+///
+/// The job variant is only a transient ~600-byte stack value on its way out
+/// of `prepare`; boxing it would charge every miss an allocation to avoid a
+/// handful of copied bytes.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Prepared {
+    /// The query is finished: reply bytes, or `None` to stay silent.
+    Answer(Option<Vec<u8>>),
+    /// Cache miss: drive this job to resolution and a reply.
+    Resolve(ResolutionJob),
+}
+
+/// One cache-missed query, packaged as a self-contained unit of work.
+///
+/// Holds everything the upstream leg needs (decoded question, flags, the
+/// client, the transport, and the concurrency permit), so the caller decides
+/// how to drive it: connection handlers await [`ResolutionJob::run`] inline,
+/// while the UDP receive loop spawns it as its own task.
+pub(crate) struct ResolutionJob {
+    pipeline: QueryPipeline,
+    request: Message,
+    do_bit: bool,
+    checking_disabled: bool,
+    client: SocketAddr,
+    transport: Transport,
+    cancel: CancellationToken,
+    started: Instant,
+    /// Held for the whole upstream wait, exactly as before the query path was
+    /// split: the per-client concurrency limit counts in-flight resolutions.
+    _permit: crate::ratelimit::Permit,
+}
+
+impl ResolutionJob {
+    /// Coalesce with identical in-flight queries, resolve upstream when
+    /// needed, and build the client reply.
+    pub(crate) async fn run(self) -> Option<Vec<u8>> {
+        let Self {
+            pipeline,
+            request,
+            do_bit,
+            checking_disabled,
+            client,
+            transport,
+            cancel,
+            started,
+            _permit,
+        } = self;
+        let query = &request.queries[0];
+
+        let resolution = match pipeline
+            .resolve_coalesced(query, do_bit, checking_disabled, &cancel)
+            .await
+        {
+            Some(resolution) => resolution,
+            None => {
+                if cancel.is_cancelled() {
+                    debug!(%client, qname = %query.name, "client went away; resolution cancelled");
+                    return None;
+                }
+                return pipeline.error(&request, ResponseCode::ServFail, client, transport);
+            }
+        };
+
+        let finalize = PhaseTimer::start(Phase::Finalize);
+        let response = pipeline.client_reply(resolution, &request, client, transport);
+        finalize.end();
+        debug!(
+            %client,
+            qname = %query.name,
+            qtype = ?query.query_type,
+            cache = "miss",
+            elapsed_ms = started.elapsed().as_millis(),
+            "query answered"
+        );
+        response
+    }
+}
+
 /// A point-in-time snapshot of pipeline counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PipelineStats {
@@ -570,28 +649,70 @@ impl QueryPipeline {
         transport: Transport,
         cancel: CancellationToken,
     ) -> Option<Vec<u8>> {
+        match self.prepare(bytes, client, transport, cancel) {
+            Prepared::Answer(reply) => reply,
+            Prepared::Resolve(job) => job.run().await,
+        }
+    }
+
+    /// Run the synchronous front half of one query: decode, admission checks,
+    /// local-zone answers, and the cache probe.
+    ///
+    /// Nothing before the upstream leg yields, so a cache hit completes inside
+    /// this call and the UDP receive loop can answer it inline instead of
+    /// paying a task spawn and a scheduling wait per datagram. A miss comes
+    /// back as [`Prepared::Resolve`]: connection handlers await
+    /// [`ResolutionJob::run`] directly (the previous behavior), while the UDP
+    /// receive loop spawns it as its own task.
+    ///
+    /// `cancel` is carried into the job; as before, it is only observed while
+    /// waiting on the upstream leg.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Raw query datagram or TCP frame
+    /// * `client` - Address of the querying client
+    /// * `transport` - Transport the query arrived on
+    /// * `cancel` - Cancellation token observed by the upstream leg
+    ///
+    /// # Returns
+    ///
+    /// [`Prepared::Answer`] with the reply bytes (`None` means stay silent),
+    /// or [`Prepared::Resolve`] when the query needs recursive resolution
+    pub(crate) fn prepare(
+        &self,
+        bytes: &[u8],
+        client: SocketAddr,
+        transport: Transport,
+        cancel: CancellationToken,
+    ) -> Prepared {
         let started = Instant::now();
         let decode_timer = PhaseTimer::start(Phase::Decode);
         let mut request = match decode(bytes) {
             Ok(message) => message,
             Err(error) => {
                 debug!(%client, %error, "dropping malformed query");
-                return None;
+                return Prepared::Answer(None);
             }
         };
 
         if request.metadata.message_type != MessageType::Query {
-            return None;
+            return Prepared::Answer(None);
         }
 
         if request.metadata.op_code != OpCode::Query {
-            return self.error(&request, ResponseCode::NotImp, client, transport);
+            return Prepared::Answer(self.error(&request, ResponseCode::NotImp, client, transport));
         }
 
         match acl::check(&self.config, &client) {
-            Decision::Deny => return None,
+            Decision::Deny => return Prepared::Answer(None),
             Decision::Refuse | Decision::DenyNonLocal | Decision::RefuseNonLocal => {
-                return self.error(&request, ResponseCode::Refused, client, transport);
+                return Prepared::Answer(self.error(
+                    &request,
+                    ResponseCode::Refused,
+                    client,
+                    transport,
+                ));
             }
             Decision::Allow => {}
             Decision::AllowSnoop => {
@@ -603,24 +724,34 @@ impl QueryPipeline {
         }
 
         if request.queries.len() != 1 {
-            return self.error(&request, ResponseCode::FormErr, client, transport);
+            return Prepared::Answer(self.error(
+                &request,
+                ResponseCode::FormErr,
+                client,
+                transport,
+            ));
         }
         let query = &request.queries[0];
         if query.query_class != DNSClass::IN {
-            return self.error(&request, ResponseCode::NotImp, client, transport);
+            return Prepared::Answer(self.error(&request, ResponseCode::NotImp, client, transport));
         }
         if matches!(query.query_type, RecordType::AXFR | RecordType::IXFR) {
-            return self.error(&request, ResponseCode::NotImp, client, transport);
+            return Prepared::Answer(self.error(&request, ResponseCode::NotImp, client, transport));
         }
         if edns::version(&request).is_some_and(|version| version != 0) {
-            return self.error(&request, ResponseCode::BADVERS, client, transport);
+            return Prepared::Answer(self.error(
+                &request,
+                ResponseCode::BADVERS,
+                client,
+                transport,
+            ));
         }
 
         match self.rate_limiter.check(client.ip()) {
             RateDecision::Allow => {}
             RateDecision::Drop => {
                 debug!(%client, qname = %query.name, "rate limited; dropping query");
-                return None;
+                return Prepared::Answer(None);
             }
             RateDecision::Slip => {
                 debug!(
@@ -629,15 +760,15 @@ impl QueryPipeline {
                     limited = self.rate_limiter.limited_count(),
                     "rate limited; slipping truncated response"
                 );
-                return self.truncated_reply(&request, client, transport);
+                return Prepared::Answer(self.truncated_reply(&request, client, transport));
             }
         }
 
-        let _permit = match self.concurrency.try_acquire(client.ip()) {
+        let permit = match self.concurrency.try_acquire(client.ip()) {
             Some(permit) => permit,
             None => {
                 debug!(%client, "per-client concurrency limit reached; dropping query");
-                return None;
+                return Prepared::Answer(None);
             }
         };
 
@@ -652,16 +783,16 @@ impl QueryPipeline {
         // never stored in the message cache because they are policy, not data.
         match self.local.answer(client.ip(), query) {
             local::LocalAction::Answer(message) => {
-                return self.finalize(*message, &request, client, transport);
+                return Prepared::Answer(self.finalize(*message, &request, client, transport));
             }
-            local::LocalAction::Drop => return None,
+            local::LocalAction::Drop => return Prepared::Answer(None),
             local::LocalAction::NotHandled => {}
         }
         match self.auth_downstream.answer(query) {
             local::LocalAction::Answer(message) => {
-                return self.finalize(*message, &request, client, transport);
+                return Prepared::Answer(self.finalize(*message, &request, client, transport));
             }
-            local::LocalAction::Drop => return None,
+            local::LocalAction::Drop => return Prepared::Answer(None),
             local::LocalAction::NotHandled => {}
         }
 
@@ -691,7 +822,7 @@ impl QueryPipeline {
                 let finalize = PhaseTimer::start(Phase::Finalize);
                 let reply = self.serve_hit(hit, &request, client, transport);
                 finalize.end();
-                return reply;
+                return Prepared::Answer(reply);
             }
 
             if self.serve_expired
@@ -718,7 +849,7 @@ impl QueryPipeline {
                 let finalize = PhaseTimer::start(Phase::Finalize);
                 let reply = self.serve_hit(hit, &request, client, transport);
                 finalize.end();
-                return reply;
+                return Prepared::Answer(reply);
             }
         }
         lookup.end();
@@ -727,9 +858,9 @@ impl QueryPipeline {
         // lookups from local data after the cache.
         match self.auth_upstream.answer(query) {
             local::LocalAction::Answer(message) => {
-                return self.finalize(*message, &request, client, transport);
+                return Prepared::Answer(self.finalize(*message, &request, client, transport));
             }
-            local::LocalAction::Drop => return None,
+            local::LocalAction::Drop => return Prepared::Answer(None),
             local::LocalAction::NotHandled => {}
         }
 
@@ -737,39 +868,29 @@ impl QueryPipeline {
             && !self.auth_downstream.covers(&query.name)
             && let Some(local) = local::maybe_respond(query)
         {
-            return self.finalize(local, &request, client, transport);
+            return Prepared::Answer(self.finalize(local, &request, client, transport));
         }
 
         if !request.metadata.recursion_desired {
-            return self.error(&request, ResponseCode::Refused, client, transport);
+            return Prepared::Answer(self.error(
+                &request,
+                ResponseCode::Refused,
+                client,
+                transport,
+            ));
         }
 
-        let resolution = match self
-            .resolve_coalesced(query, do_bit, checking_disabled, &cancel)
-            .await
-        {
-            Some(resolution) => resolution,
-            None => {
-                if cancel.is_cancelled() {
-                    debug!(%client, qname = %query.name, "client went away; resolution cancelled");
-                    return None;
-                }
-                return self.error(&request, ResponseCode::ServFail, client, transport);
-            }
-        };
-
-        let finalize = PhaseTimer::start(Phase::Finalize);
-        let response = self.client_reply(resolution, &request, client, transport);
-        finalize.end();
-        debug!(
-            %client,
-            qname = %query.name,
-            qtype = ?query.query_type,
-            cache = "miss",
-            elapsed_ms = started.elapsed().as_millis(),
-            "query answered"
-        );
-        response
+        Prepared::Resolve(ResolutionJob {
+            pipeline: self.clone(),
+            request,
+            do_bit,
+            checking_disabled,
+            client,
+            transport,
+            cancel,
+            started,
+            _permit: permit,
+        })
     }
 
     /// Return a cached wire response, adding EDNS/cookies or truncating only
