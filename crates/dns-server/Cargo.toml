@@ -36,6 +36,11 @@ ipnet.workspace = true
 # Off by default because every phase costs a clock read and an atomic.
 phase-stats = []
 
+# Linux-only batched UDP receives (`recvmmsg` in `recv_batch.rs`); other
+# targets fall back to one `recvfrom` per datagram.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 rcgen = "0.13"
 ring.workspace = true

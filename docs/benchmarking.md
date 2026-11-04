@@ -193,7 +193,7 @@ per query sent, so phases that do not apply to the scenario report `0.00`:
 
 | Field | Phase |
 |---|---|
-| `phase_queue_us` | Receive syscall to handling: inline dispatch on hits, plus the spawn-to-task-start wait for cache misses |
+| `phase_queue_us` | Receive harvest to handling: each query's wait since the receive syscall returned (its position inside a `recvmmsg` batch counts here), plus the spawn-to-task-start wait for cache misses |
 | `phase_decode_us` | Decode plus ACL/rate-limit/concurrency checks, up to the cache probe |
 | `phase_lookup_us` | Message-cache probe |
 | `phase_coalesce_us` | Single-flight registry wait (followers) / register (leaders) |

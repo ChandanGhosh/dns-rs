@@ -244,8 +244,10 @@ upper bound and repeated runs varied by up to 15% as background load rose.
 RSS is `VmRSS` at idle and `VmHWM` after the 4,000-name cache was
 filled; `num_threads` sets the Tokio worker count (on unix it also binds one
 `SO_REUSEPORT` UDP socket per worker, so the kernel fans datagrams out across
-workers lock-free). The daemon uses mimalloc, which raises idle RSS compared
-with the system allocator but keeps the per-query allocation path fast.
+workers lock-free, and on Linux each worker harvests up to 8 queued datagrams
+per receive syscall with `recvmmsg`). The daemon uses mimalloc, which raises
+idle RSS compared with the system allocator but keeps the per-query allocation
+path fast.
 
 ### Running it
 

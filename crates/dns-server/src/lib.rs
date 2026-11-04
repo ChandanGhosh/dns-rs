@@ -8,6 +8,8 @@ mod local;
 mod phase;
 mod pipeline;
 mod ratelimit;
+#[cfg(target_os = "linux")]
+mod recv_batch;
 mod tcp;
 mod tls;
 mod udp;

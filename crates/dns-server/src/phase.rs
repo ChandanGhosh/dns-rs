@@ -106,6 +106,12 @@ impl PhaseTimer {
     }
 
     /// Record the elapsed time for this phase.
+    ///
+    /// A batched UDP receive opens one `Queue` timer for the whole harvest
+    /// and calls this once per datagram: each call records that query's own
+    /// wait since the receive syscall, so its position inside the batch is
+    /// attributed to `Queue` instead of vanishing between phases. Any other
+    /// phase must call `end` exactly once (see [`PhaseTimer`]).
     #[cfg(feature = "phase-stats")]
     #[inline(always)]
     pub(crate) fn end(&self) {
@@ -262,6 +268,26 @@ mod tests {
         record(phase, Duration::from_micros(25));
         let after = snapshot()[phase.index()];
         assert_eq!(after - before, 75_000);
+    }
+
+    /// A batched receive ends one `Queue` timer once per datagram; each
+    /// call records the wait up to that moment, so summed totals cover
+    /// every datagram's position in the batch.
+    #[test]
+    fn repeated_ends_record_each_wait() {
+        let phase = Phase::Queue;
+        let before = snapshot()[phase.index()];
+        let timer = PhaseTimer::start(phase);
+        std::thread::sleep(Duration::from_millis(2));
+        timer.end();
+        std::thread::sleep(Duration::from_millis(2));
+        timer.end();
+        let after = snapshot()[phase.index()];
+        assert!(
+            after - before >= 6_000_000,
+            "expected the two ends to cover at least 6 ms (2 ms + 4 ms), got {} ns",
+            after - before
+        );
     }
 
     /// The runner parses this shape; keep it stable.
