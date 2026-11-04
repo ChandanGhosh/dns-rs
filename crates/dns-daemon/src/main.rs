@@ -1,3 +1,5 @@
+#[cfg(feature = "alloc-stats")]
+mod alloc_stats;
 mod healthcheck;
 
 use std::net::IpAddr;
@@ -14,9 +16,17 @@ use tracing_subscriber::EnvFilter;
 
 /// The resolver allocates per-query names, records, and response buffers.
 /// mimalloc handles that allocation pattern better than the system allocator,
-/// especially in the static musl container image.
+/// especially in the static musl container image. The `alloc-stats` feature
+/// swaps in a counting wrapper for benchmarks; mimalloc stays underneath so
+/// instrumented builds allocate exactly like production ones.
+#[cfg(not(feature = "alloc-stats"))]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Counting build of the same allocator (see the `alloc_stats` module).
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static ALLOCATOR: alloc_stats::CountingMiMalloc = alloc_stats::CountingMiMalloc;
 
 /// Release version. Container builds pass the workspace version through
 /// `DNS_RS_VERSION` so the binary and the image label always agree; local
@@ -162,6 +172,11 @@ fn run(cli: &Cli) -> Result<()> {
         .enable_all()
         .build()
         .context("failed to build the Tokio runtime")?;
+    // `alloc-stats` benchmark builds print `stats allocs=` lines that the
+    // runner snapshots around its load window; the reporter thread lives for
+    // the whole run.
+    #[cfg(feature = "alloc-stats")]
+    alloc_stats::spawn_reporter();
     runtime.block_on(run_server(&cli.config, loaded.config))
 }
 

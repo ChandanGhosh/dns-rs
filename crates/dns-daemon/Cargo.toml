@@ -22,5 +22,12 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# Bench-only instrumentation (BENCH_ALLOCS=1 in scripts/bench-loopback.sh):
+# a counting wrapper around the global allocator that prints `stats allocs=N`
+# every 250 ms. Off by default because the counter adds an atomic to every
+# allocation request.
+alloc-stats = []
+
 [lints]
 workspace = true
