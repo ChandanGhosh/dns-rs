@@ -62,6 +62,22 @@ struct Slots {
 // thread that owns this value. Transferring that ownership is sound.
 unsafe impl Send for RecvBatch {}
 
+/// A zeroed message header, ready for [`RecvBatch::init_headers`] to point
+/// at the batch's buffers.
+///
+/// `libc::msghdr` hides padding fields on some targets (musl's `__pad1`/
+/// `__pad2`), so it cannot be built with struct-literal syntax everywhere
+/// this crate compiles. Zeroing first and then assigning the public fields
+/// is portable across gnu and musl.
+fn empty_header() -> libc::msghdr {
+    // SAFETY: every `msghdr` field is a raw pointer, an integer, or (on
+    // musl) `MaybeUninit` padding, so the all-zero bit pattern - null
+    // pointers and zero lengths - is valid on every supported target, and
+    // each field the receive path relies on is overwritten with an
+    // explicit value before the kernel sees the header.
+    unsafe { std::mem::zeroed() }
+}
+
 impl RecvBatch {
     /// Allocate and initialize the scratch state for one socket's receive
     /// loop.
@@ -75,15 +91,7 @@ impl RecvBatch {
                 }),
                 names: array::from_fn(|_| SockAddrStorage::zeroed()),
                 messages: array::from_fn(|_| libc::mmsghdr {
-                    msg_hdr: libc::msghdr {
-                        msg_name: ptr::null_mut(),
-                        msg_namelen: 0,
-                        msg_iov: ptr::null_mut(),
-                        msg_iovlen: 0,
-                        msg_control: ptr::null_mut(),
-                        msg_controllen: 0,
-                        msg_flags: 0,
-                    },
+                    msg_hdr: empty_header(),
                     msg_len: 0,
                 }),
             }),
@@ -214,16 +222,13 @@ impl RecvBatch {
                 iov_len: MAX_DATAGRAM,
             };
             self.slots.names[index] = SockAddrStorage::zeroed();
+            let mut header = empty_header();
+            header.msg_name = (&raw mut self.slots.names[index]).cast();
+            header.msg_namelen = self.slots.names[index].size_of();
+            header.msg_iov = &raw mut self.slots.iovecs[index];
+            header.msg_iovlen = 1;
             self.slots.messages[index] = libc::mmsghdr {
-                msg_hdr: libc::msghdr {
-                    msg_name: (&raw mut self.slots.names[index]).cast(),
-                    msg_namelen: self.slots.names[index].size_of(),
-                    msg_iov: &raw mut self.slots.iovecs[index],
-                    msg_iovlen: 1,
-                    msg_control: ptr::null_mut(),
-                    msg_controllen: 0,
-                    msg_flags: 0,
-                },
+                msg_hdr: header,
                 msg_len: 0,
             };
         }
