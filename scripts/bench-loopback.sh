@@ -33,6 +33,11 @@
 #                      RESULT (host mode only; the counter adds an atomic to
 #                      every allocation, so read the allocs fields from these
 #                      runs, not their QPS)
+#   BENCH_PHASES       1 reports per-phase timings: builds with --features
+#                      phase-stats and appends phase_<name>_us= to RESULT
+#                      (host mode only; every phase costs a clock read and
+#                      an atomic, so read the phase fields from these runs,
+#                      not their QPS)
 #   SKIP_BUILD=1       use an existing host binary (host mode only)
 #
 # The resolver serves a stub zone backed by a local mock authority. In hit
@@ -53,6 +58,20 @@
 # the load window the same way and the RESULT line gains
 #   allocs=N        allocation requests (alloc, alloc_zeroed, realloc) in the window
 #   allocs_per_query=X.Y  allocs divided by queries sent
+#
+# With BENCH_PHASES=1 the resolver times each stage of a query and prints
+# `stats phases ...` every 250 ms; the runner brackets the load window the
+# same way and the RESULT line gains one field per phase, in microseconds
+# divided by the queries sent:
+#   phase_queue_us      receive syscall to handler task start (task-spawn cost)
+#   phase_decode_us     decode plus ACL/rate-limit/concurrency checks
+#   phase_lookup_us     message-cache probe
+#   phase_coalesce_us   single-flight registry wait
+#   phase_upstream_us   recursive resolution (leaders only)
+#   phase_finalize_us   reply construction and encoding
+#   phase_send_us       sendto syscall (UDP only)
+# A phase the scenario never reaches reports 0.00; the fields need not sum to
+# the client RTT, which also includes network and client time.
 #
 # A cache-thrash run (not recommended; prefer BENCH_SCENARIO=miss):
 #   BENCH_NAMES=20000 scripts/bench-loopback.sh
@@ -89,6 +108,51 @@ if [ -n "$server_image" ] && [ "${BENCH_ALLOCS:-0}" = "1" ]; then
     echo "BENCH_ALLOCS=1 needs a host binary; unset BENCH_SERVER_IMAGE" >&2
     exit 1
 fi
+if [ -n "$server_image" ] && [ "${BENCH_PHASES:-0}" = "1" ]; then
+    echo "BENCH_PHASES=1 needs a host binary; unset BENCH_SERVER_IMAGE" >&2
+    exit 1
+fi
+
+# Instrumentation features requested for this run, joined for --features.
+features=""
+if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
+    features="alloc-stats"
+fi
+if [ "${BENCH_PHASES:-0}" = "1" ]; then
+    features="${features:+$features,}phase-stats"
+fi
+
+# Latest cumulative `stats` line in a log, polling up to 2 s for a reporter
+# that prints every 250 ms. Prints nothing when the binary never reports, so
+# the caller can fail fast on a build that lacks the feature.
+poll_stats() {
+    local log="$1" pattern="$2" value=""
+    for _ in $(seq 1 20); do
+        value="$(sed -n "$pattern" "$log" | tail -1)"
+        if [ -n "$value" ]; then
+            printf '%s' "$value"
+            return
+        fi
+        sleep 0.1
+    done
+}
+
+# Per-phase microseconds per query from two `stats phases ...` snapshots.
+# Usage: phases_summary BEFORE AFTER SENT
+phases_summary() {
+    awk -v before="$1" -v after="$2" -v sent="$3" 'BEGIN {
+        split(before, b, " ")
+        split(after, a, " ")
+        for (i in b) { split(b[i], kv, "="); prev[kv[1]] = kv[2] }
+        for (i in a) { split(a[i], kv, "="); curr[kv[1]] = kv[2] }
+        split("queue decode lookup coalesce upstream finalize send", names, " ")
+        for (i = 1; i <= 7; i++) {
+            key = names[i] "_ns"
+            printf " phase_%s_us=%.2f", names[i], \
+                (sent > 0) ? (curr[key] - prev[key]) / sent / 1000 : 0
+        }
+    }'
+}
 
 # Capacity of the message cache (dns-server MESSAGE_CACHE_ENTRIES). Above it
 # the working set no longer fits and most queries go upstream.
@@ -122,8 +186,8 @@ if [ -n "$server_image" ]; then
         exit 1
     fi
 elif [ -z "${BENCH_BINARY:-}" ] && [ "${SKIP_BUILD:-0}" != "1" ]; then
-    if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
-        cargo build --release -p dns-daemon --features alloc-stats
+    if [ -n "$features" ]; then
+        cargo build --release -p dns-daemon --features "$features"
     else
         cargo build --release -p dns-daemon
     fi
@@ -260,7 +324,7 @@ EOF
     # and the delta over the run measures how many queries actually went
     # upstream versus being coalesced or answered from cache.
     if [ "$scenario" = "miss" ]; then
-        up0="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
+        up0="$(poll_stats "$tmp/mock.log" 's/^stats upstream_queries=//p')"
         up0="${up0:-0}"
     fi
     # In alloc mode the resolver's reporter prints its cumulative counter
@@ -268,25 +332,29 @@ EOF
     # covers only the measured window. A binary built without
     # --features alloc-stats never prints one, so poll briefly and fail fast.
     if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
-        allocs0=""
-        for _ in $(seq 1 20); do
-            allocs0="$(sed -n 's/^stats allocs=//p' "$tmp/server-$workers.log" | tail -1)"
-            if [ -n "$allocs0" ]; then
-                break
-            fi
-            sleep 0.1
-        done
+        allocs0="$(poll_stats "$tmp/server-$workers.log" 's/^stats allocs=//p')"
         if [ -z "$allocs0" ]; then
             echo "BENCH_ALLOCS=1 but the resolver reported no alloc stats; build with" \
                 "--features alloc-stats (or unset BENCH_ALLOCS/SKIP_BUILD)" >&2
             exit 1
         fi
     fi
+    # Phase mode brackets the window the same way, on the resolver's own
+    # `stats phases ...` line.
+    if [ "${BENCH_PHASES:-0}" = "1" ]; then
+        phases0="$(poll_stats "$tmp/server-$workers.log" 's/^stats phases //p')"
+        if [ -z "$phases0" ]; then
+            echo "BENCH_PHASES=1 but the resolver reported no phase stats; build with" \
+                "--features phase-stats (or unset BENCH_PHASES/SKIP_BUILD)" >&2
+            exit 1
+        fi
+    fi
     result="$("${pin_client[@]}" "$tmp/dns-bench" load "127.0.0.1:$port" "$names" \
         "$zone" "$concurrency" "$warmup" "$duration")"
-    if [ "$scenario" = "miss" ] || [ "${BENCH_ALLOCS:-0}" = "1" ]; then
-        # The mock and the alloc reporter both print every 250 ms; wait for
-        # the post-load reading before snapshotting.
+    if [ "$scenario" = "miss" ] || [ "${BENCH_ALLOCS:-0}" = "1" ] \
+        || [ "${BENCH_PHASES:-0}" = "1" ]; then
+        # The mock and the resolver's reporters all print every 250 ms; wait
+        # for the post-load reading before snapshotting.
         sleep 1
         sent="$(printf '%s\n' "$result" | sed -n 's/.* sent=\([0-9]*\).*/\1/p')"
     fi
@@ -302,6 +370,10 @@ EOF
         allocs_per_query="$(awk -v a="$allocs" -v s="$sent" \
             'BEGIN { printf "%.1f", (s > 0) ? a / s : 0 }')"
         result="$result allocs=$allocs allocs_per_query=$allocs_per_query"
+    fi
+    if [ "${BENCH_PHASES:-0}" = "1" ]; then
+        phases1="$(sed -n 's/^stats phases //p' "$tmp/server-$workers.log" | tail -1)"
+        result="$result$(phases_summary "$phases0" "$phases1" "$sent")"
     fi
     peak_kib="$(awk '/^VmHWM:/ {print $2}' "/proc/$server_pid/status")"
 

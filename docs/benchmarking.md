@@ -21,6 +21,9 @@ make bench-compare THREADS="1 2 4" AB_REPEATS=3 BENCH_SCENARIO=miss
 # Allocation A/B: both variants build with the counting allocator.
 make bench-compare BENCH_ALLOCS=1
 
+# Phase attribution A/B: both variants build with per-phase timers.
+make bench-compare BENCH_PHASES=1
+
 # Longer sample for one worker count.
 make bench THREADS="2" BENCH_DURATION=30
 ```
@@ -91,6 +94,7 @@ pointing at the mock (both runners write this config for you).
 | `BENCH_SERVER_IMAGE` | unset | Run the resolver from a container image instead of the host binary (host networking; needs Docker) |
 | `BENCH_BINARY` | `target/release/dns-rs` | Host-mode resolver binary to run; skips the build. Set automatically by `bench-compare.sh`. Cannot be combined with `BENCH_SERVER_IMAGE` |
 | `BENCH_ALLOCS` | unset | `1` builds the resolver with `--features alloc-stats` and appends `allocs=`/`allocs_per_query=` to RESULT (host mode only; the counter adds an atomic to every allocation, so read the allocs fields from these runs, not their QPS) |
+| `BENCH_PHASES` | unset | `1` builds the resolver with `--features phase-stats` and appends `phase_<name>_us=` per pipeline phase to RESULT (host mode only; every phase costs a clock read and an atomic, so read the phase fields from these runs, not their QPS) |
 | `SKIP_BUILD` | unset | `1` reuses an existing host binary instead of building |
 
 ### `bench-compare.sh`
@@ -170,6 +174,42 @@ with the feature and adds an allocs/query column to its summary, and the
 baseline ref must already contain the feature - an older ref cannot A/B
 what it cannot build.
 
+### Phase attribution
+
+```bash
+# Per-phase timings for the working binary.
+BENCH_PHASES=1 scripts/bench-loopback.sh 1
+
+# A/B the timings themselves; both variants build with the timers.
+BENCH_PHASES=1 scripts/bench-compare.sh origin/main 1 2 4
+```
+
+`BENCH_PHASES=1` builds the resolver with its `phase-stats` feature: every
+stage of a query is timed and summed into process-wide counters that a
+reporter thread prints as `stats phases ...` every 250 ms, which the runner
+brackets around the load window exactly like the mock's upstream counter.
+The RESULT line gains one `phase_<name>_us=` field per phase - microseconds
+per query sent, so phases that do not apply to the scenario report `0.00`:
+
+| Field | Phase |
+|---|---|
+| `phase_queue_us` | Receive syscall to handler task start (task-spawn cost) |
+| `phase_decode_us` | Decode plus ACL/rate-limit/concurrency checks, up to the cache probe |
+| `phase_lookup_us` | Message-cache probe |
+| `phase_coalesce_us` | Single-flight registry wait (followers) / register (leaders) |
+| `phase_upstream_us` | Recursive resolution against upstreams (leaders only) |
+| `phase_finalize_us` | Reply construction and encoding |
+| `phase_send_us` | `sendto` syscall (UDP only) |
+
+The fields need not sum to the client RTT, which also includes network and
+client time, and the runner divides by all queries sent (not per-phase
+visits), so a phase can look small when only some queries reach it. Timing
+adds a clock read and an atomic per phase, so use these runs for
+attribution, not throughput claims; container mode is unsupported (the
+image does not carry the feature). `bench-compare.sh` builds both variants
+with the feature and adds a per-phase table to its summary, and the baseline
+ref must already contain the feature.
+
 ### Container mode
 
 ```bash
@@ -231,12 +271,14 @@ threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
 | `errors` / `rcode` | Timed-out or malformed responses / non-zero response codes - any non-zero value makes the run suspect |
 | `upstream` / `saved` | Miss scenario only: mock queries observed during the load window, and `sent - upstream` - queries answered without reaching the mock (coalesced away) |
 | `allocs` / `allocs_per_query` | `BENCH_ALLOCS=1` only: allocation requests during the load window, and that count divided by `sent` |
+| `phase_queue_us` .. `phase_send_us` | `BENCH_PHASES=1` only: per-phase time during the load window, microseconds divided by `sent` (see "Phase attribution") |
 | `idle_rss_kib` / `peak_rss_kib` | Resolver `VmRSS` at idle and `VmHWM` after the run |
 
 `bench-compare.sh` adds per-run `== A/B ... load=` headers, `waiting...` gate
 lines, and a final summary table of median qps/p50 per variant with `%`
-deltas (plus median allocs/query when `BENCH_ALLOCS=1`). Warnings are
-printed if a variant reported query errors.
+deltas (plus median allocs/query when `BENCH_ALLOCS=1` and a per-phase table
+when `BENCH_PHASES=1`). Warnings are printed if a variant reported query
+errors.
 
 ## Known limitations
 

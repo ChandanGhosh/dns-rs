@@ -17,6 +17,9 @@
 #   BENCH_ALLOCS   1 builds both variants with --features alloc-stats and
 #                  adds an allocs/query column to the summary (the baseline
 #                  ref must contain that feature)
+#   BENCH_PHASES   1 builds both variants with --features phase-stats and
+#                  adds a per-phase table to the summary (the baseline ref
+#                  must contain that feature)
 #   All BENCH_* variables pass through to scripts/bench-loopback.sh
 #   (BENCH_NAMES, BENCH_CONCURRENCY, BENCH_WARMUP, BENCH_DURATION, ...)
 #
@@ -48,12 +51,22 @@ repeats="${AB_REPEATS:-3}"
 cpus="$(nproc 2>/dev/null || echo 1)"
 load_limit="${AB_LOAD_LIMIT:-$((cpus / 4))}"
 
-# Allocation-count mode instruments both variants so the A/B compares
-# allocation requests per query, not only throughput.
-bench_features=()
+# Instrumentation requested for both variants: the A/B must compare like with
+# like, so each feature is compiled into the candidate and the baseline.
+feature_list=""
 if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
-    bench_features=(--features alloc-stats)
+    feature_list="alloc-stats"
 fi
+if [ "${BENCH_PHASES:-0}" = "1" ]; then
+    feature_list="${feature_list:+$feature_list,}phase-stats"
+fi
+feature_args=()
+if [ -n "$feature_list" ]; then
+    feature_args=(--features "$feature_list")
+fi
+
+# Phases reported by bench-loopback.sh, in report order.
+phases="queue decode lookup coalesce upstream finalize send"
 
 if ! base_sha="$(git rev-parse --verify "$base_ref^{commit}" 2>/dev/null)"; then
     echo "cannot resolve BASE_REF '$base_ref'" >&2
@@ -79,14 +92,14 @@ trap cleanup EXIT INT TERM
 
 # --- build both variants up front so no build runs between measurements ---
 echo "building candidate (working tree)..."
-cargo build --release -p dns-daemon "${bench_features[@]}"
+cargo build --release -p dns-daemon "${feature_args[@]}"
 bin_b="$PWD/target/release/dns-rs"
 
+# Instrumented baselines cache separately so toggling a feature does not
+# rebuild a baseline built without it (and vice versa).
 ab_suffix=""
-if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
-    # Instrumented baselines cache separately so toggling BENCH_ALLOCS does
-    # not rebuild the plain baseline (and vice versa).
-    ab_suffix="-allocs"
+if [ -n "$feature_list" ]; then
+    ab_suffix="-$(printf '%s' "$feature_list" | tr ',' '-')"
 fi
 ab_root="$PWD/target/ab/${base_sha}${ab_suffix}"
 bin_a="$ab_root/cargo/release/dns-rs"
@@ -96,15 +109,19 @@ if [ ! -x "$bin_a" ]; then
     if [ ! -d "$ab_root/src/.git" ]; then
         git worktree add --detach "$ab_root/src" "$base_sha" >/dev/null 2>&1
     fi
-    if [ "${BENCH_ALLOCS:-0}" = "1" ] \
-        && ! grep -q 'alloc-stats' "$ab_root/src/crates/dns-daemon/Cargo.toml"; then
-        echo "BENCH_ALLOCS=1: baseline $base_ref predates the alloc-stats feature;" \
-            "pick a BASE_REF that contains it" >&2
-        exit 1
+    if [ -n "$feature_list" ]; then
+        IFS=',' read -r -a wanted_features <<<"$feature_list"
+        for feature in "${wanted_features[@]}"; do
+            if ! grep -q "$feature" "$ab_root/src/crates/dns-daemon/Cargo.toml"; then
+                echo "baseline $base_ref predates the '$feature' feature;" \
+                    "pick a BASE_REF that contains it" >&2
+                exit 1
+            fi
+        done
     fi
     CARGO_TARGET_DIR="$ab_root/cargo" \
         cargo build --release -p dns-daemon --manifest-path "$ab_root/src/Cargo.toml" \
-        "${bench_features[@]}"
+        "${feature_args[@]}"
 fi
 
 # --- measurement helpers -------------------------------------------------
@@ -150,7 +167,7 @@ delta_pct() {
 # Usage: run_one LABEL BINARY WORKERS
 run_one() {
     local label="$1" bin="$2" workers="$3"
-    local out line load_before load_after qps p50 apq
+    local out line load_before load_after qps p50 apq phase_value
     wait_for_capacity
     load_before="$(awk '{print $1}' /proc/loadavg)"
     echo "== $label workers=$workers load=$load_before"
@@ -180,6 +197,18 @@ run_one() {
             exit 1
         fi
         printf '%s\n' "$apq" >>"$tmp/apq-$label-$workers"
+    fi
+    if [ "${BENCH_PHASES:-0}" = "1" ]; then
+        for phase in $phases; do
+            phase_value="$(printf '%s' "$line" \
+                | sed -n "s/.* phase_${phase}_us=\([0-9.]*\).*/\1/p")"
+            if [ -z "$phase_value" ]; then
+                echo "error: $label produced no phase_${phase}_us; both variants need" \
+                    "--features phase-stats" >&2
+                exit 1
+            fi
+            printf '%s\n' "$phase_value" >>"$tmp/phase-$phase-$label-$workers"
+        done
     fi
     if printf '%s' "$line" | grep -qE 'errors=[1-9]|rcode=[1-9]'; then
         echo "warning: $label reported query errors; its numbers are suspect" >&2
@@ -235,6 +264,18 @@ if [ "${BENCH_ALLOCS:-0}" = "1" ]; then
         a="$(median <"$tmp/apq-A-$workers")"
         b="$(median <"$tmp/apq-B-$workers")"
         printf '%-8s %14s %14s %9s\n' "$workers" "$a" "$b" "$(delta_pct "$a" "$b")"
+    done
+fi
+if [ "${BENCH_PHASES:-0}" = "1" ]; then
+    echo
+    printf '%-8s %-11s %10s %10s %9s\n' "threads" "phase_us" "A" "B" "delta"
+    for workers in "${threads[@]}"; do
+        for phase in $phases; do
+            a="$(median <"$tmp/phase-$phase-A-$workers")"
+            b="$(median <"$tmp/phase-$phase-B-$workers")"
+            printf '%-8s %-11s %10s %10s %9s\n' \
+                "$workers" "$phase" "$a" "$b" "$(delta_pct "$a" "$b")"
+        done
     done
 fi
 for workers in "${threads[@]}"; do

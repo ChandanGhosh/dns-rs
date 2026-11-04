@@ -177,6 +177,10 @@ fn run(cli: &Cli) -> Result<()> {
     // the whole run.
     #[cfg(feature = "alloc-stats")]
     alloc_stats::spawn_reporter();
+    // `phase-stats` builds print `stats phases ...` the same way, so the
+    // runner can attribute time to a stage of the pipeline.
+    #[cfg(feature = "phase-stats")]
+    dns_server::spawn_reporter();
     runtime.block_on(run_server(&cli.config, loaded.config))
 }
 

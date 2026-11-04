@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use crate::acl::{self, Decision};
 use crate::edns;
 use crate::local;
+use crate::phase::{Phase, PhaseTimer};
 use crate::ratelimit::{ClientConcurrency, RateDecision, RateLimiter};
 
 const MESSAGE_CACHE_ENTRIES: u64 = 8_192;
@@ -570,6 +571,7 @@ impl QueryPipeline {
         cancel: CancellationToken,
     ) -> Option<Vec<u8>> {
         let started = Instant::now();
+        let decode_timer = PhaseTimer::start(Phase::Decode);
         let mut request = match decode(bytes) {
             Ok(message) => message,
             Err(error) => {
@@ -667,11 +669,14 @@ impl QueryPipeline {
         // already cached a SERVFAIL for the same name. Cache entries are
         // written after `prepare_response` runs, so every hit is already
         // scrubbed by the rebinding filter.
+        decode_timer.end();
+        let lookup = PhaseTimer::start(Phase::Lookup);
         if !checking_disabled {
             if let Some(hit) =
                 self.messages
                     .get(&query.name, query.query_type, do_bit, wire_request)
             {
+                lookup.end();
                 if self.prefetch && MessageCache::should_prefetch(&hit) {
                     self.spawn_refresh(query, do_bit);
                 }
@@ -683,7 +688,10 @@ impl QueryPipeline {
                     elapsed_ms = started.elapsed().as_millis(),
                     "query answered"
                 );
-                return self.serve_hit(hit, &request, client, transport);
+                let finalize = PhaseTimer::start(Phase::Finalize);
+                let reply = self.serve_hit(hit, &request, client, transport);
+                finalize.end();
+                return reply;
             }
 
             if self.serve_expired
@@ -695,6 +703,7 @@ impl QueryPipeline {
                     self.stale_reply_ttl,
                 )
             {
+                lookup.end();
                 // RFC 8767: answer from the expired entry immediately and
                 // refresh it in the background.
                 self.spawn_refresh(query, do_bit);
@@ -706,9 +715,13 @@ impl QueryPipeline {
                     elapsed_ms = started.elapsed().as_millis(),
                     "query answered"
                 );
-                return self.serve_hit(hit, &request, client, transport);
+                let finalize = PhaseTimer::start(Phase::Finalize);
+                let reply = self.serve_hit(hit, &request, client, transport);
+                finalize.end();
+                return reply;
             }
         }
+        lookup.end();
 
         // Authority zones configured for upstream use answer recursive
         // lookups from local data after the cache.
@@ -745,7 +758,9 @@ impl QueryPipeline {
             }
         };
 
+        let finalize = PhaseTimer::start(Phase::Finalize);
         let response = self.client_reply(resolution, &request, client, transport);
+        finalize.end();
         debug!(
             %client,
             qname = %query.name,
@@ -861,8 +876,11 @@ impl QueryPipeline {
     ) -> Option<Resolution> {
         let key = Self::coalesce_key(query, do_bit, checking_disabled);
 
+        let coalesce = PhaseTimer::start(Phase::Coalesce);
         match self.registry.wait_or_register(key).await {
             RegistryEntry::Leader(leader) => {
+                coalesce.end();
+                let upstream = PhaseTimer::start(Phase::Upstream);
                 let resolution = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {
@@ -873,8 +891,10 @@ impl QueryPipeline {
                     }
                     result = self.resolve_uncached(query, do_bit, checking_disabled) => result,
                 };
+                upstream.end();
                 match resolution {
                     Ok(resolved) => {
+                        let finalize = PhaseTimer::start(Phase::Finalize);
                         let cacheable =
                             !checking_disabled && !matches!(resolved.security, Security::Bogus(_));
                         let security = resolved.security.clone();
@@ -918,6 +938,7 @@ impl QueryPipeline {
                                 "returning bogus data because validation is disabled or permissive"
                             );
                         }
+                        finalize.end();
                         Some(Resolution {
                             message: Some(message),
                             wire,
@@ -940,11 +961,14 @@ impl QueryPipeline {
                     _ = cancel.cancelled() => return None,
                     result = wait => result,
                 };
+                coalesce.end();
 
                 match result {
                     Ok(Ok(value)) => {
+                        let finalize = PhaseTimer::start(Phase::Finalize);
                         let wire = value.as_ref()?.clone();
                         let has_opt = wire_has_opt(&wire);
+                        finalize.end();
                         Some(Resolution {
                             message: None,
                             wire: Some(wire),
@@ -1033,7 +1057,10 @@ impl QueryPipeline {
         client: SocketAddr,
         transport: Transport,
     ) -> Option<Vec<u8>> {
-        self.finalize_with_ede(message, request, client, transport, None)
+        let timer = PhaseTimer::start(Phase::Finalize);
+        let reply = self.finalize_with_ede(message, request, client, transport, None);
+        timer.end();
+        reply
     }
 
     /// Answer a client from a cache-miss resolution.

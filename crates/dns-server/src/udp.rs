@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
 
+use crate::phase::{Phase, PhaseTimer};
 use crate::pipeline::{QueryPipeline, Transport};
 use dns_proto::buffer_pool::BufferPool;
 
@@ -44,14 +45,21 @@ pub async fn run(
                 match result {
                     Ok((len, client)) => {
                         // Handle each datagram in its own task so a slow
-                        // upstream cannot block the receive loop.
+                        // upstream cannot block the receive loop. The queue
+                        // timer spans the gap between the receive syscall and
+                        // the task actually running, which is exactly the
+                        // task-spawn overhead this loop pays per datagram.
+                        let queue = PhaseTimer::start(Phase::Queue);
                         let socket = Arc::clone(&socket);
                         let pipeline = Arc::clone(&pipeline);
                         tokio::spawn(async move {
+                            queue.end();
                             if let Some(response) =
                                 pipeline.handle(&query[..len], client, Transport::Udp).await
                             {
+                                let send = PhaseTimer::start(Phase::Send);
                                 let _ = socket.send_to(&response, client).await;
+                                send.end();
                             }
                         });
                     }

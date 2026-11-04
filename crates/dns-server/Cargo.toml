@@ -30,6 +30,12 @@ bytes = "1.10"
 hickory-proto.workspace = true
 ipnet.workspace = true
 
+[features]
+# Bench-only instrumentation (BENCH_PHASES=1 in scripts/bench-loopback.sh):
+# times each stage of a query and prints `stats phases ...` every 250 ms.
+# Off by default because every phase costs a clock read and an atomic.
+phase-stats = []
+
 [dev-dependencies]
 rcgen = "0.13"
 ring.workspace = true

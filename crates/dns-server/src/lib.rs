@@ -5,6 +5,7 @@ mod doh;
 mod dot;
 mod edns;
 mod local;
+mod phase;
 mod pipeline;
 mod ratelimit;
 mod tcp;
@@ -23,6 +24,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 pub use pipeline::{PipelineStats, QueryPipeline, Transport};
+
+/// Start the `stats phases ...` reporter used by the benchmark runner.
+/// Only exists in `phase-stats` builds.
+#[cfg(feature = "phase-stats")]
+pub use phase::spawn_reporter;
 
 /// Errors that stop the server.
 #[derive(Debug, thiserror::Error)]
