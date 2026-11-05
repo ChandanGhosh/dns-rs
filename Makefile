@@ -55,7 +55,7 @@ DOCKER_BUILD_ARGS = \
 	clean clean-image \
 	fmt fmt-check clippy test test-doc test-all deny audit fuzz check ci \
 	coverage coverage-html \
-	bench bench-container bench-ci bench-compare \
+	bench bench-container bench-ci bench-compare bench-compare-quick \
 	image image-multiarch image-smoke image-size image-scan image-publish \
 	docker-run container-check ci-container ci-all \
 	compose-up compose-up-local compose-down compose-clean compose-logs compose-ps \
@@ -79,6 +79,7 @@ help: ## Show this help
 	@printf '  %-24s %s\n' 'BENCH_*' 'passed to scripts/bench-loopback.sh'
 	@printf '  %-24s %s\n' 'BASE_REF' 'bench-compare baseline ref (default: $(BASE_REF))'
 	@printf '  %-24s %s\n' 'AB_*' 'bench-compare pair/load controls (AB_REPEATS, AB_LOAD_LIMIT)'
+	@printf '  %-24s %s\n' 'Benchmark recipes' 'see docs/benchmarking.md for bench-compare combinations'
 	@printf '  %-24s %s\n' 'IMAGE' 'local image tag (default: $(IMAGE))'
 	@printf '  %-24s %s\n' 'CONTAINER' 'smoke-test container name (default: $(CONTAINER))'
 	@printf '  %-24s %s\n' 'PORT' 'smoke-test and docker-run host port (default: $(PORT))'
@@ -238,6 +239,10 @@ bench-ci: image ## Reproduce the CI one- and two-worker load stats
 
 bench-compare: ## Interleaved A/B benchmark of BASE_REF vs. the working tree
 	scripts/bench-compare.sh $(BASE_REF) $(THREADS)
+
+bench-compare-quick: ## Fast/noisy A/B sanity check (see docs/benchmarking.md)
+	AB_REPEATS=1 BENCH_WARMUP=2 BENCH_DURATION=5 \
+		scripts/bench-compare.sh $(BASE_REF) 1 2
 
 ##@ Container
 
