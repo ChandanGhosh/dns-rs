@@ -16,6 +16,7 @@ mod udp;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use dns_config::Config;
@@ -54,7 +55,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
     // connection flood could grow tasks and sockets unboundedly.)
     let tcp_capacity = tcp_capacity(&config);
     if config.server.do_tcp && tcp_capacity.is_none() {
-        warn!("incoming-num-tcp is 0; TCP and DoT listeners are disabled");
+        warn!("incoming-num-tcp is 0; TCP, DoT, and DoH listeners are disabled");
     }
     let connections = tcp_capacity.map(|capacity| Arc::new(Semaphore::new(capacity)));
 
