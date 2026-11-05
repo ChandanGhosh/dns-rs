@@ -241,6 +241,10 @@ Values are from a 10-second run after a 5-second warm-up. Latency is the
 client-side send-to-response RTT at 8 queries in flight. The host was shared
 with desktop workloads, so tail latency is indicative rather than a strict
 upper bound and repeated runs varied by up to 15% as background load rose.
+These numbers were measured before `recvmmsg` batching landed; that change is
+reported as a receive-syscall and RSS improvement rather than a further qps
+claim, because the host's run-to-run variance is larger than the expected
+throughput delta.
 RSS is `VmRSS` at idle and `VmHWM` after the 4,000-name cache was
 filled; `num_threads` sets the Tokio worker count (on unix it also binds one
 `SO_REUSEPORT` UDP socket per worker, so the kernel fans datagrams out across

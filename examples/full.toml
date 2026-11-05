@@ -140,9 +140,9 @@ private_domain = [
     "localhost",
 ]
 
-# Maximum concurrent plain-TCP and DoT connections per worker thread.
+# Maximum concurrent plain-TCP, DoT, and DoH connections per worker thread.
 # The effective limit is incoming_num_tcp * num_threads. Zero disables the
-# TCP and DoT listeners; DoH keeps its own HTTP connection management.
+# TCP, DoT, and DoH listeners.
 incoming_num_tcp = 10
 
 # DNSSEC trust anchors. dns-rs ships the built-in root KSKs, so no anchor is

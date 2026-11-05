@@ -364,11 +364,10 @@ pub struct ServerConfig {
     /// that are not delegated in the public DNS. Local zones, auth zones, and
     /// built-in local data are always allowed to contain private addresses.
     pub private_domain: Vec<String>,
-    /// Maximum concurrent plain-TCP and DoT connections per worker thread.
+    /// Maximum concurrent plain-TCP, DoT, and DoH connections per worker thread.
     ///
     /// The server enforces `incoming_num_tcp * num_threads` connections across
-    /// all TCP and DoT listeners. Zero disables both listeners. DoH keeps its
-    /// own HTTP connection management.
+    /// all TCP, DoT, and DoH listeners. Zero disables those listeners.
     pub incoming_num_tcp: usize,
     /// PEM-encoded private key for downstream DNS-over-TLS and DNS-over-HTTPS.
     pub tls_service_key: Option<PathBuf>,

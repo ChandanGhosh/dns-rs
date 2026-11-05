@@ -4,6 +4,8 @@ Single reference for every benchmarking switch, runner, and methodology rule.
 The performance numbers live in the [README](../README.md#performance); this
 document explains how to produce and compare numbers yourself.
 
+Last validated against `87a5860` (v0.1.9).
+
 ## Quick start
 
 ```bash
