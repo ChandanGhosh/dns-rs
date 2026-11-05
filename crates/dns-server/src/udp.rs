@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "linux"))]
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -70,6 +71,9 @@ pub async fn run(
 /// `recvfrom(2)` per datagram. Either way the dispatch is synchronous in
 /// this loop: cache hits and short-circuit replies are answered inline,
 /// and only resolutions that may wait on upstreams spawn a task.
+///
+/// Inline answers from a single harvest are flushed with one `sendmmsg(2)`
+/// when possible to reduce per-reply syscall overhead.
 #[cfg(target_os = "linux")]
 async fn receive_loop(
     socket: &Arc<UdpSocket>,
@@ -90,12 +94,69 @@ async fn receive_loop(
                         // query records its own wait, including its position
                         // behind the messages dispatched before it.
                         let queue = PhaseTimer::start(Phase::Queue);
+                        let mut answers: Vec<(Vec<u8>, SocketAddr)> = Vec::with_capacity(count);
                         for index in 0..count {
                             let Some((client, query)) = batch.message(index) else {
                                 continue;
                             };
                             queue.end();
-                            dispatch(socket, pipeline, query, client);
+                            let prepared = pipeline.prepare(
+                                query,
+                                client,
+                                Transport::Udp,
+                                CancellationToken::new(),
+                            );
+                            match prepared {
+                                Prepared::Answer(Some(response)) => {
+                                    answers.push((response, client));
+                                }
+                                Prepared::Answer(None) => {}
+                                Prepared::Resolve(job) => {
+                                    // Upstream work may not finish for a long time, so it gets its
+                                    // own task; spawning a task per query is what this loop no longer
+                                    // does on the hit path.
+                                    let queued = PhaseTimer::start(Phase::Queue);
+                                    let socket = Arc::clone(socket);
+                                    tokio::spawn(async move {
+                                        queued.end();
+                                        if let Some(response) = job.run().await {
+                                            let send = PhaseTimer::start(Phase::Send);
+                                            let _ = socket.send_to(&response, client).await;
+                                            send.end();
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        if !answers.is_empty() {
+                            let send = PhaseTimer::start(Phase::Send);
+                            let refs: Vec<(&[u8], SocketAddr)> = answers
+                                .iter()
+                                .map(|(buf, addr)| (buf.as_slice(), *addr))
+                                .collect();
+                            match crate::send_batch::send_batch(socket, &refs) {
+                                Ok(sent) if sent >= refs.len() => {}
+                                Ok(sent) => {
+                                    // Partial send or would-block after progress: deliver the rest
+                                    // asynchronously so the receive loop stays responsive.
+                                    for (buf, addr) in answers.into_iter().skip(sent) {
+                                        let socket = Arc::clone(socket);
+                                        tokio::spawn(async move {
+                                            let _ = socket.send_to(&buf, addr).await;
+                                        });
+                                    }
+                                }
+                                Err(_) => {
+                                    // Fallback: send individually without blocking the loop.
+                                    for (buf, addr) in answers {
+                                        let socket = Arc::clone(socket);
+                                        tokio::spawn(async move {
+                                            let _ = socket.send_to(&buf, addr).await;
+                                        });
+                                    }
+                                }
+                            }
+                            send.end();
                         }
                     }
                     Err(err) => {
@@ -148,6 +209,7 @@ async fn receive_loop(
 /// The caller must have ended the receive-side `Phase::Queue` timer, and
 /// `query` must borrow no state that outlives this call: both reply kinds
 /// either send here or move into a task that owns everything it needs.
+#[cfg(not(target_os = "linux"))]
 fn dispatch(socket: &Arc<UdpSocket>, pipeline: &QueryPipeline, query: &[u8], client: SocketAddr) {
     let prepared = pipeline.prepare(query, client, Transport::Udp, CancellationToken::new());
     match prepared {

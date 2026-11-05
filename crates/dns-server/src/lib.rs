@@ -10,6 +10,8 @@ mod pipeline;
 mod ratelimit;
 #[cfg(target_os = "linux")]
 mod recv_batch;
+#[cfg(target_os = "linux")]
+mod send_batch;
 mod tcp;
 mod tls;
 mod udp;
