@@ -233,7 +233,11 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 1
             };
             for _ in 0..socket_count {
-                match udp::bind(addr, config.server.udp_recv_buffer_size) {
+                match udp::bind(
+                    addr,
+                    config.server.udp_recv_buffer_size,
+                    config.server.udp_send_buffer_size,
+                ) {
                     Ok(socket) => {
                         let pipeline = Arc::clone(&pipeline);
                         let shutdown = shutdown.clone();

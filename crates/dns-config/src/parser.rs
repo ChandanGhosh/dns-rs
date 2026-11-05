@@ -470,6 +470,9 @@ impl Parser {
             "udp-recv-buffer-size" => {
                 self.config.server.udp_recv_buffer_size = parse_usize(path, line, key, value)?;
             }
+            "udp-send-buffer-size" => {
+                self.config.server.udp_send_buffer_size = parse_usize(path, line, key, value)?;
+            }
             "tcp-recv-buffer-size" => {
                 self.config.server.tcp_recv_buffer_size = parse_usize(path, line, key, value)?;
             }

@@ -145,6 +145,14 @@ private_domain = [
 # TCP, DoT, and DoH listeners.
 incoming_num_tcp = 10
 
+# Socket buffer sizes in bytes. Zero uses the OS default.
+# A larger UDP receive buffer reduces drops under burst load.
+udp_recv_buffer_size = 4194304
+udp_send_buffer_size = 0
+tcp_recv_buffer_size = 0
+tcp_send_buffer_size = 0
+tcp_user_timeout_ms = 0
+
 # DNSSEC trust anchors. dns-rs ships the built-in root KSKs, so no anchor is
 # required for normal validation. Use these to add or replace anchors.
 trust_anchor = []

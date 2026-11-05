@@ -14,7 +14,11 @@ use crate::pipeline::{Prepared, QueryPipeline, Transport};
 /// Largest possible DNS message; matches `dns_proto`'s buffer pool size.
 pub(crate) const MAX_DATAGRAM: usize = 65_535;
 
-pub fn bind(addr: SocketAddr, recv_buffer_size: usize) -> std::io::Result<UdpSocket> {
+pub fn bind(
+    addr: SocketAddr,
+    recv_buffer_size: usize,
+    send_buffer_size: usize,
+) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
@@ -23,6 +27,11 @@ pub fn bind(addr: SocketAddr, recv_buffer_size: usize) -> std::io::Result<UdpSoc
         && let Err(err) = socket.set_recv_buffer_size(recv_buffer_size)
     {
         warn!(%err, "failed to set UDP receive buffer size");
+    }
+    if send_buffer_size > 0
+        && let Err(err) = socket.set_send_buffer_size(send_buffer_size)
+    {
+        warn!(%err, "failed to set UDP send buffer size");
     }
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;

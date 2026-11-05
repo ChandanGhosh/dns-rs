@@ -390,7 +390,10 @@ pub struct ServerConfig {
     /// server name, providing defense-in-depth against misissued or spoofed certs.
     pub tls_enforce_name_check: bool,
     /// UDP receive socket buffer size in bytes. Zero uses the OS default.
+    /// Defaults to 4 MiB to absorb bursts under load.
     pub udp_recv_buffer_size: usize,
+    /// UDP send socket buffer size in bytes. Zero uses the OS default.
+    pub udp_send_buffer_size: usize,
     /// TCP receive socket buffer size in bytes. Zero uses the OS default.
     pub tcp_recv_buffer_size: usize,
     /// TCP send socket buffer size in bytes. Zero uses the OS default.
@@ -460,7 +463,8 @@ impl Default for ServerConfig {
             tls_cert_bundle: None,
             tls_use_system_ca: true,
             tls_enforce_name_check: false,
-            udp_recv_buffer_size: 0,
+            udp_recv_buffer_size: 4 * 1024 * 1024,
+            udp_send_buffer_size: 0,
             tcp_recv_buffer_size: 0,
             tcp_send_buffer_size: 0,
             tcp_user_timeout_ms: 0,
