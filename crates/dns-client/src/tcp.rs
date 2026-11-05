@@ -17,8 +17,49 @@ use tokio::time::timeout;
 use crate::{ClientError, exchange};
 
 const MAX_IDLE_PER_SERVER: usize = 4;
+const SHARD_COUNT: usize = 32;
 
-type ConnectionPool = Arc<Mutex<HashMap<SocketAddr, Vec<TcpStream>>>>;
+type TcpStreamList = Vec<TcpStream>;
+type TcpPoolMap = HashMap<SocketAddr, TcpStreamList>;
+type TcpPoolShard = Mutex<TcpPoolMap>;
+
+#[derive(Clone, Default)]
+struct ConnectionPool {
+    shards: Arc<Vec<TcpPoolShard>>,
+}
+
+impl ConnectionPool {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(SHARD_COUNT);
+        for _ in 0..SHARD_COUNT {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        Self {
+            shards: Arc::new(shards),
+        }
+    }
+
+    fn shard_idx(&self, key: SocketAddr) -> usize {
+        let mut h: u64 = 1469598103934665603;
+        match key.ip() {
+            std::net::IpAddr::V4(v4) => {
+                for b in v4.octets().iter() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(1099511628211);
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                for b in v6.octets().iter() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(1099511628211);
+                }
+            }
+        }
+        h ^= key.port() as u64;
+        h = h.wrapping_mul(1099511628211);
+        (h as usize) % self.shards.len()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct TcpClient {
@@ -27,7 +68,9 @@ pub struct TcpClient {
 
 impl TcpClient {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            pool: ConnectionPool::new(),
+        }
     }
 
     pub async fn send_recv(
@@ -81,7 +124,8 @@ impl TcpClient {
     }
 
     fn take(&self, server: SocketAddr) -> Option<TcpStream> {
-        self.pool
+        let idx = self.pool.shard_idx(server);
+        self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get_mut(&server)
@@ -89,18 +133,102 @@ impl TcpClient {
     }
 
     fn put(&self, server: SocketAddr, stream: TcpStream) {
-        let mut pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+        let idx = self.pool.shard_idx(server);
+        let mut pool = self.pool.shards[idx]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let idle = pool.entry(server).or_default();
         if idle.len() < MAX_IDLE_PER_SERVER {
             idle.push(stream);
         }
     }
 
-    /// Drop all idle connections to `server`.
     fn clear(&self, server: SocketAddr) {
-        self.pool
+        let idx = self.pool.shard_idx(server);
+        self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .remove(&server);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::TcpClient;
+
+    #[tokio::test]
+    async fn reuses_a_pooled_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let handler = tokio::spawn(async move {
+            // Accept two exchanges on the same connection.
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            for _ in 0..2 {
+                let mut lenbuf = [0u8; 2];
+                stream.read_exact(&mut lenbuf).await.expect("len");
+                let len = usize::from(u16::from_be_bytes(lenbuf));
+                let mut buf = vec![0u8; len];
+                stream.read_exact(&mut buf).await.expect("body");
+                let mut out = Vec::with_capacity(len + 2);
+                out.extend_from_slice(&(len as u16).to_be_bytes());
+                out.extend_from_slice(&buf);
+                stream.write_all(&out).await.expect("write");
+            }
+        });
+
+        let client = TcpClient::new();
+        let query = [0x11, 0x22, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let first = client
+            .send_recv(addr, &query, Duration::from_secs(1))
+            .await
+            .expect("first");
+        assert_eq!(&first[0..2], &query[0..2]);
+
+        let query = [0x33, 0x44, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let second = client
+            .send_recv(addr, &query, Duration::from_secs(1))
+            .await
+            .expect("second");
+        assert_eq!(&second[0..2], &query[0..2]);
+
+        handler.await.expect("handler");
+    }
+
+    #[tokio::test]
+    async fn clears_idle_connections_on_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let handler = tokio::spawn(async move {
+            // The client retries once after a pooled/first failure; accept both
+            // attempts and close without responding so reads fail promptly.
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut lenbuf = [0u8; 2];
+                if stream.read_exact(&mut lenbuf).await.is_ok() {
+                    let len = usize::from(u16::from_be_bytes(lenbuf));
+                    let mut buf = vec![0u8; len];
+                    let _ = stream.read_exact(&mut buf).await;
+                }
+                drop(stream);
+            }
+        });
+
+        let client = TcpClient::new();
+        let query = [0x55, 0x66, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let error = client
+            .send_recv(addr, &query, Duration::from_secs(1))
+            .await
+            .expect_err("expected failure");
+        // Closing the stream without a framed response produces an I/O error.
+        assert!(matches!(error, crate::ClientError::Io(_)));
+
+        handler.await.expect("handler");
     }
 }

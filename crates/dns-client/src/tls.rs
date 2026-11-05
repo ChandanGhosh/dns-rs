@@ -31,9 +31,57 @@ use tokio_rustls::client::TlsStream;
 use crate::{ClientError, exchange};
 
 const MAX_IDLE_PER_SERVER: usize = 4;
+const SHARD_COUNT: usize = 32;
 
 type PoolKey = (SocketAddr, Option<String>);
-type ConnectionPool = Arc<Mutex<HashMap<PoolKey, Vec<TlsStream<TcpStream>>>>>;
+type TlsStreamList = Vec<TlsStream<TcpStream>>;
+type TlsPoolMap = HashMap<PoolKey, TlsStreamList>;
+type TlsPoolShard = Mutex<TlsPoolMap>;
+
+#[derive(Clone)]
+struct ConnectionPool {
+    shards: Arc<Vec<TlsPoolShard>>,
+}
+
+impl ConnectionPool {
+    fn new() -> Self {
+        let mut shards = Vec::with_capacity(SHARD_COUNT);
+        for _ in 0..SHARD_COUNT {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        Self {
+            shards: Arc::new(shards),
+        }
+    }
+
+    fn shard_idx(&self, key: &PoolKey) -> usize {
+        let mut h: u64 = 1469598103934665603;
+        let server = key.0;
+        match server.ip() {
+            std::net::IpAddr::V4(v4) => {
+                for b in v4.octets().iter() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(1099511628211);
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                for b in v6.octets().iter() {
+                    h ^= *b as u64;
+                    h = h.wrapping_mul(1099511628211);
+                }
+            }
+        }
+        h ^= server.port() as u64;
+        h = h.wrapping_mul(1099511628211);
+        if let Some(name) = &key.1 {
+            for b in name.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+        }
+        (h as usize) % self.shards.len()
+    }
+}
 
 #[derive(Clone)]
 pub struct TlsClient {
@@ -53,7 +101,7 @@ impl TlsClient {
         Ok(Self {
             connector: TlsConnector::from(config),
             connector_without_name: TlsConnector::from(without_name),
-            pool: Arc::new(Mutex::new(HashMap::new())),
+            pool: ConnectionPool::new(),
         })
     }
 
@@ -88,16 +136,12 @@ impl TlsClient {
 
             match exchange(&mut stream, query, dur).await {
                 Ok(response) => {
-                    self.put(key, stream);
+                    self.put(key.clone(), stream);
                     return Ok(response);
                 }
                 Err(error) => {
-                    // The peer may have closed an idle pooled connection.
-                    // Drop every idle connection for this server: the remaining
-                    // ones were likely closed at the same time, and retrying
-                    // on another stale socket would fail the query.
                     last_error = Some(error);
-                    self.clear(key.clone());
+                    self.clear(&key);
                     use_pool = false;
                 }
             }
@@ -123,8 +167,6 @@ impl TlsClient {
                 })?;
                 (&self.connector, name)
             }
-            // No auth name: the verifier ignores the name. An IP address is
-            // also what keeps rustls from sending SNI, as Unbound does.
             None => (
                 &self.connector_without_name,
                 ServerName::IpAddress(server.ip().into()),
@@ -137,7 +179,8 @@ impl TlsClient {
     }
 
     fn take(&self, key: &PoolKey) -> Option<TlsStream<TcpStream>> {
-        self.pool
+        let idx = self.pool.shard_idx(key);
+        self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get_mut(key)
@@ -145,7 +188,10 @@ impl TlsClient {
     }
 
     fn put(&self, key: PoolKey, stream: TlsStream<TcpStream>) {
-        let mut pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+        let idx = self.pool.shard_idx(&key);
+        let mut pool = self.pool.shards[idx]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let idle = pool.entry(key).or_default();
         if idle.len() < MAX_IDLE_PER_SERVER {
             idle.push(stream);
@@ -155,14 +201,14 @@ impl TlsClient {
     /// Drop all idle connections to `key`. This is called when an exchange
     /// failure suggests the peer closed idle connections, so that later
     /// queries open fresh ones instead of retrying on stale pooled sockets.
-    fn clear(&self, key: PoolKey) {
-        self.pool
+    fn clear(&self, key: &PoolKey) {
+        let idx = self.pool.shard_idx(key);
+        self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .remove(&key);
+            .remove(key);
     }
 }
-
 /// Build a rustls client configuration with optional system roots and a PEM
 /// bundle, and the given ALPN protocols.
 pub(crate) fn client_config(

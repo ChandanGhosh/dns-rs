@@ -8,12 +8,20 @@
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 /// Largest possible DNS message, and therefore the receive buffer size.
 const BUFFER_SIZE: usize = 65_535;
 /// Buffers kept for reuse per pool.
 const MAX_CAPACITY: usize = 256;
+const DEFAULT_SHARD_COUNT: usize = 32;
+
+#[repr(C, align(64))]
+struct Shard {
+    free: Mutex<Vec<Vec<u8>>>,
+}
 
 /// A pool of reusable message buffers.
 ///
@@ -26,20 +34,35 @@ pub struct BufferPool {
 }
 
 struct PoolInner {
-    free: Mutex<Vec<Vec<u8>>>,
+    shards: Box<[Shard]>,
     buffer_size: usize,
     max_capacity: usize,
+    /// Total number of buffers currently in the pool across all shards.
+    total_free: AtomicUsize,
 }
 
 impl BufferPool {
     /// Create a pool that hands out buffers of `buffer_size` bytes and keeps at
     /// most `max_capacity` of them for reuse.
     pub fn new(buffer_size: usize, max_capacity: usize) -> Self {
+        let shard_count = DEFAULT_SHARD_COUNT;
+        let shard_capacity = if max_capacity == 0 {
+            0
+        } else {
+            max_capacity / shard_count + 1
+        };
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            shards.push(Shard {
+                free: Mutex::new(Vec::with_capacity(shard_capacity)),
+            });
+        }
         Self {
             inner: Arc::new(PoolInner {
-                free: Mutex::new(Vec::with_capacity(max_capacity)),
+                shards: shards.into_boxed_slice(),
                 buffer_size,
                 max_capacity,
+                total_free: AtomicUsize::new(0),
             }),
         }
     }
@@ -48,37 +71,94 @@ impl BufferPool {
     ///
     /// The buffer returns to the pool when the [`PooledBuffer`] is dropped.
     pub fn get(&self) -> PooledBuffer {
-        let mut free = self
-            .inner
-            .free
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut buf = free.pop().unwrap_or_default();
-        drop(free);
-        // Buffers are kept at full length, so this only runs for a fresh
-        // allocation and never zero-fills a recycled buffer.
-        if buf.len() != self.inner.buffer_size {
-            buf.resize(self.inner.buffer_size, 0);
+        let shard_idx = self.shard_index();
+        // Try to get from the thread-affine shard first.
+        {
+            let mut free = self.inner.shards[shard_idx]
+                .free
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(mut buf) = free.pop() {
+                self.inner.total_free.fetch_sub(1, Ordering::Relaxed);
+                drop(free);
+                if buf.len() != self.inner.buffer_size {
+                    buf.resize(self.inner.buffer_size, 0);
+                }
+                return PooledBuffer {
+                    pool: self.clone(),
+                    buf,
+                    shard: shard_idx,
+                };
+            }
         }
+        // Fallback: try other shards to reduce allocations under contention.
+        for i in 0..self.inner.shards.len() {
+            if i == shard_idx {
+                continue;
+            }
+            let mut free = self.inner.shards[i]
+                .free
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(mut buf) = free.pop() {
+                self.inner.total_free.fetch_sub(1, Ordering::Relaxed);
+                drop(free);
+                if buf.len() != self.inner.buffer_size {
+                    buf.resize(self.inner.buffer_size, 0);
+                }
+                return PooledBuffer {
+                    pool: self.clone(),
+                    buf,
+                    shard: i,
+                };
+            }
+        }
+        // Nothing available, allocate fresh.
+        let mut buf = vec![0u8; self.inner.buffer_size];
+        buf.resize(self.inner.buffer_size, 0);
         PooledBuffer {
             pool: self.clone(),
             buf,
+            shard: shard_idx,
         }
     }
 
+    fn shard_index(&self) -> usize {
+        let id = thread::current().id();
+        // Use the thread id's address/hash as a simple shard selector.
+        let ptr = format!("{id:?}");
+        // Fallback to a fast hash
+        let mut h: usize = 1469598103934665603;
+        for b in ptr.as_bytes() {
+            h ^= *b as usize;
+            h = h.wrapping_mul(1099511628211);
+        }
+        h % self.inner.shards.len()
+    }
+
     /// Return `buf` to the pool unless it was resized or the pool is full.
-    fn release(&self, buf: Vec<u8>) {
+    fn release(&self, shard_idx: usize, buf: Vec<u8>) {
         if buf.len() != self.inner.buffer_size {
             return;
         }
-        let mut free = self
-            .inner
+        if self.inner.max_capacity == 0 {
+            return;
+        }
+        let total = self.inner.total_free.load(Ordering::Relaxed);
+        if total >= self.inner.max_capacity {
+            return;
+        }
+        let shard_idx = shard_idx % self.inner.shards.len();
+        let mut free = self.inner.shards[shard_idx]
             .free
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if free.len() < self.inner.max_capacity {
-            free.push(buf);
+        // Recheck under the shard lock to keep the global cap tight under contention.
+        if self.inner.total_free.load(Ordering::Relaxed) >= self.inner.max_capacity {
+            return;
         }
+        free.push(buf);
+        self.inner.total_free.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -91,12 +171,7 @@ impl Default for BufferPool {
 /// Report the pool's sizing and free count; buffered bytes are never dumped.
 impl fmt::Debug for BufferPool {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let free = self
-            .inner
-            .free
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .len();
+        let free = self.inner.total_free.load(Ordering::Relaxed);
         formatter
             .debug_struct("BufferPool")
             .field("buffer_size", &self.inner.buffer_size)
@@ -113,6 +188,7 @@ impl fmt::Debug for BufferPool {
 pub struct PooledBuffer {
     pool: BufferPool,
     buf: Vec<u8>,
+    shard: usize,
 }
 
 impl Deref for PooledBuffer {
@@ -131,7 +207,9 @@ impl DerefMut for PooledBuffer {
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
-        self.pool.release(std::mem::take(&mut self.buf));
+        let shard = self.shard;
+        let buf = std::mem::take(&mut self.buf);
+        self.pool.release(shard, buf);
     }
 }
 
@@ -200,7 +278,14 @@ mod tests {
         let pool = BufferPool::new(64, 2);
         let buffers: Vec<_> = (0..5).map(|_| pool.get()).collect();
         drop(buffers);
-        assert_eq!(pool.inner.free.lock().expect("lock").len(), 2);
+        // Total recycled buffers across all shards must be capped.
+        let total: usize = pool
+            .inner
+            .shards
+            .iter()
+            .map(|s| s.free.lock().expect("lock").len())
+            .sum();
+        assert_eq!(total, 2);
     }
 
     #[test]
@@ -209,7 +294,13 @@ mod tests {
         let mut buf = pool.get();
         buf.truncate(8);
         drop(buf);
-        assert!(pool.inner.free.lock().expect("lock").is_empty());
+        let total: usize = pool
+            .inner
+            .shards
+            .iter()
+            .map(|s| s.free.lock().expect("lock").len())
+            .sum();
+        assert_eq!(total, 0);
     }
 
     #[test]

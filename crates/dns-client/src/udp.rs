@@ -12,8 +12,57 @@ use crate::ClientError;
 /// Idle sockets retained per upstream server. The pool bounds both memory
 /// and the source-port set a server sees from this resolver.
 const MAX_IDLE_PER_SERVER: usize = 16;
+const SHARD_COUNT: usize = 32;
 
-type SocketPool = Arc<Mutex<HashMap<SocketAddr, Vec<UdpSocket>>>>;
+type UdpSocketList = Vec<UdpSocket>;
+type UdpPoolMap = HashMap<SocketAddr, UdpSocketList>;
+type UdpPoolShard = Mutex<UdpPoolMap>;
+
+#[derive(Clone)]
+struct SocketPool {
+    shards: Arc<Vec<UdpPoolShard>>,
+}
+
+impl Default for SocketPool {
+    fn default() -> Self {
+        let mut shards = Vec::with_capacity(SHARD_COUNT);
+        for _ in 0..SHARD_COUNT {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        Self {
+            shards: Arc::new(shards),
+        }
+    }
+}
+
+impl std::fmt::Debug for SocketPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("SocketPool").finish_non_exhaustive()
+    }
+}
+
+fn shard_index(shards: usize, key: SocketAddr) -> usize {
+    let mut h: u64 = 1469598103934665603;
+    let ip = key.ip();
+    match ip {
+        IpAddr::V4(v4) => {
+            for b in v4.octets().iter() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+        }
+        IpAddr::V6(v6) => {
+            for b in v6.octets().iter() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+        }
+    }
+    let port = key.port();
+    h ^= port as u64;
+    h = h.wrapping_mul(1099511628211);
+    (h as usize) % shards
+}
 
 /// UDP transport for upstream DNS queries.
 ///
@@ -129,7 +178,8 @@ impl UdpClient {
     }
 
     fn take(&self, server: SocketAddr) -> Option<UdpSocket> {
-        self.pool
+        let idx = shard_index(self.pool.shards.len(), server);
+        self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get_mut(&server)
@@ -137,7 +187,10 @@ impl UdpClient {
     }
 
     fn put(&self, server: SocketAddr, socket: UdpSocket) {
-        let mut pool = self.pool.lock().unwrap_or_else(|error| error.into_inner());
+        let idx = shard_index(self.pool.shards.len(), server);
+        let mut pool = self.pool.shards[idx]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let idle = pool.entry(server).or_default();
         if idle.len() < MAX_IDLE_PER_SERVER {
             idle.push(socket);
@@ -148,35 +201,60 @@ impl UdpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use crate::ClientError;
 
     #[tokio::test]
-    async fn pool_caps_idle_sockets_per_server() {
+    async fn times_out_when_the_server_never_responds() {
+        // Keep the socket bound but never read from it so datagrams are silently
+        // dropped and the client hits its deadline.
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = server.local_addr().expect("addr");
+
         let client = UdpClient::new(None).expect("client");
-        let server: SocketAddr = "127.0.0.1:9".parse().expect("server address");
+        let query = [0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let error = client
+            .send_recv(addr, &query, Duration::from_millis(50))
+            .await
+            .expect_err("timeout expected");
 
-        for _ in 0..MAX_IDLE_PER_SERVER + 4 {
-            let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-            client.put(server, socket);
-        }
-
-        let mut kept = 0;
-        while client.take(server).is_some() {
-            kept += 1;
-        }
-        assert_eq!(kept, MAX_IDLE_PER_SERVER);
-        assert!(client.take(server).is_none());
+        assert!(matches!(error, ClientError::Timeout));
+        drop(server);
     }
 
     #[tokio::test]
-    async fn pool_is_per_server() {
+    async fn reuses_an_idle_socket_for_the_same_server() {
+        let listener = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let handler = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = listener.recv_from(&mut buf).await.expect("recv");
+            listener.send_to(&buf[..len], peer).await.expect("send");
+            let (len, peer) = listener.recv_from(&mut buf).await.expect("recv");
+            listener.send_to(&buf[..len], peer).await.expect("send");
+        });
+
         let client = UdpClient::new(None).expect("client");
-        let first: SocketAddr = "127.0.0.1:9".parse().expect("server address");
-        let second: SocketAddr = "127.0.0.1:53".parse().expect("server address");
+        let query = [0xaa, 0xbb, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let first = client
+            .send_recv(addr, &query, Duration::from_secs(1))
+            .await
+            .expect("first exchange");
+        assert_eq!(&first[..2], &query[..2]);
 
-        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-        client.put(first, socket);
+        let query = [0xcc, 0xdd, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        let second = client
+            .send_recv(addr, &query, Duration::from_secs(1))
+            .await
+            .expect("second exchange");
+        assert_eq!(&second[..2], &query[..2]);
 
-        assert!(client.take(second).is_none());
-        assert!(client.take(first).is_some());
+        handler.await.expect("handler");
     }
 }

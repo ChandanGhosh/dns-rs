@@ -184,13 +184,14 @@ pub async fn serve_connection<S>(
                 Err(_) => None,
             };
             let Some(truncation) = truncation else { break };
-            let Ok(length) = u16::try_from(truncation.len()) else {
+            let trunc_len = truncation.len();
+            let Ok(length) = u16::try_from(trunc_len) else {
                 break;
             };
-            let mut out = Vec::with_capacity(truncation.len() + 2);
-            out.extend_from_slice(&length.to_be_bytes());
-            out.extend_from_slice(&truncation);
-            if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out))
+            let mut out = pool.get();
+            out[0..2].copy_from_slice(&length.to_be_bytes());
+            out[2..2 + trunc_len].copy_from_slice(&truncation);
+            if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out[0..2 + trunc_len]))
                 .await
                 .is_err()
             {
@@ -198,10 +199,14 @@ pub async fn serve_connection<S>(
             }
             break;
         }
-        let mut out = Vec::with_capacity(response.len() + 2);
-        out.extend_from_slice(&(response.len() as u16).to_be_bytes());
-        out.extend_from_slice(&response);
-        if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out))
+        let mut out = pool.get();
+        let response_len = response.len();
+        if response_len > u16::MAX as usize {
+            break;
+        }
+        out[0..2].copy_from_slice(&(response_len as u16).to_be_bytes());
+        out[2..2 + response_len].copy_from_slice(&response);
+        if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out[0..2 + response_len]))
             .await
             .is_err()
         {
