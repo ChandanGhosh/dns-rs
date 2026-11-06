@@ -44,6 +44,17 @@ pub struct WireRequest {
     pub checking_disabled: bool,
 }
 
+/// Metadata for a cache hit. The response bytes are produced separately so
+/// callers on the hot path can fill a reusable buffer (see [`MessageCache::get_into`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheHitMeta {
+    pub remaining: Duration,
+    pub original_ttl: Duration,
+    pub stale: bool,
+    /// Whether the stored wire already contains an OPT record.
+    pub has_edns: bool,
+}
+
 /// A cache hit, already patched for the requesting client.
 #[derive(Clone, Debug)]
 pub struct CacheHit {
@@ -53,6 +64,18 @@ pub struct CacheHit {
     pub stale: bool,
     /// Whether the stored wire already contains an OPT record.
     pub has_edns: bool,
+}
+
+impl CacheHit {
+    fn from_meta(meta: CacheHitMeta, wire: Vec<u8>) -> Self {
+        Self {
+            wire,
+            remaining: meta.remaining,
+            original_ttl: meta.original_ttl,
+            stale: meta.stale,
+            has_edns: meta.has_edns,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -162,6 +185,22 @@ impl MessageCache {
         do_bit: bool,
         request: WireRequest,
     ) -> Option<CacheHit> {
+        let mut wire = Vec::new();
+        let meta = self.get_into(name, record_type, do_bit, request, &mut wire)?;
+        Some(CacheHit::from_meta(meta, wire))
+    }
+
+    /// Like [`Self::get`], but writes the patched response into `out` instead of
+    /// allocating a new buffer. `out` is cleared and reused, preserving its
+    /// capacity across calls so steady-state cache hits avoid allocator traffic.
+    pub fn get_into(
+        &self,
+        name: &Name,
+        record_type: RecordType,
+        do_bit: bool,
+        request: WireRequest,
+        out: &mut Vec<u8>,
+    ) -> Option<CacheHitMeta> {
         let key = Self::key(name, record_type, do_bit);
         let Some(entry) = self.cache.get(&key) else {
             self.misses.fetch_add(1, Ordering::Relaxed);
@@ -176,17 +215,17 @@ impl MessageCache {
 
         let elapsed = now.saturating_duration_since(entry.inserted_at).as_secs();
         let elapsed = u32::try_from(elapsed).unwrap_or(u32::MAX);
-        let mut wire = (*entry.wire).clone();
-        if !age_wire(&mut wire, elapsed, None) {
+        out.clear();
+        out.extend_from_slice(&entry.wire);
+        if !age_wire(out, elapsed, None) {
             self.cache.invalidate(&key);
             self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        patch_wire(&mut wire, request);
+        patch_wire(out, request);
 
         self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(CacheHit {
-            wire,
+        Some(CacheHitMeta {
             remaining: entry.expires_at.saturating_duration_since(now),
             original_ttl: entry.original_ttl,
             stale: false,
@@ -205,6 +244,22 @@ impl MessageCache {
         request: WireRequest,
         reply_ttl: u32,
     ) -> Option<CacheHit> {
+        let mut wire = Vec::new();
+        let meta = self.get_stale_into(name, record_type, do_bit, request, reply_ttl, &mut wire)?;
+        Some(CacheHit::from_meta(meta, wire))
+    }
+
+    /// Like [`Self::get_stale`], but writes the patched response into `out`
+    /// instead of allocating a new buffer.
+    pub fn get_stale_into(
+        &self,
+        name: &Name,
+        record_type: RecordType,
+        do_bit: bool,
+        request: WireRequest,
+        reply_ttl: u32,
+        out: &mut Vec<u8>,
+    ) -> Option<CacheHitMeta> {
         let key = Self::key(name, record_type, do_bit);
         let entry = self.cache.get(&key)?;
         let now = Instant::now();
@@ -213,15 +268,15 @@ impl MessageCache {
             return None;
         }
 
-        let mut wire = (*entry.wire).clone();
-        if !age_wire(&mut wire, 0, Some(reply_ttl)) {
+        out.clear();
+        out.extend_from_slice(&entry.wire);
+        if !age_wire(out, 0, Some(reply_ttl)) {
             self.cache.invalidate(&key);
             return None;
         }
-        patch_wire(&mut wire, request);
+        patch_wire(out, request);
         self.stale_hits.fetch_add(1, Ordering::Relaxed);
-        Some(CacheHit {
-            wire,
+        Some(CacheHitMeta {
             remaining: Duration::ZERO,
             original_ttl: entry.original_ttl,
             stale: true,
@@ -232,11 +287,21 @@ impl MessageCache {
     /// Prefetch when less than 10% of the original TTL remains, or three
     /// seconds, whichever is larger (Unbound's prefetch trigger).
     pub fn should_prefetch(hit: &CacheHit) -> bool {
-        if hit.stale {
+        Self::should_prefetch_meta(&CacheHitMeta {
+            remaining: hit.remaining,
+            original_ttl: hit.original_ttl,
+            stale: hit.stale,
+            has_edns: hit.has_edns,
+        })
+    }
+
+    /// Like [`Self::should_prefetch`], but takes hit metadata directly.
+    pub fn should_prefetch_meta(meta: &CacheHitMeta) -> bool {
+        if meta.stale {
             return true;
         }
-        let threshold = (hit.original_ttl / 10).max(Duration::from_secs(3));
-        hit.remaining <= threshold
+        let threshold = (meta.original_ttl / 10).max(Duration::from_secs(3));
+        meta.remaining <= threshold
     }
 
     pub fn remove(&self, name: &Name, record_type: RecordType, do_bit: bool) {

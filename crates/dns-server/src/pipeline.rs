@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dns_cache::{
-    CacheHit, CacheStats, CoalesceStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey,
+    CacheHitMeta, CacheStats, CoalesceStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey,
     QueryRegistry, RegistryEntry, RrsetCache, WireRequest, patch_question, patch_wire,
     response_ttl, wire_has_opt,
 };
@@ -649,7 +649,8 @@ impl QueryPipeline {
         transport: Transport,
         cancel: CancellationToken,
     ) -> Option<Vec<u8>> {
-        match self.prepare(bytes, client, transport, cancel) {
+        let mut reply_pool = Vec::new();
+        match self.prepare(bytes, client, transport, cancel, &mut reply_pool) {
             Prepared::Answer(reply) => reply,
             Prepared::Resolve(job) => job.run().await,
         }
@@ -685,6 +686,7 @@ impl QueryPipeline {
         client: SocketAddr,
         transport: Transport,
         cancel: CancellationToken,
+        reply_pool: &mut Vec<Vec<u8>>,
     ) -> Prepared {
         let started = Instant::now();
         let decode_timer = PhaseTimer::start(Phase::Decode);
@@ -803,53 +805,65 @@ impl QueryPipeline {
         decode_timer.end();
         let lookup = PhaseTimer::start(Phase::Lookup);
         if !checking_disabled {
-            if let Some(hit) =
-                self.messages
-                    .get(&query.name, query.query_type, do_bit, wire_request)
             {
-                lookup.end();
-                if self.prefetch && MessageCache::should_prefetch(&hit) {
-                    self.spawn_refresh(query, do_bit);
+                let mut wire = reply_pool.pop().unwrap_or_else(|| Vec::with_capacity(512));
+                if let Some(meta) = self.messages.get_into(
+                    &query.name,
+                    query.query_type,
+                    do_bit,
+                    wire_request,
+                    &mut wire,
+                ) {
+                    lookup.end();
+                    if self.prefetch && MessageCache::should_prefetch_meta(&meta) {
+                        self.spawn_refresh(query, do_bit);
+                    }
+                    debug!(
+                        %client,
+                        qname = %query.name,
+                        qtype = ?query.query_type,
+                        cache = "hit",
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "query answered"
+                    );
+                    let finalize = PhaseTimer::start(Phase::Finalize);
+                    let reply = self.serve_hit_wire(meta, wire, &request, client, transport);
+                    finalize.end();
+                    return Prepared::Answer(reply);
                 }
-                debug!(
-                    %client,
-                    qname = %query.name,
-                    qtype = ?query.query_type,
-                    cache = "hit",
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "query answered"
-                );
-                let finalize = PhaseTimer::start(Phase::Finalize);
-                let reply = self.serve_hit(hit, &request, client, transport);
-                finalize.end();
-                return Prepared::Answer(reply);
+                wire.clear();
+                reply_pool.push(wire);
             }
 
-            if self.serve_expired
-                && let Some(hit) = self.messages.get_stale(
+            if self.serve_expired {
+                let mut wire = reply_pool.pop().unwrap_or_else(|| Vec::with_capacity(512));
+                if let Some(meta) = self.messages.get_stale_into(
                     &query.name,
                     query.query_type,
                     do_bit,
                     wire_request,
                     self.stale_reply_ttl,
-                )
-            {
-                lookup.end();
-                // RFC 8767: answer from the expired entry immediately and
-                // refresh it in the background.
-                self.spawn_refresh(query, do_bit);
-                debug!(
-                    %client,
-                    qname = %query.name,
-                    qtype = ?query.query_type,
-                    cache = "stale",
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "query answered"
-                );
-                let finalize = PhaseTimer::start(Phase::Finalize);
-                let reply = self.serve_hit(hit, &request, client, transport);
-                finalize.end();
-                return Prepared::Answer(reply);
+                    &mut wire,
+                ) {
+                    lookup.end();
+                    // RFC 8767: answer from the expired entry immediately and
+                    // refresh it in the background.
+                    self.spawn_refresh(query, do_bit);
+                    debug!(
+                        %client,
+                        qname = %query.name,
+                        qtype = ?query.query_type,
+                        cache = "stale",
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "query answered"
+                    );
+                    let finalize = PhaseTimer::start(Phase::Finalize);
+                    let reply = self.serve_hit_wire(meta, wire, &request, client, transport);
+                    finalize.end();
+                    return Prepared::Answer(reply);
+                }
+                wire.clear();
+                reply_pool.push(wire);
             }
         }
         lookup.end();
@@ -895,9 +909,13 @@ impl QueryPipeline {
 
     /// Return a cached wire response, adding EDNS/cookies or truncating only
     /// when the client requires it.
-    fn serve_hit(
+    ///
+    /// `wire` is the response buffer (typically filled by [`MessageCache::get_into`])
+    /// and may be returned directly or mutated in place so callers can recycle it.
+    fn serve_hit_wire(
         &self,
-        hit: CacheHit,
+        meta: CacheHitMeta,
+        mut wire: Vec<u8>,
         request: &Message,
         client: SocketAddr,
         transport: Transport,
@@ -909,23 +927,21 @@ impl QueryPipeline {
             Transport::Tcp | Transport::Tls | Transport::Https => usize::MAX,
         };
 
-        if request.edns.is_none() && hit.wire.len() <= limit {
-            return Some(hit.wire);
+        if request.edns.is_none() && wire.len() <= limit {
+            return Some(wire);
         }
 
         // Common EDNS(0) case: the cached wire has no OPT record, the client
         // sent no cookie, and the response fits. Append our OPT record instead
         // of decoding and re-encoding the whole message.
         if request.edns.is_some()
-            && !hit.has_edns
+            && !meta.has_edns
             && edns::requested_cookie(request).is_none()
-            && hit
-                .wire
+            && wire
                 .len()
                 .checked_add(edns::EMPTY_OPT_LEN)
                 .is_some_and(|length| length <= limit)
         {
-            let mut wire = hit.wire;
             if edns::append_empty_opt(
                 &mut wire,
                 self.config.server.max_udp_size.max(512),
@@ -937,7 +953,7 @@ impl QueryPipeline {
             return self.finalize_with_ede(message, request, client, transport, None);
         }
 
-        let message = Message::from_vec(&hit.wire).ok()?;
+        let message = Message::from_vec(&wire).ok()?;
         self.finalize_with_ede(message, request, client, transport, None)
     }
 

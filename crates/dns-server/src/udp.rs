@@ -81,6 +81,10 @@ async fn receive_loop(
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     let mut batch = crate::recv_batch::RecvBatch::new();
+    // Reusable response buffers for inline cache hits: avoids allocating a new
+    // `Vec<u8>` per answered datagram and reduces allocator contention on the
+    // hot path. Buffers that are handed to spawned send tasks are not recycled.
+    let mut reply_pool: Vec<Vec<u8>> = Vec::with_capacity(32);
 
     loop {
         tokio::select! {
@@ -105,6 +109,7 @@ async fn receive_loop(
                                 client,
                                 Transport::Udp,
                                 CancellationToken::new(),
+                                &mut reply_pool,
                             );
                             match prepared {
                                 Prepared::Answer(Some(response)) => {
@@ -135,11 +140,14 @@ async fn receive_loop(
                                 .map(|(buf, addr)| (buf.as_slice(), *addr))
                                 .collect();
                             match crate::send_batch::send_batch(socket, &refs) {
-                                Ok(sent) if sent >= refs.len() => {}
+                                Ok(sent) if sent >= refs.len() => {
+                                    recycle_answers(&mut reply_pool, answers);
+                                }
                                 Ok(sent) => {
                                     // Partial send or would-block after progress: deliver the rest
                                     // asynchronously so the receive loop stays responsive.
-                                    for (buf, addr) in answers.into_iter().skip(sent) {
+                                    recycle_prefix(&mut reply_pool, &mut answers, sent);
+                                    for (buf, addr) in answers {
                                         let socket = Arc::clone(socket);
                                         tokio::spawn(async move {
                                             let _ = socket.send_to(&buf, addr).await;
@@ -168,6 +176,21 @@ async fn receive_loop(
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn recycle_answers(pool: &mut Vec<Vec<u8>>, answers: Vec<(Vec<u8>, SocketAddr)>) {
+    for (mut buf, _) in answers {
+        buf.clear();
+        pool.push(buf);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recycle_prefix(pool: &mut Vec<Vec<u8>>, answers: &mut Vec<(Vec<u8>, SocketAddr)>, sent: usize) {
+    let keep = answers.split_off(sent.min(answers.len()));
+    let done = std::mem::replace(answers, keep);
+    recycle_answers(pool, done);
 }
 
 /// Portable receive path: one `recvfrom(2)` syscall per datagram.
@@ -211,7 +234,14 @@ async fn receive_loop(
 /// either send here or move into a task that owns everything it needs.
 #[cfg(not(target_os = "linux"))]
 fn dispatch(socket: &Arc<UdpSocket>, pipeline: &QueryPipeline, query: &[u8], client: SocketAddr) {
-    let prepared = pipeline.prepare(query, client, Transport::Udp, CancellationToken::new());
+    let mut reply_pool = Vec::new();
+    let prepared = pipeline.prepare(
+        query,
+        client,
+        Transport::Udp,
+        CancellationToken::new(),
+        &mut reply_pool,
+    );
     match prepared {
         Prepared::Answer(response) => {
             if let Some(response) = response {
