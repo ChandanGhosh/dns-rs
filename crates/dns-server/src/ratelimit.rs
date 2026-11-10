@@ -2,7 +2,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use dashmap::DashMap;
@@ -46,6 +46,9 @@ struct Inner {
     limited: AtomicU64,
     /// Cap on the number of tracked clients.
     max_clients: usize,
+    /// Number of tracked clients, maintained on insert/eviction so the hot
+    /// path can compare against it without scanning every map shard.
+    tracked: AtomicUsize,
     /// Counts over-cap checks so eviction passes can be spaced apart.
     evict_clock: AtomicU64,
 }
@@ -70,6 +73,7 @@ impl RateLimiter {
                 buckets: DashMap::new(),
                 limited: AtomicU64::new(0),
                 max_clients: max_clients.max(1),
+                tracked: AtomicUsize::new(0),
                 evict_clock: AtomicU64::new(0),
             })),
         }
@@ -81,13 +85,16 @@ impl RateLimiter {
         };
 
         let now = Instant::now();
-        if inner.buckets.len() > inner.max_clients {
+        if inner.tracked.load(Ordering::Relaxed) > inner.max_clients {
             self.evict_stale(inner, now);
         }
         let allowed = {
-            let mut bucket = inner.buckets.entry(client).or_insert_with(|| Bucket {
-                tokens: inner.capacity,
-                last: now,
+            let mut bucket = inner.buckets.entry(client).or_insert_with(|| {
+                inner.tracked.fetch_add(1, Ordering::Relaxed);
+                Bucket {
+                    tokens: inner.capacity,
+                    last: now,
+                }
             });
             let elapsed = now.saturating_duration_since(bucket.last).as_secs_f64();
             bucket.tokens = (bucket.tokens + elapsed * inner.refill_per_second).min(inner.capacity);
@@ -159,6 +166,7 @@ impl RateLimiter {
                 .remove_if(&client, |_, bucket| bucket.last == last)
                 .is_some()
             {
+                inner.tracked.fetch_sub(1, Ordering::Relaxed);
                 removed += 1;
             }
         }
@@ -180,6 +188,9 @@ pub struct ClientConcurrency {
     global: Arc<Semaphore>,
     /// Cap on the number of tracked clients.
     max_clients: usize,
+    /// Number of tracked clients, maintained on insert/eviction so the hot
+    /// path can compare against it without scanning every map shard.
+    tracked: Arc<AtomicUsize>,
     /// Counts over-cap acquisitions so eviction passes can be spaced apart.
     /// `Arc` so clones of the limiter share one clock.
     evict_clock: Arc<AtomicU64>,
@@ -208,6 +219,7 @@ impl ClientConcurrency {
             per_client: Arc::new(DashMap::new()),
             global: Arc::new(Semaphore::new(max_global.max(1))),
             max_clients: max_clients.max(1),
+            tracked: Arc::new(AtomicUsize::new(0)),
             evict_clock: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -215,14 +227,22 @@ impl ClientConcurrency {
     /// Try to reserve a slot. Returns `None` when the client or the server as
     /// a whole is already at its limit.
     pub fn try_acquire(&self, client: IpAddr) -> Option<Permit> {
-        if self.per_client.len() > self.max_clients {
+        if self.tracked.load(Ordering::Relaxed) > self.max_clients {
             self.evict_idle();
         }
-        let semaphore = self
-            .per_client
-            .entry(client)
-            .or_insert_with(|| Arc::new(Semaphore::new(self.max)))
-            .clone();
+        // The common case is an existing client: take a shared lock instead of
+        // the entry API's exclusive shard lock.
+        let semaphore = match self.per_client.get(&client) {
+            Some(entry) => Arc::clone(entry.value()),
+            None => self
+                .per_client
+                .entry(client)
+                .or_insert_with(|| {
+                    self.tracked.fetch_add(1, Ordering::Relaxed);
+                    Arc::new(Semaphore::new(self.max))
+                })
+                .clone(),
+        };
         let client_permit = semaphore.try_acquire_owned().ok()?;
         let global_permit = self.global.clone().try_acquire_owned().ok()?;
         Some(Permit {
@@ -275,6 +295,7 @@ impl ClientConcurrency {
                 })
                 .is_some()
             {
+                self.tracked.fetch_sub(1, Ordering::Relaxed);
                 removed += 1;
             }
         }
@@ -286,10 +307,24 @@ impl ClientConcurrency {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
+    use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::{ClientConcurrency, RateDecision, RateLimiter};
+
+    /// The maintained entry count must match the map, otherwise the hot-path
+    /// cap check either never evicts or evicts too early.
+    fn assert_tracked_matches_len(limiter: &RateLimiter) {
+        let Some(inner) = &limiter.inner else {
+            return;
+        };
+        assert_eq!(
+            inner.tracked.load(Ordering::Relaxed),
+            inner.buckets.len(),
+            "tracked count drifted from bucket map"
+        );
+    }
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
@@ -350,11 +385,13 @@ mod tests {
         let future = Instant::now() + Duration::from_secs(2);
         assert_eq!(limiter.evict_stale_pass(&inner, future), 2);
         assert_eq!(inner.buckets.len(), 0);
+        assert_tracked_matches_len(&limiter);
 
         // A bucket touched just before the scan's clock is kept.
         assert_eq!(limiter.check(ip(3)), RateDecision::Allow);
         assert_eq!(limiter.evict_stale_pass(&inner, Instant::now()), 0);
         assert_eq!(inner.buckets.len(), 1);
+        assert_tracked_matches_len(&limiter);
     }
 
     /// With the table sitting over its cap, a later check evicts the stale
@@ -381,6 +418,19 @@ mod tests {
         assert!(!inner.buckets.contains_key(&ip(2)));
         assert!(!inner.buckets.contains_key(&ip(3)));
         assert!(!inner.buckets.contains_key(&ip(4)));
+        assert_tracked_matches_len(&limiter);
+    }
+
+    /// Repeated acquisitions for one client must reuse its semaphore and not
+    /// grow the tracked count (the map's shared-lock fast path).
+    #[test]
+    fn repeated_acquires_reuse_one_entry() {
+        let cc = ClientConcurrency::with_max_clients(4, 8, 8);
+        for _ in 0..100 {
+            assert!(cc.try_acquire(ip(1)).is_some());
+        }
+        assert_eq!(cc.per_client.len(), 1);
+        assert_eq!(cc.tracked.load(Ordering::Relaxed), 1);
     }
 
     /// Overflow eviction must never drop a semaphore whose client still
@@ -392,6 +442,7 @@ mod tests {
         let _b = cc.try_acquire(ip(2)).expect("second client acquires");
         let _c = cc.try_acquire(ip(3)).expect("third client acquires");
         assert_eq!(cc.per_client.len(), 3);
+        assert_eq!(cc.tracked.load(Ordering::Relaxed), 3);
         // All three hold permits, so nothing is evictable ...
         assert_eq!(cc.evict_idle_pass(), 0);
         assert_eq!(cc.per_client.len(), 3);
@@ -402,6 +453,7 @@ mod tests {
         drop(a);
         assert_eq!(cc.evict_idle_pass(), 1);
         assert_eq!(cc.per_client.len(), 2);
+        assert_eq!(cc.tracked.load(Ordering::Relaxed), 2);
         assert!(!cc.per_client.contains_key(&ip(1)));
         assert!(cc.per_client.contains_key(&ip(2)));
         assert!(cc.per_client.contains_key(&ip(3)));
