@@ -1,6 +1,6 @@
 [package]
 name = "dns-testutil"
-description = "Test helpers for dns-rs"
+description = "DNS message builders for tests and the signed DNSSEC benchmark mock"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

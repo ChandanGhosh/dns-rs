@@ -488,7 +488,8 @@ The Unbound replay harness design is in
 [`docs/replay-harness.md`](docs/replay-harness.md), container deployment is
 covered in [`docs/container.md`](docs/container.md), and benchmarking
 switches and methodology are in
-[`docs/benchmarking.md`](docs/benchmarking.md).
+[`docs/benchmarking.md`](docs/benchmarking.md). Report security issues through
+the private process in [`SECURITY.md`](SECURITY.md).
 
 ## License
 

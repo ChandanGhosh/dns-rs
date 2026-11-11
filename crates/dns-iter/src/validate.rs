@@ -324,37 +324,34 @@ impl IteratorResolver {
         };
         let mut result = Security::Secure;
         let mut validated = false;
-        let mut seen: HashSet<(&Name, u16)> = HashSet::new();
-
+        // Group the answer section in one pass. This replaces a re-scan of
+        // every answer for each RRset and each signature lookup.
+        let mut rrsets: HashMap<(&Name, u16), Vec<Record>> = HashMap::new();
+        let mut signatures: HashMap<(&Name, u16), Vec<Record>> = HashMap::new();
+        let mut order: Vec<(&Name, u16)> = Vec::new();
         for record in &message.answers {
             if record.record_type() == RecordType::RRSIG {
+                if let Some(sig) = rrsig_of(record) {
+                    signatures
+                        .entry((&record.name, u16::from(sig.input().type_covered)))
+                        .or_default()
+                        .push(record.clone());
+                }
                 continue;
             }
             let key = (&record.name, u16::from(record.record_type()));
-            if !seen.insert(key) {
-                continue;
+            let rrset = rrsets.entry(key).or_default();
+            if rrset.is_empty() {
+                order.push(key);
             }
+            rrset.push(record.clone());
+        }
 
-            let rrset: Vec<Record> = message
-                .answers
-                .iter()
-                .filter(|candidate| {
-                    candidate.name == record.name && candidate.record_type() == record.record_type()
-                })
-                .cloned()
-                .collect();
-            let signatures: Vec<Record> =
-                sigs_for(&message.answers, &record.name, record.record_type());
-
+        for key in order {
+            let rrset = rrsets.get(&key).map(Vec::as_slice).unwrap_or(&[]);
+            let signatures = signatures.get(&key).map(Vec::as_slice).unwrap_or(&[]);
             let outcome = self
-                .validate_rrset(
-                    &rrset,
-                    &signatures,
-                    &record.name,
-                    &answer,
-                    context.clone(),
-                    now,
-                )
+                .validate_rrset(rrset, signatures, key.0, &answer, context.clone(), now)
                 .await;
             result = combine(result, outcome);
             validated = true;

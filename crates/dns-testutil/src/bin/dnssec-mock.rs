@@ -192,21 +192,19 @@ fn serve(addr: SocketAddr, zone: &str, ttl: u32, names: usize, anchor_path: &str
         process::exit(1);
     }
 
-    let mut templates: HashMap<(String, RecordType), Template> =
-        HashMap::with_capacity(names.max(1) * 2);
+    let mut templates: HashMap<String, Template> = HashMap::with_capacity(names.max(1));
     let zone_text = signer.zone.to_ascii();
     for index in 0..names.max(1) {
         let name = format!("n{index:05}.{zone_text}");
         let qname = Name::from_ascii(&name).expect("valid benchmark name");
-        let key = (name.to_ascii_lowercase(), RecordType::A);
         let records = signer.a_records(&qname, ttl);
-        templates.insert(key, signer.template(&qname, RecordType::A, records));
+        templates.insert(
+            name.to_ascii_lowercase(),
+            signer.template(&qname, RecordType::A, records),
+        );
     }
     let dnskey_records = signer.signed(vec![signer.dnskey_record()]);
-    templates.insert(
-        (zone_text.to_ascii_lowercase(), RecordType::DNSKEY),
-        signer.template(&signer.zone, RecordType::DNSKEY, dnskey_records),
-    );
+    let dnskey_template = signer.template(&signer.zone, RecordType::DNSKEY, dnskey_records);
 
     let socket = UdpSocket::bind(addr).unwrap_or_else(|error| {
         eprintln!("dnssec-mock: bind {addr}: {error}");
@@ -240,27 +238,27 @@ fn serve(addr: SocketAddr, zone: &str, ttl: u32, names: usize, anchor_path: &str
         let Some((qname, qtype, question_end)) = parse_question(query) else {
             continue;
         };
-        match templates.get(&(qname.clone(), qtype)) {
-            Some(template) => {
-                send_template(&socket, &mut response, query, question_end, template, peer)
-            }
-            None => {
-                let generated;
-                let template = if qtype == RecordType::A
-                    && Name::from_ascii(&qname).is_ok_and(|name| signer.zone.zone_of(&name))
-                {
-                    let name = Name::from_ascii(&qname).expect("name was just validated");
-                    let records = signer.a_records(&name, ttl);
-                    generated = signer.template(&name, RecordType::A, records);
-                    &generated
-                } else {
-                    send_bytes(&socket, &refused(query, question_end), peer);
-                    answered.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                };
-                send_template(&socket, &mut response, query, question_end, template, peer);
-            }
-        }
+        let template = match qtype {
+            RecordType::A => templates.get(&qname),
+            RecordType::DNSKEY if qname.eq_ignore_ascii_case(&zone_text) => Some(&dnskey_template),
+            _ => None,
+        };
+        let generated;
+        let template = if let Some(template) = template {
+            template
+        } else if qtype == RecordType::A
+            && Name::from_ascii(&qname).is_ok_and(|name| signer.zone.zone_of(&name))
+        {
+            let name = Name::from_ascii(&qname).expect("name was just validated");
+            let records = signer.a_records(&name, ttl);
+            generated = signer.template(&name, RecordType::A, records);
+            &generated
+        } else {
+            send_bytes(&socket, &refused(query, question_end), peer);
+            answered.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        send_template(&socket, &mut response, query, question_end, template, peer);
         answered.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -1173,14 +1173,13 @@ impl QueryPipeline {
         checking_disabled: bool,
     ) -> Result<dns_iter::Resolved, ResolveError> {
         let resolver = self.resolver.as_ref().ok_or(ResolveError::NoNameservers)?;
-        let qname = query.name.to_ascii();
         let options = ResolveOptions {
             dnssec_ok: do_bit,
             checking_disabled,
         };
         tokio::time::timeout(
             RESOLVE_TIMEOUT,
-            resolver.resolve_with_options(&qname, query.query_type, options),
+            resolver.resolve_name_with_options(query.name.clone(), query.query_type, options),
         )
         .await
         .map_err(|_| ResolveError::Timeout)?

@@ -5,7 +5,7 @@ The performance numbers live in the [README](../README.md#performance); this
 document explains how to produce and compare numbers yourself.
 
 Last validated against `77efd1e` (DNSSEC workload) and re-run on the `0.1.13`
-validation-path changes.
+validation-path changes and the `0.1.14` allocation removals.
 
 ## Quick start
 

@@ -26,7 +26,7 @@ pub enum LocalAction {
 struct Zone {
     name: Name,
     zone_type: LocalZoneType,
-    records: HashMap<String, Vec<Record>>,
+    records: HashMap<Name, Vec<Record>>,
 }
 
 impl Zone {
@@ -39,12 +39,14 @@ impl Zone {
     }
 
     fn insert(&mut self, record: Record) {
-        let key = record.name.to_ascii().to_ascii_lowercase();
-        self.records.entry(key).or_default().push(record);
+        self.records
+            .entry(record.name.clone())
+            .or_default()
+            .push(record);
     }
 
     fn records_for(&self, name: &Name) -> Option<&Vec<Record>> {
-        self.records.get(&name.to_ascii().to_ascii_lowercase())
+        self.records.get(name)
     }
 
     fn soa(&self) -> Option<&Record> {

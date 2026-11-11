@@ -32,12 +32,13 @@ pub fn question_matches(
         return false;
     }
 
-    let expected = sent_name.to_ascii();
-    let actual = question.name.to_ascii();
+    // `Name` equality is case-insensitive; the 0x20 path compares the raw
+    // label bytes so the echoed case must match exactly, without formatting
+    // either name into a `String`.
     if require_case {
-        actual == expected
+        sent_name.is_fqdn() == question.name.is_fqdn() && sent_name.iter().eq(question.name.iter())
     } else {
-        actual.eq_ignore_ascii_case(&expected)
+        sent_name == &question.name
     }
 }
 

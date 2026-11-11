@@ -148,6 +148,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
     let mut authenticated = 0u64;
     let mut sent = 0u64;
     let mut buf = [0u8; 2048];
+    let mut wire = Vec::with_capacity(64);
 
     let start = Instant::now();
     barrier.wait();
@@ -159,7 +160,8 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
         seq = seq.wrapping_add(1);
         let packet = &config.queries[(seq as usize) % config.queries.len()];
         let id = seq as u16;
-        let mut wire = packet.clone();
+        wire.clear();
+        wire.extend_from_slice(packet);
         wire[0..2].copy_from_slice(&id.to_be_bytes());
         sent += 1;
         if socket.send(&wire).is_err() {

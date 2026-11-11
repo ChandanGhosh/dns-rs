@@ -296,7 +296,7 @@ impl Budget {
 #[derive(Clone)]
 pub(crate) struct WalkContext<'a> {
     pub(crate) depth: u32,
-    pub(crate) ancestors: &'a HashSet<String>,
+    pub(crate) ancestors: &'a HashSet<(Name, u16)>,
     pub(crate) deadline: Instant,
     pub(crate) budget: Arc<Budget>,
     /// Forwarded queries set RD; iterative queries must clear it.
@@ -423,6 +423,25 @@ impl IteratorResolver {
     ) -> Result<Resolved, ResolveError> {
         let name = Name::from_ascii(qname)
             .map_err(|error| ResolveError::InvalidResponse(error.to_string()))?;
+        self.resolve_name_with_options(name, qtype, options).await
+    }
+
+    /// Resolve an already-parsed name with explicit DNSSEC request flags.
+    ///
+    /// Use this when the caller already owns a [`Name`]. It skips the ASCII
+    /// formatting and reparsing that [`resolve_with_options`](Self::resolve_with_options)
+    /// performs on every query.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolveError`] for cycles, depth or query-budget limits,
+    /// invalid upstream responses, timeouts, and transport failures.
+    pub async fn resolve_name_with_options(
+        &self,
+        name: Name,
+        qtype: RecordType,
+        options: ResolveOptions,
+    ) -> Result<Resolved, ResolveError> {
         let deadline = Instant::now() + RESOLUTION_TIMEOUT;
         let ancestors = HashSet::new();
         let context = WalkContext {
@@ -477,7 +496,10 @@ impl IteratorResolver {
                 return Err(ResolveError::Timeout);
             }
 
-            let key = format!("{}|{}", name.to_ascii().to_lowercase(), u16::from(qtype));
+            // `Name` compares and hashes case-insensitively, so it is the key
+            // directly. This replaces a formatted, lowercased `String` pair
+            // with one (usually inline) `Name` clone per resolution step.
+            let key = (name.clone(), u16::from(qtype));
             if context.ancestors.contains(&key) {
                 return Err(ResolveError::Cycle);
             }
@@ -890,7 +912,7 @@ impl IteratorResolver {
         let mut seen = HashSet::new();
 
         for _ in 0..MAX_CNAME_CHAIN {
-            if !seen.insert(current.to_ascii().to_lowercase()) {
+            if !seen.insert(current.clone()) {
                 return Err(ResolveError::Cycle);
             }
 
@@ -1737,7 +1759,7 @@ impl IteratorResolver {
                 continue;
             }
             if let RData::NS(target) = &record.data {
-                names.insert(target.0.to_ascii().to_lowercase());
+                names.insert(target.0.clone());
             }
         }
         if names.is_empty() {
@@ -1746,8 +1768,7 @@ impl IteratorResolver {
 
         let mut servers = Vec::new();
         for record in response.additionals.iter().chain(response.answers.iter()) {
-            let owner = record.name.to_ascii().to_lowercase();
-            if !names.contains(&owner) {
+            if !names.contains(&record.name) {
                 continue;
             }
             match &record.data {
@@ -1821,18 +1842,17 @@ impl IteratorResolver {
         context: &WalkContext<'_>,
     ) -> Result<Vec<SocketAddr>, ResolveError> {
         let mut addresses: Vec<IpAddr> = scrub::addresses(&referral.glue);
-        let glue_names: HashSet<String> = referral
+        let glue_names: HashSet<Name> = referral
             .glue
             .iter()
-            .map(|record| record.name.to_ascii().to_lowercase())
+            .map(|record| record.name.clone())
             .collect();
 
         for nameserver in referral.nameservers.iter().take(MAX_NS_ADDRESS_PROBES) {
             if addresses.len() >= 4 {
                 break;
             }
-            let key = nameserver.to_ascii().to_lowercase();
-            if glue_names.contains(&key) {
+            if glue_names.contains(nameserver) {
                 continue;
             }
 
@@ -2065,18 +2085,18 @@ fn min_ttl(records: &[Record]) -> u32 {
 }
 
 fn group_rrsets(records: &[Record]) -> Vec<(Name, RecordType, Vec<Record>, u32)> {
-    let mut grouped: HashMap<(String, RecordType), (Name, Vec<Record>, u32)> = HashMap::new();
+    let mut grouped: HashMap<(Name, u16), (Vec<Record>, u32)> = HashMap::new();
     for record in records {
-        let key = (record.name.to_ascii().to_lowercase(), record.record_type());
+        let key = (record.name.clone(), u16::from(record.record_type()));
         let entry = grouped
             .entry(key)
-            .or_insert_with(|| (record.name.clone(), Vec::new(), record.ttl));
-        entry.1.push(record.clone());
-        entry.2 = entry.2.min(record.ttl);
+            .or_insert_with(|| (Vec::new(), record.ttl));
+        entry.0.push(record.clone());
+        entry.1 = entry.1.min(record.ttl);
     }
     grouped
-        .into_values()
-        .map(|(name, records, ttl)| {
+        .into_iter()
+        .map(|((name, _), (records, ttl))| {
             let qtype = records[0].record_type();
             (name, qtype, records, ttl)
         })
@@ -2147,6 +2167,27 @@ mod tests {
         assert_eq!(grouped[0].1, RecordType::A);
         assert_eq!(grouped[0].2.len(), 2);
         assert_eq!(grouped[0].3, 30);
+    }
+
+    #[test]
+    fn groups_case_variant_owners_into_one_rrset() {
+        let mixed = Name::from_ascii("ExAmPlE.CoM.").expect("name");
+        let lower = Name::from_ascii("example.com.").expect("name");
+        let records = vec![
+            Record::from_rdata(
+                mixed,
+                60,
+                RData::A(std::net::Ipv4Addr::new(192, 0, 2, 1).into()),
+            ),
+            Record::from_rdata(
+                lower,
+                60,
+                RData::A(std::net::Ipv4Addr::new(192, 0, 2, 2).into()),
+            ),
+        ];
+        let grouped = group_rrsets(&records);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].2.len(), 2);
     }
 
     #[test]
