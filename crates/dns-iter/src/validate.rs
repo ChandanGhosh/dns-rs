@@ -505,6 +505,12 @@ impl IteratorResolver {
                     .find_map(|record| rrsig_of(record).map(|sig| sig.input().signer_name.clone()))
                 {
                     Some(parent_name) => {
+                        // A DS RRset is signed by the parent zone. Following a
+                        // signer at or below the child would recurse into the
+                        // same status lookup, so treat it as malformed.
+                        if parent_name == name || !parent_name.zone_of(&name) {
+                            return Security::Bogus(BogusReason::Malformed);
+                        }
                         self.zone_status(parent_name, context.clone(), 0)
                             .await
                             .security
@@ -512,15 +518,15 @@ impl IteratorResolver {
                     None => Security::Insecure,
                 }
             } else {
-                let Some(parent_name) = negative_zone(&response) else {
+                let Some(parent_name) = negative_zone(&response)
+                    .and_then(|candidate| ds_probe_parent(&name, candidate))
+                else {
                     return Security::Insecure;
                 };
                 // Same bailiwick requirement: the denial of the DS record must
                 // come from a zone containing the name, not from an unrelated
-                // signed zone a hostile upstream supplies.
-                if !parent_name.zone_of(&name) {
-                    return Security::Insecure;
-                }
+                // signed zone a hostile upstream supplies. A child-served SOA
+                // falls back to the immediate parent (see `ds_probe_parent`).
                 let parent = self.zone_status(parent_name, context.clone(), 0).await;
                 if parent.security != Security::Secure {
                     parent.security
@@ -617,6 +623,11 @@ impl IteratorResolver {
                 else {
                     return ZoneStatus::bogus(BogusReason::MissingSignature);
                 };
+                // A DS RRset is signed by the parent zone. Following a signer
+                // at or below this zone would recurse without making progress.
+                if parent_name == zone || !parent_name.zone_of(&zone) {
+                    return ZoneStatus::bogus(BogusReason::Malformed);
+                }
                 let parent = self
                     .zone_status(parent_name, context.clone(), depth + 1)
                     .await;
@@ -653,12 +664,11 @@ impl IteratorResolver {
             } else {
                 // No DS: the parent must prove the delegation is unsigned, and
                 // the proof must come from a zone containing the child.
-                let Some(parent_name) = negative_zone(&ds_response) else {
+                let Some(parent_name) = negative_zone(&ds_response)
+                    .and_then(|candidate| ds_probe_parent(&zone, candidate))
+                else {
                     return ZoneStatus::insecure();
                 };
-                if !parent_name.zone_of(&zone) {
-                    return ZoneStatus::insecure();
-                }
                 let parent = self
                     .zone_status(parent_name, context.clone(), depth + 1)
                     .await;
@@ -1086,6 +1096,25 @@ fn effective_qname(message: &Message) -> Option<Name> {
         }
     }
     Some(name)
+}
+
+/// Pick the parent zone named by a DS probe's negative answer.
+///
+/// Normally the SOA or RRSIG in the denial names the zone holding the DS
+/// RRset. A server authoritative for both a zone and its parent may instead
+/// answer a DS query at the child apex from the child zone, putting the
+/// child's own SOA in the authority section. Treating that owner as the parent
+/// would recurse into the same zone until the depth cap and report the zone as
+/// bogus, so fall back to the immediate parent name. The returned name is
+/// always a strict ancestor (or `None` at the root), guaranteeing progress.
+fn ds_probe_parent(probed: &Name, candidate: Name) -> Option<Name> {
+    if candidate != *probed && candidate.zone_of(probed) {
+        Some(candidate)
+    } else if probed.num_labels() > 0 {
+        Some(probed.base_name())
+    } else {
+        None
+    }
 }
 
 fn negative_zone(message: &Message) -> Option<Name> {

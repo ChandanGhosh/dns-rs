@@ -7,7 +7,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dns_dnssec::{AutoTrustAnchor, Security, TrustAnchor, TrustStore};
 use dns_iter::{IteratorConfig, IteratorResolver, ResolveOptions};
@@ -609,6 +609,91 @@ async fn unsigned_delegation_is_insecure() {
     assert_eq!(resolved.security, Security::Insecure);
     assert!(!resolved.message.metadata.authentic_data);
     assert_eq!(resolved.message.answers.len(), 1);
+}
+
+/// A server authoritative for both a parent and child can answer a DS query at
+/// the child apex from the child zone, placing the child's own SOA in the
+/// authority section instead of the parent's. The validator must not treat
+/// that SOA as the parent and recurse into the same zone until the depth cap;
+/// it must walk up to the unsigned parent and classify the subtree insecure.
+#[tokio::test]
+async fn child_soa_on_ds_probe_does_not_recurse() {
+    let (root, com, _example, now) = build_hierarchy();
+    let child_ds_probes = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let child_ds_probes = Arc::clone(&child_ds_probes);
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        // com proves that google.com is an unsigned delegation.
+        let google_ds_denial = nsec(
+            "google.com.",
+            "zzz.com.",
+            &[RecordType::NS, RecordType::RRSIG, RecordType::NSEC],
+            &com,
+            "com.",
+            now,
+        );
+        let www = Record::from_rdata(
+            n("www.l.google.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 9).into()),
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("google.com.", RecordType::NS) => referral(query, "google.com.", "ns.google.com."),
+                ("google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in google_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("l.google.com.", RecordType::NS) => {
+                    referral(query, "l.google.com.", "ns.l.google.com.")
+                }
+                // Same-server child response: its own SOA, no parent proof.
+                ("l.google.com." | "www.l.google.com.", RecordType::DS) => {
+                    child_ds_probes.fetch_add(1, Ordering::Relaxed);
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("l.google.com."));
+                    message
+                }
+                ("www.l.google.com.", RecordType::A) => answer(query, vec![www.clone()]),
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "www.l.google.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+    assert_eq!(resolved.message.answers.len(), 1);
+    let probes = child_ds_probes.load(Ordering::Relaxed);
+    assert!(
+        probes < 8,
+        "DS probe at the child apex must not recurse, saw {probes} probes"
+    );
 }
 
 /// A DS query for an alias is answered with the alias's CNAME, not a DS denial
