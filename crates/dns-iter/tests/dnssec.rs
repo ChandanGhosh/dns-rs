@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use dns_dnssec::{AutoTrustAnchor, Security, TrustAnchor, TrustStore};
-use dns_iter::{IteratorConfig, IteratorResolver, ResolveOptions};
+use dns_iter::{ForwardZone, IteratorConfig, IteratorResolver, ResolveOptions};
 use dns_proto::{
     Algorithm, CNAME, DNSClass, DNSKEY, DNSSECRData, DS, DigestType, Message, MessageType, NS,
     NSEC, NSEC3, Name, Nsec3HashAlgorithm, OpCode, PublicKeyBuf, RData, RRSIG, Record, RecordType,
@@ -693,6 +693,373 @@ async fn child_soa_on_ds_probe_does_not_recurse() {
     assert!(
         probes < 8,
         "DS probe at the child apex must not recurse, saw {probes} probes"
+    );
+}
+
+/// A cached insecure ancestor makes every descendant insecure: the validator
+/// must not probe DS again for a child zone below it (RFC 4035 section 5.2,
+/// mirroring Unbound's key-entry inheritance). Otherwise every resolution
+/// below an unsigned delegation pays for a provably redundant probe.
+#[tokio::test]
+async fn cached_insecure_ancestor_skips_descendant_ds_probe() {
+    let (root, com, _example, now) = build_hierarchy();
+    let child_ds_probes = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let child_ds_probes = Arc::clone(&child_ds_probes);
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        // com proves that google.com is an unsigned delegation.
+        let google_ds_denial = nsec(
+            "google.com.",
+            "zzz.com.",
+            &[RecordType::NS, RecordType::RRSIG, RecordType::NSEC],
+            &com,
+            "com.",
+            now,
+        );
+        let www_google = Record::from_rdata(
+            n("www.google.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 20).into()),
+        );
+        let www_l_google = Record::from_rdata(
+            n("www.l.google.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 21).into()),
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("google.com.", RecordType::NS) => referral(query, "google.com.", "ns.google.com."),
+                ("google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in google_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("www.google.com.", RecordType::A) => answer(query, vec![www_google.clone()]),
+                ("l.google.com.", RecordType::NS) => {
+                    referral(query, "l.google.com.", "ns.l.google.com.")
+                }
+                ("l.google.com.", RecordType::DS) => {
+                    child_ds_probes.fetch_add(1, Ordering::Relaxed);
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("l.google.com."));
+                    message
+                }
+                ("www.l.google.com.", RecordType::A) => answer(query, vec![www_l_google.clone()]),
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+
+    // Warm the enclosing zone status through a name directly under it.
+    let warm = resolver
+        .resolve_with_options("www.google.com.", RecordType::A, ResolveOptions::default())
+        .await
+        .expect("resolution completes");
+    assert_eq!(warm.security, Security::Insecure);
+
+    let resolved = resolver
+        .resolve_with_options(
+            "www.l.google.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+    assert_eq!(resolved.security, Security::Insecure);
+    assert!(!resolved.message.metadata.authentic_data);
+    assert_eq!(
+        child_ds_probes.load(Ordering::Relaxed),
+        0,
+        "a cached insecure ancestor must satisfy the child zone without a DS probe"
+    );
+}
+
+/// An explicit trust anchor creates a signed island below an unsigned parent.
+/// The insecure status of the parent must not leak into that island: an
+/// unsigned RRset inside it is bogus, not insecure.
+#[tokio::test]
+async fn trust_anchor_island_below_insecure_parent_stays_validated() {
+    let (root, com, _example, now) = build_hierarchy();
+    let island = SigningKey::generate();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let google_ds_denial = nsec(
+            "google.com.",
+            "zzz.com.",
+            &[RecordType::NS, RecordType::RRSIG, RecordType::NSEC],
+            &com,
+            "com.",
+            now,
+        );
+        let island_dnskey = signed(
+            vec![island.record("secure.l.google.com.")],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+        let unsigned_leaf = Record::from_rdata(
+            n("bad.secure.l.google.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 22).into()),
+        );
+        // The island proves the leaf is not a delegation, so a missing
+        // signature on the A RRset is a stripped-signature attack.
+        let leaf_ds_denial = nsec(
+            "bad.secure.l.google.com.",
+            "zzz.secure.l.google.com.",
+            &[RecordType::A, RecordType::RRSIG, RecordType::NSEC],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+        let leaf_soa = signed(
+            vec![soa("secure.l.google.com.")],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("google.com.", RecordType::NS) => referral(query, "google.com.", "ns.google.com."),
+                ("google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in google_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("www.google.com.", RecordType::A) => answer(
+                    query,
+                    vec![Record::from_rdata(
+                        n("www.google.com."),
+                        300,
+                        RData::A(Ipv4Addr::new(198, 51, 100, 23).into()),
+                    )],
+                ),
+                ("l.google.com.", RecordType::NS) => {
+                    referral(query, "l.google.com.", "ns.l.google.com.")
+                }
+                ("secure.l.google.com.", RecordType::NS) => {
+                    referral(query, "secure.l.google.com.", "ns.secure.l.google.com.")
+                }
+                ("secure.l.google.com.", RecordType::DNSKEY) => {
+                    answer(query, island_dnskey.clone())
+                }
+                ("bad.secure.l.google.com.", RecordType::A) => {
+                    answer(query, vec![unsigned_leaf.clone()])
+                }
+                ("bad.secure.l.google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    for record in leaf_soa.clone() {
+                        message.add_authority(record);
+                    }
+                    for record in leaf_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let config = signed_zone_config(server.addr, &root);
+    config.trust_store.insert(TrustAnchor::from_keys(
+        n("secure.l.google.com."),
+        vec![island.record("secure.l.google.com.")],
+    ));
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+    // Warm google.com as insecure through a name directly under it.
+    let warm = resolver
+        .resolve_with_options("www.google.com.", RecordType::A, ResolveOptions::default())
+        .await
+        .expect("resolution completes");
+    assert_eq!(warm.security, Security::Insecure);
+
+    let resolved = resolver
+        .resolve_with_options(
+            "bad.secure.l.google.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert!(
+        matches!(
+            resolved.security,
+            Security::Bogus(dns_dnssec::BogusReason::MissingSignature)
+        ),
+        "the anchored island must not inherit the parent's insecure status, got {:?}",
+        resolved.security
+    );
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
+/// Forwarded answers record no origin, so the validator probes DS directly at
+/// the owner. The trust-anchor guard must still stop inheritance there:
+/// otherwise a stripped signature inside an anchored island below a cached
+/// insecure parent is downgraded to insecure.
+#[tokio::test]
+async fn forwarded_answer_does_not_inherit_insecurity_across_anchor() {
+    let (root, com, _example, now) = build_hierarchy();
+    let island = SigningKey::generate();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let google_ds_denial = nsec(
+            "google.com.",
+            "zzz.com.",
+            &[RecordType::NS, RecordType::RRSIG, RecordType::NSEC],
+            &com,
+            "com.",
+            now,
+        );
+        let island_dnskey = signed(
+            vec![island.record("secure.l.google.com.")],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+        let leaf_ds_denial = nsec(
+            "bad.secure.l.google.com.",
+            "zzz.secure.l.google.com.",
+            &[RecordType::A, RecordType::RRSIG, RecordType::NSEC],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+        let leaf_soa = signed(
+            vec![soa("secure.l.google.com.")],
+            &island,
+            "secure.l.google.com.",
+            now,
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("com."));
+                    for record in google_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("www.google.com.", RecordType::DS) => {
+                    // The enclosing zone is unsigned, so its denial is too.
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("google.com."));
+                    message
+                }
+                ("www.google.com.", RecordType::A) => answer(
+                    query,
+                    vec![Record::from_rdata(
+                        n("www.google.com."),
+                        300,
+                        RData::A(Ipv4Addr::new(198, 51, 100, 24).into()),
+                    )],
+                ),
+                ("secure.l.google.com.", RecordType::DNSKEY) => {
+                    answer(query, island_dnskey.clone())
+                }
+                ("bad.secure.l.google.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    for record in leaf_soa.clone() {
+                        message.add_authority(record);
+                    }
+                    for record in leaf_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                ("bad.secure.l.google.com.", RecordType::A) => answer(
+                    query,
+                    vec![Record::from_rdata(
+                        n("bad.secure.l.google.com."),
+                        300,
+                        RData::A(Ipv4Addr::new(198, 51, 100, 25).into()),
+                    )],
+                ),
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let mut config = signed_zone_config(server.addr, &root);
+    config.forward_zones = vec![ForwardZone {
+        zone: Name::root(),
+        servers: vec![server.addr.into()],
+        forward_first: false,
+        forward_fallback: false,
+    }];
+    config.trust_store.insert(TrustAnchor::from_keys(
+        n("secure.l.google.com."),
+        vec![island.record("secure.l.google.com.")],
+    ));
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+    // Warm google.com as insecure through a name directly under it.
+    let warm = resolver
+        .resolve_with_options("www.google.com.", RecordType::A, ResolveOptions::default())
+        .await
+        .expect("resolution completes");
+    assert_eq!(warm.security, Security::Insecure);
+
+    let resolved = resolver
+        .resolve_with_options(
+            "bad.secure.l.google.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert!(
+        matches!(
+            resolved.security,
+            Security::Bogus(dns_dnssec::BogusReason::MissingSignature)
+        ),
+        "an anchored island must stay validated for forwarded answers, got {:?}",
+        resolved.security
     );
 }
 

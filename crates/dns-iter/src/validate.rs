@@ -167,6 +167,37 @@ impl IteratorResolver {
         !self.config.trust_store.anchor_within(domain, name)
     }
 
+    /// Whether `name` is covered by a cached zone that is already unsigned.
+    ///
+    /// Everything below a delegation without a DS RRset is insecure, so a
+    /// zone's probe result applies to all of its descendants (RFC 4035
+    /// section 5.2). The search starts at `name` and walks strict ancestors,
+    /// stopping at the first cached zone status: a `Secure` ancestor says
+    /// nothing about a delegation below it, and a bogus ancestor must not mask
+    /// the name's own status. A trust anchor inside the covered subtree
+    /// re-enables validation, so the walk also stops before crossing one.
+    fn cached_insecure_cover(&self, name: &Name) -> bool {
+        let mut candidate = name.clone();
+        loop {
+            if self.config.trust_store.anchor_within(&candidate, name) {
+                return false;
+            }
+            if let Ok(mut cache) = self.zones.lock()
+                && let Some(status) = cache.get(&candidate)
+            {
+                return status.security == Security::Insecure;
+            }
+            if candidate.num_labels() == 0 {
+                return false;
+            }
+            let parent = candidate.base_name();
+            if parent == candidate {
+                return false;
+            }
+            candidate = parent;
+        }
+    }
+
     /// Validate a response and classify it as secure, insecure, or bogus.
     ///
     /// `origins` maps each answer owner to the authoritative zone that supplied
@@ -464,6 +495,9 @@ impl IteratorResolver {
             {
                 return security;
             }
+            if self.cached_insecure_cover(&name) {
+                return Security::Insecure;
+            }
 
             let response = match self.fetch_internal(&name, RecordType::DS, &context).await {
                 Ok(response) => response,
@@ -580,11 +614,8 @@ impl IteratorResolver {
                 self.cache_zone(&zone, &status);
                 return status;
             }
-
-            if let Some(anchor) = self.config.trust_store.anchor_for(&zone) {
-                let status = self.status_from_anchor(&zone, &anchor, &context).await;
-                self.cache_zone(&zone, &status);
-                return status;
+            if self.cached_insecure_cover(&zone) {
+                return ZoneStatus::insecure();
             }
 
             // A configured stub zone is trusted by appointment: the operator
@@ -1241,11 +1272,77 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{common_suffix, next_closer};
-    use dns_proto::Name;
+    use std::time::Duration;
+
+    use dns_dnssec::{TrustAnchor, TrustStore};
+    use dns_proto::{Algorithm, DNSKEY, DNSSECRData, Name, PublicKeyBuf, RData, Record};
+
+    use super::{IteratorResolver, ZoneStatus, common_suffix, next_closer};
+    use crate::IteratorConfig;
 
     fn n(text: &str) -> Name {
         Name::from_ascii(text).expect("name")
+    }
+
+    fn resolver_with_anchor(anchor: Option<&str>) -> IteratorResolver {
+        let store = TrustStore::builtin();
+        if let Some(name) = anchor {
+            let key = Record::from_rdata(
+                n(name),
+                3600,
+                RData::DNSSEC(DNSSECRData::DNSKEY(DNSKEY::with_flags(
+                    257,
+                    PublicKeyBuf::new(vec![7; 32], Algorithm::ED25519),
+                ))),
+            );
+            store.insert(TrustAnchor::from_keys(n(name), vec![key]));
+        }
+        let config = IteratorConfig {
+            trust_store: store,
+            ..IteratorConfig::default()
+        };
+        IteratorResolver::with_config(config, None).expect("resolver")
+    }
+
+    fn cache_status(resolver: &IteratorResolver, zone: &str, status: ZoneStatus) {
+        resolver.zones.lock().expect("zone cache").insert(
+            &n(zone),
+            status,
+            Duration::from_secs(300),
+        );
+    }
+
+    #[test]
+    fn cached_insecure_cover_applies_to_descendants() {
+        let resolver = resolver_with_anchor(None);
+        cache_status(&resolver, "google.com.", ZoneStatus::insecure());
+
+        assert!(resolver.cached_insecure_cover(&n("www.l.google.com.")));
+        assert!(resolver.cached_insecure_cover(&n("google.com.")));
+        assert!(!resolver.cached_insecure_cover(&n("www.example.net.")));
+    }
+
+    #[test]
+    fn cached_insecure_cover_stops_at_a_trust_anchor() {
+        let resolver = resolver_with_anchor(Some("secure.l.google.com."));
+        cache_status(&resolver, "google.com.", ZoneStatus::insecure());
+
+        assert!(!resolver.cached_insecure_cover(&n("www.secure.l.google.com.")));
+        assert!(!resolver.cached_insecure_cover(&n("secure.l.google.com.")));
+        assert!(resolver.cached_insecure_cover(&n("www.l.google.com.")));
+    }
+
+    #[test]
+    fn cached_secure_status_stops_the_walk() {
+        let resolver = resolver_with_anchor(None);
+        cache_status(&resolver, "google.com.", ZoneStatus::insecure());
+        cache_status(
+            &resolver,
+            "secure.l.google.com.",
+            ZoneStatus::secure(Vec::new()),
+        );
+
+        assert!(!resolver.cached_insecure_cover(&n("www.secure.l.google.com.")));
     }
 
     #[test]
