@@ -105,6 +105,8 @@ Raspberry Pi deployment notes, and the Docker Hub publishing workflow, see
 **DNSSEC**
 
 - RRSIG verification over canonical RRsets and DNSKEY/DS chain-of-trust checks.
+- ED25519, ECDSA P-256/P-384, and RSA/SHA-1/256/512 signatures, with a
+  configurable NSEC3 iteration cap.
 - NSEC and NSEC3 denial-of-existence proofs.
 - Extended DNS Errors in responses for bogus and insecure validation outcomes.
 - Built-in root trust anchors, extra anchors from configuration or files, and
@@ -134,6 +136,13 @@ signed CDN zone is insecure by design and resolves without any exclusion.
 
 `val_permissive_mode` is a different, global escape hatch: it still runs
 validation but returns bogus data with `AD=0` instead of `SERVFAIL`.
+
+Validated zone status is cached for the DNSKEY TTL when one is available, and
+for at most five minutes for key-less or probed statuses. Insecure status is
+inherited by descendants, so that five-minute bound is also the longest a newly
+signed delegation can remain treated as unsigned. Secure and bogus results stop
+the inheritance walk, and an explicit trust anchor below an insecure zone
+bypasses it entirely.
 
 **DNS rebinding protection**
 
@@ -256,10 +265,14 @@ path fast.
 ### Running it
 
 The runner is [`scripts/bench-loopback.sh`](scripts/bench-loopback.sh); the
-load generator is [`scripts/dns-bench.rs`](scripts/dns-bench.rs). The runner
-builds the release binary, starts a local mock authority, and loops over the
-thread counts. Every environment switch, the A/B compare workflow, and the
-methodology rules are catalogued in [`docs/benchmarking.md`](docs/benchmarking.md).
+load generator is [`scripts/dns-bench.rs`](scripts/dns-bench.rs). The DNSSEC
+scenario uses a signed mock authority,
+[`crates/dns-testutil/src/bin/dnssec-mock.rs`](crates/dns-testutil/src/bin/dnssec-mock.rs),
+because it needs `dns-proto` and `ring` to generate a key and sign answers.
+The runner builds the release binary, starts the appropriate mock, and loops
+over the thread counts. Every environment switch, the A/B compare workflow,
+and the methodology rules are catalogued in
+[`docs/benchmarking.md`](docs/benchmarking.md).
 
 The script needs a Rust toolchain; host mode uses `cargo` to build the
 resolver, and every mode uses `rustc` to build the load generator. Container
@@ -281,11 +294,22 @@ make bench
 make bench THREADS="1 2" BENCH_DURATION=30
 make bench-container
 make bench-ci
+make bench-miss
+make bench-dnssec
+make bench-compare-miss THREADS="1 2 4" AB_REPEATS=3
+make bench-compare-dnssec THREADS="1 2 4" AB_REPEATS=3
 ```
 
 `make bench-ci` reproduces the CI settings: 4,000 names, 8 queries in flight,
 a 5-second warm-up, a 15-second sample, and one and two workers against the
 container image.
+
+`make bench-dnssec` runs the signed TTL-0 workload: every measured query reaches
+the mock and verifies one ED25519 RRSIG, while the zone key stays cached. Compare
+it with `make bench-miss` to isolate validation cost. ED25519 is the cheapest
+common algorithm, so the scenario understates the cost of RSA/SHA-256
+validation and does not measure negative (NSEC/NSEC3) proofs or first-time
+chain building.
 
 To compare a change against a baseline commit,
 [`scripts/bench-compare.sh`](scripts/bench-compare.sh) interleaves the two
@@ -299,6 +323,9 @@ scripts/bench-compare.sh origin/main
 
 # An honest cache-miss comparison (TTL-0 upstream).
 AB_REPEATS=3 BENCH_SCENARIO=miss scripts/bench-compare.sh origin/main 1 2 4
+
+# A DNSSEC validation comparison (signed TTL-0 upstream).
+AB_REPEATS=3 BENCH_SCENARIO=dnssec scripts/bench-compare.sh origin/main 1 2 4
 
 # An allocation comparison: both variants build with the counting allocator.
 BENCH_ALLOCS=1 scripts/bench-compare.sh origin/main 1 2 4
@@ -368,7 +395,7 @@ publishes the numbers to the workflow summary.
 | `dns-server` | UDP/TCP/DoT/DoH listeners, ACLs, views, EDNS, rate limiting, local/auth zones, query pipeline, statistics |
 | `dns-control` | Control command types; socket server not wired up yet |
 | `dns-daemon` | `dns-rs` binary: `checkconf`, `run`, logging, signal handling |
-| `dns-testutil` | DNS message builders for tests; mock servers and replay support still planned |
+| `dns-testutil` | DNS message builders for tests plus the signed authoritative mock used by the DNSSEC benchmark; replay support still planned |
 
 ## Configuration
 
@@ -408,6 +435,11 @@ Options outside this set are accepted with a warning and ignored.
 
 ## Development
 
+Rust 1.88 or newer is required (`rust-version` in `Cargo.toml`). Host-mode
+benchmarking selects the recursive resolver's CPU list with `taskset`, and the
+container tooling targets Linux; macOS and Windows can build and run the
+resolver itself.
+
 Common tasks are wrapped by the [`Makefile`](Makefile); run `make help` for the
 full list.
 
@@ -440,6 +472,17 @@ vulnerabilities, and records informational one- and two-worker load stats. On
 pushes to `main`, a publish job runs after all gates and pushes the date-tagged
 multi-arch image to Docker Hub. The `delv` corpus-parity test in
 `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
+
+### Releases and versioning
+
+The workspace version in `Cargo.toml` is the release version. Every push to
+`main` runs the publish job, but it only creates a `vX.Y.Z` tag and GitHub
+release when that version is newer than every existing `v*` tag. Otherwise the
+push just refreshes the date-tagged Docker image.
+
+So a code-only push that should not release leaves the version untouched, and
+an intended release bumps `version.workspace` in the same commit. The release
+notes are generated from the commits since the previous tag.
 
 The Unbound replay harness design is in
 [`docs/replay-harness.md`](docs/replay-harness.md), container deployment is

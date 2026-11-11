@@ -63,8 +63,9 @@
 # iterative resolution plus one Ed25519 RRSIG verification per query, and the
 # RESULT line reports upstream/saved just like miss mode. It also gains
 #   ad=N        measured answers that carried the AD bit
-# and the runner fails the run unless ad equals samples, so a broken trust
-# anchor cannot silently degrade the benchmark into a plain miss run. The zone
+# and the runner fails the run unless at least one answer was measured and
+# every measured answer carried AD, so neither a broken trust anchor nor a run
+# that answered nothing can pass. The zone
 # key itself is cached by the validator for the DNSKEY TTL, so long runs
 # measure steady-state signature verification rather than a fresh chain build
 # per query. The resolver's DNSSEC validation flag must stay at its default
@@ -425,9 +426,10 @@ EOF
         # is measuring the plain miss path with a broken or missing anchor.
         ad="$(printf '%s\n' "$result" | sed -n 's/.* ad=\([0-9]*\).*/\1/p')"
         measured="$(printf '%s\n' "$result" | sed -n 's/.* samples=\([0-9]*\).*/\1/p')"
-        if [ -z "$ad" ] || [ "$ad" != "$measured" ]; then
-            echo "dnssec scenario expected every measured answer to carry AD" \
-                "(ad=$ad samples=$measured); check the trust anchor" >&2
+        if [ -z "$ad" ] || [ -z "$measured" ] || [ "$measured" -eq 0 ] \
+            || [ "$ad" != "$measured" ]; then
+            echo "dnssec scenario expected at least one measured answer and every" \
+                "one to carry AD (ad=$ad samples=$measured); check the trust anchor" >&2
             exit 1
         fi
     fi

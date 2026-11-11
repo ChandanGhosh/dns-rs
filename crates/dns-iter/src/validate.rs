@@ -24,6 +24,21 @@ use crate::iterator::{Budget, IteratorResolver, WalkContext};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_QUERY_BUDGET: u32 = 64;
 
+/// Maximum depth of the DS/DNSKEY chain walk before giving up as malformed.
+const MAX_CHAIN_DEPTH: u32 = 24;
+
+/// How long a validated zone status is cached when no DNSKEY TTL is known.
+///
+/// Insecure status is inherited by descendants, so this is also the longest
+/// time a newly signed zone can remain treated as unsigned. Bounded to five
+/// minutes so a delegation or signing change is picked up promptly. Secure and
+/// Bogus statuses always stop inheritance, and an explicit trust anchor below
+/// the cached zone bypasses this path entirely.
+const ZONE_STATUS_TTL_SECS: u32 = 300;
+const ZONE_STATUS_TTL: Duration = Duration::from_secs(ZONE_STATUS_TTL_SECS as u64);
+const MIN_ZONE_STATUS_TTL: Duration = Duration::from_secs(30);
+const MAX_ZONE_STATUS_TTL: Duration = Duration::from_secs(3600);
+
 /// Flags that affect one client-facing resolution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
@@ -56,7 +71,7 @@ struct AnswerContext<'a> {
     /// Authority records, used to prove wildcard expansion.
     authorities: &'a [Record],
     /// Authoritative zone that supplied each answer owner.
-    origins: &'a HashMap<String, Name>,
+    origins: &'a HashMap<Name, Name>,
 }
 
 #[derive(Clone, Debug)]
@@ -95,27 +110,32 @@ struct CachedZone {
 }
 
 /// Cache of validated zone keys, keyed by zone apex.
+///
+/// `Name` hashes and compares case-insensitively, so it is used directly as the
+/// map key. This mirrors the message cache and avoids formatting and
+/// lowercasing (two `String` allocations) on every validation lookup.
 #[derive(Default)]
 pub(crate) struct ZoneCache {
-    entries: HashMap<String, CachedZone>,
-    signed: HashMap<String, CachedZone>,
+    entries: HashMap<Name, CachedZone>,
+    signed: HashMap<Name, CachedZone>,
 }
 
 impl ZoneCache {
     fn get(&mut self, zone: &Name) -> Option<ZoneStatus> {
-        let key = zone.to_ascii().to_ascii_lowercase();
-        let entry = self.entries.get(&key)?;
-        if entry.expires <= Instant::now() {
-            self.entries.remove(&key);
-            return None;
+        {
+            let entry = self.entries.get(zone)?;
+            if entry.expires > Instant::now() {
+                return Some(entry.status.clone());
+            }
         }
-        Some(entry.status.clone())
+        self.entries.remove(zone);
+        None
     }
 
     fn insert(&mut self, zone: &Name, status: ZoneStatus, ttl: Duration) {
-        let ttl = ttl.clamp(Duration::from_secs(30), Duration::from_secs(3600));
+        let ttl = ttl.clamp(MIN_ZONE_STATUS_TTL, MAX_ZONE_STATUS_TTL);
         self.entries.insert(
-            zone.to_ascii().to_ascii_lowercase(),
+            zone.clone(),
             CachedZone {
                 status,
                 expires: Instant::now() + ttl,
@@ -124,18 +144,19 @@ impl ZoneCache {
     }
 
     fn get_signed(&mut self, name: &Name) -> Option<Security> {
-        let key = name.to_ascii().to_ascii_lowercase();
-        let entry = self.signed.get(&key)?;
-        if entry.expires <= Instant::now() {
-            self.signed.remove(&key);
-            return None;
+        {
+            let entry = self.signed.get(name)?;
+            if entry.expires > Instant::now() {
+                return Some(entry.status.security.clone());
+            }
         }
-        Some(entry.status.security.clone())
+        self.signed.remove(name);
+        None
     }
 
     fn insert_signed(&mut self, name: &Name, security: Security, ttl: Duration) {
         self.signed.insert(
-            name.to_ascii().to_ascii_lowercase(),
+            name.clone(),
             CachedZone {
                 status: ZoneStatus {
                     security,
@@ -177,14 +198,18 @@ impl IteratorResolver {
     /// the name's own status. A trust anchor inside the covered subtree
     /// re-enables validation, so the walk also stops before crossing one.
     fn cached_insecure_cover(&self, name: &Name) -> bool {
+        // Hold the cache lock for the whole ancestor walk: the status is a
+        // single consistent snapshot, and a deep name no longer locks once per
+        // label on the validation hot path.
+        let Ok(mut cache) = self.zones.lock() else {
+            return false;
+        };
         let mut candidate = name.clone();
         loop {
             if self.config.trust_store.anchor_within(&candidate, name) {
                 return false;
             }
-            if let Ok(mut cache) = self.zones.lock()
-                && let Some(status) = cache.get(&candidate)
-            {
+            if let Some(status) = cache.get(&candidate) {
                 return status.security == Security::Insecure;
             }
             if candidate.num_labels() == 0 {
@@ -207,7 +232,7 @@ impl IteratorResolver {
         &'a self,
         message: &Message,
         qtype: RecordType,
-        origins: &HashMap<String, Name>,
+        origins: &HashMap<Name, Name>,
         context: &'a WalkContext<'a>,
     ) -> Security {
         match message.metadata.response_code {
@@ -289,7 +314,7 @@ impl IteratorResolver {
     async fn validate_positive(
         &self,
         message: &Message,
-        origins: &HashMap<String, Name>,
+        origins: &HashMap<Name, Name>,
         context: WalkContext<'_>,
     ) -> Security {
         let now = unix_now();
@@ -299,16 +324,13 @@ impl IteratorResolver {
         };
         let mut result = Security::Secure;
         let mut validated = false;
-        let mut seen: HashSet<(String, u16)> = HashSet::new();
+        let mut seen: HashSet<(&Name, u16)> = HashSet::new();
 
         for record in &message.answers {
             if record.record_type() == RecordType::RRSIG {
                 continue;
             }
-            let key = (
-                record.name.to_ascii().to_ascii_lowercase(),
-                u16::from(record.record_type()),
-            );
+            let key = (&record.name, u16::from(record.record_type()));
             if !seen.insert(key) {
                 continue;
             }
@@ -358,7 +380,7 @@ impl IteratorResolver {
             return Security::Insecure;
         }
         if signatures.is_empty() {
-            let zone = match answer.origins.get(&origin_key(owner)) {
+            let zone = match answer.origins.get(owner) {
                 // The walk recorded the zone that owns this name. Start the
                 // chain of trust there instead of probing DS at an alias.
                 Some(origin) => {
@@ -583,8 +605,8 @@ impl IteratorResolver {
             if !matches!(security, Security::Bogus(_))
                 && let Ok(mut cache) = self.zones.lock()
             {
-                cache.insert_signed(&original, security.clone(), Duration::from_secs(300));
-                cache.insert_signed(&name, security.clone(), Duration::from_secs(300));
+                cache.insert_signed(&original, security.clone(), ZONE_STATUS_TTL);
+                cache.insert_signed(&name, security.clone(), ZONE_STATUS_TTL);
             }
             return security;
         }
@@ -597,7 +619,7 @@ impl IteratorResolver {
         depth: u32,
     ) -> Pin<Box<dyn Future<Output = ZoneStatus> + Send + 'a>> {
         Box::pin(async move {
-            if depth > 24 {
+            if depth > MAX_CHAIN_DEPTH {
                 return ZoneStatus::bogus(BogusReason::Malformed);
             }
             if self.is_domain_insecure(&zone) {
@@ -777,14 +799,14 @@ impl IteratorResolver {
 
     fn cache_zone(&self, zone: &Name, status: &ZoneStatus) {
         let ttl = if status.keys.is_empty() {
-            Duration::from_secs(300)
+            ZONE_STATUS_TTL
         } else {
             let seconds = status
                 .keys
                 .iter()
                 .map(|record| record.ttl)
                 .min()
-                .unwrap_or(300);
+                .unwrap_or(ZONE_STATUS_TTL_SECS);
             Duration::from_secs(u64::from(seconds))
         };
         if let Ok(mut cache) = self.zones.lock() {
@@ -876,7 +898,7 @@ fn verify_denial_signatures(
 ) -> Result<(), DnssecError> {
     let mut seen = HashSet::new();
     for (record, _) in nsecs {
-        if !seen.insert(record.name.to_ascii().to_ascii_lowercase()) {
+        if !seen.insert(&record.name) {
             continue;
         }
         let rrset: Vec<Record> = nsecs
@@ -893,7 +915,7 @@ fn verify_denial_signatures(
 
     let mut seen = HashSet::new();
     for (record, _) in nsec3s {
-        if !seen.insert(record.name.to_ascii().to_ascii_lowercase()) {
+        if !seen.insert(&record.name) {
             continue;
         }
         let rrset: Vec<Record> = nsec3s
@@ -1162,10 +1184,6 @@ fn negative_zone(message: &Message) -> Option<Name> {
         })
 }
 
-fn origin_key(name: &Name) -> String {
-    name.to_ascii().to_ascii_lowercase()
-}
-
 fn records_of(records: &[Record], owner: &Name, rtype: RecordType) -> Vec<Record> {
     records
         .iter()
@@ -1272,12 +1290,10 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use dns_dnssec::{TrustAnchor, TrustStore};
     use dns_proto::{Algorithm, DNSKEY, DNSSECRData, Name, PublicKeyBuf, RData, Record};
 
-    use super::{IteratorResolver, ZoneStatus, common_suffix, next_closer};
+    use super::{IteratorResolver, ZONE_STATUS_TTL, ZoneStatus, common_suffix, next_closer};
     use crate::IteratorConfig;
 
     fn n(text: &str) -> Name {
@@ -1305,11 +1321,11 @@ mod tests {
     }
 
     fn cache_status(resolver: &IteratorResolver, zone: &str, status: ZoneStatus) {
-        resolver.zones.lock().expect("zone cache").insert(
-            &n(zone),
-            status,
-            Duration::from_secs(300),
-        );
+        resolver
+            .zones
+            .lock()
+            .expect("zone cache")
+            .insert(&n(zone), status, ZONE_STATUS_TTL);
     }
 
     #[test]

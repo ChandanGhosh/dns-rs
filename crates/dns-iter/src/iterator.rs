@@ -327,7 +327,7 @@ pub(crate) struct WalkContext<'a> {
 /// not known and validation has to fall back to a DS probe.
 pub(crate) struct WalkAnswer {
     pub(crate) message: Message,
-    pub(crate) origins: HashMap<String, Name>,
+    pub(crate) origins: HashMap<Name, Name>,
 }
 
 impl WalkAnswer {
@@ -344,17 +344,13 @@ impl WalkAnswer {
     }
 }
 
-fn note_origins(origins: &mut HashMap<String, Name>, records: &[Record], zone: Option<&Name>) {
+fn note_origins(origins: &mut HashMap<Name, Name>, records: &[Record], zone: Option<&Name>) {
     let Some(zone) = zone else {
         return;
     };
     for record in records {
-        origins.insert(origin_key(&record.name), zone.clone());
+        origins.insert(record.name.clone(), zone.clone());
     }
-}
-
-fn origin_key(name: &Name) -> String {
-    name.to_ascii().to_ascii_lowercase()
 }
 
 impl IteratorResolver {
@@ -889,7 +885,7 @@ impl IteratorResolver {
         }
 
         let mut chain: Vec<Record> = Vec::new();
-        let mut origins: HashMap<String, Name> = HashMap::new();
+        let mut origins: HashMap<Name, Name> = HashMap::new();
         let mut current = qname.clone();
         let mut seen = HashSet::new();
 
@@ -973,7 +969,7 @@ impl IteratorResolver {
         qtype: RecordType,
         target: Name,
         mut chain: Vec<Record>,
-        mut origins: HashMap<String, Name>,
+        mut origins: HashMap<Name, Name>,
         context: WalkContext<'_>,
     ) -> Result<WalkAnswer, ResolveError> {
         let sub_context = WalkContext {

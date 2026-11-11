@@ -13,7 +13,6 @@ dns-config.workspace = true
 dns-dnssec.workspace = true
 dns-iter.workspace = true
 dns-proto.workspace = true
-dns-testutil.workspace = true
 dashmap.workspace = true
 data-encoding.workspace = true
 http-body-util.workspace = true
@@ -42,6 +41,7 @@ phase-stats = []
 libc.workspace = true
 
 [dev-dependencies]
+dns-testutil.workspace = true
 rcgen = "0.13"
 ring.workspace = true
 tokio = { workspace = true, features = ["test-util", "time"] }

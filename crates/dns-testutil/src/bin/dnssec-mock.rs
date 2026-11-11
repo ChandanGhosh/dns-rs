@@ -24,6 +24,11 @@ use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
 const DNSKEY_TTL: u32 = 3600;
+/// Validity window of every generated signature.
+///
+/// Sized for benchmark runs (minutes, not hours). A run that keeps the same
+/// mock process alive longer than this starts receiving SERVFAIL once the
+/// signatures expire, so restart the mock for long soaks.
 const SIGNATURE_LIFETIME: u32 = 3600;
 
 /// One encoded response plus the length of its question section.
@@ -126,7 +131,6 @@ impl Signer {
     fn template(&self, qname: &Name, qtype: RecordType, records: Vec<Record>) -> Template {
         let mut message = Message::new(0, MessageType::Response, OpCode::Query);
         message.metadata.authoritative = true;
-        message.metadata.recursion_available = true;
         message.add_query(Query::query(qname.clone(), qtype));
         message.add_answers(records);
         let wire = encode(&message).expect("encode mock response");

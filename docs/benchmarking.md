@@ -4,7 +4,8 @@ Single reference for every benchmarking switch, runner, and methodology rule.
 The performance numbers live in the [README](../README.md#performance); this
 document explains how to produce and compare numbers yourself.
 
-Last validated against `87a5860` (v0.1.9).
+Last validated against `77efd1e` (DNSSEC workload) and re-run on the `0.1.13`
+validation-path changes.
 
 ## Quick start
 
@@ -195,9 +196,15 @@ answer is cached: every measured query walks to the mock, validates the A
 RRSIG, and returns. The benchmark therefore combines the miss path with
 signature verification, while the zone's DNSKEY (and its validated status)
 is cached for the DNSKEY TTL, as in steady-state resolution. Every measured
-answer must come back with the AD bit set; the runner aborts if it does not,
-so a broken or missing trust anchor cannot silently turn the run into a plain
-miss benchmark.
+answer must come back with the AD bit set, and at least one answer must be
+measured; the runner aborts otherwise, so neither a broken or missing trust
+anchor nor a run that answered nothing can silently turn the benchmark into a
+plain miss run.
+
+The mock signs with a fixed inception/expiry window (`SIGNATURE_LIFETIME`,
+one hour). A benchmark run keeps the same mock process alive across all worker
+counts, so a single invocation longer than about an hour starts receiving
+SERVFAIL once the signatures expire. Restart the runner for longer soaks.
 
 Compare `dnssec` against `miss` to isolate validation overhead, not against
 `hit`: the hit path never reaches the mock or the validator. Use the same
@@ -323,7 +330,7 @@ threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
 | `sent` | Total queries sent by the load generator (warm-up plus measured) |
 | `p50_us` .. `p99_us`, `max_us` | Client-side send-to-response RTT percentiles, microseconds |
 | `errors` / `rcode` | Timed-out or malformed responses / non-zero response codes - any non-zero value makes the run suspect |
-| `ad` | Measured answers with the AD (authenticated data) bit set; the dnssec scenario fails the run unless this equals `samples` |
+| `ad` | Measured answers with the AD (authenticated data) bit set; the dnssec scenario fails the run unless at least one answer was measured and this equals `samples` |
 | `upstream` / `saved` | Miss and dnssec scenarios: mock queries observed during the load window, and `sent - upstream` - queries answered without reaching the mock (coalesced away) |
 | `allocs` / `allocs_per_query` | `BENCH_ALLOCS=1` only: allocation requests during the load window, and that count divided by `sent` |
 | `phase_queue_us` .. `phase_send_us` | `BENCH_PHASES=1` only: per-phase time during the load window, microseconds divided by `sent` (see "Phase attribution") |
@@ -340,6 +347,9 @@ errors.
 - There is no TCP/DoT, large-response, or mixed-workload scenario yet.
 - The DNSSEC scenario validates positive answers only; negative (NSEC/NSEC3
   denial) validation and first-time chain building are not measured.
+- The signed mock uses Ed25519, the cheapest common algorithm. RSA/SHA-256
+  validation is materially more expensive, so the scenario understates the
+  cost of zones that sign with RSA.
 - Only the hit-path scenario feeds the README performance table.
 
 ## Cleanup
