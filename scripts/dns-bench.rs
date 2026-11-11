@@ -127,6 +127,8 @@ struct ThreadResult {
     samples: Vec<u64>,
     errors: u64,
     rcode_errors: u64,
+    /// Measured responses that carried the AD bit (header byte 3, mask 0x20).
+    authenticated: u64,
     sent: u64,
 }
 
@@ -143,6 +145,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
     let mut samples = Vec::with_capacity(250_000);
     let mut errors = 0u64;
     let mut rcode_errors = 0u64;
+    let mut authenticated = 0u64;
     let mut sent = 0u64;
     let mut buf = [0u8; 2048];
 
@@ -181,6 +184,9 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
             continue;
         }
         if elapsed >= config.warmup {
+            if buf[3] & 0x20 != 0 {
+                authenticated += 1;
+            }
             samples.push(rtt);
         }
     }
@@ -188,6 +194,7 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
         samples,
         errors,
         rcode_errors,
+        authenticated,
         sent,
     }
 }
@@ -232,18 +239,20 @@ fn load(
     let mut samples = Vec::new();
     let mut errors = 0u64;
     let mut rcode_errors = 0u64;
+    let mut authenticated = 0u64;
     let mut sent = 0u64;
     for result in results {
         samples.extend(result.samples);
         errors += result.errors;
         rcode_errors += result.rcode_errors;
+        authenticated += result.authenticated;
         sent += result.sent;
     }
     samples.sort_unstable();
     let count = samples.len() as f64;
     let qps = count / elapsed;
     println!(
-        "RESULT concurrency={concurrency} samples={} qps={qps:.0} sent={sent} errors={errors} rcode={rcode_errors} p50_us={:.1} p75_us={:.1} p90_us={:.1} p95_us={:.1} p99_us={:.1} max_us={:.1}",
+        "RESULT concurrency={concurrency} samples={} qps={qps:.0} sent={sent} errors={errors} rcode={rcode_errors} ad={authenticated} p50_us={:.1} p75_us={:.1} p90_us={:.1} p95_us={:.1} p99_us={:.1} max_us={:.1}",
         samples.len(),
         percentile(&samples, 50.0) as f64 / 1000.0,
         percentile(&samples, 75.0) as f64 / 1000.0,

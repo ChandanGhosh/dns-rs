@@ -1,7 +1,8 @@
 //! Test helpers shared by workspace crates.
 //!
-//! Currently provides DNS message builders. Mock authoritative servers, a virtual
-//! clock, and the Unbound replay harness are not implemented yet.
+//! Provides DNS message builders. The `dnssec-mock` binary is a signed
+//! authoritative server used by the DNSSEC benchmark scenario; a virtual clock
+//! and the Unbound replay harness are not implemented yet.
 
 use dns_proto::{Message, MessageType, Name, OpCode, Query, RecordType, encode};
 

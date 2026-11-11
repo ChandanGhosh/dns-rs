@@ -5,6 +5,7 @@
 #
 #   make checkconf CONFIG=examples/full.toml
 #   make bench THREADS="1 2" BENCH_DURATION=30
+#   make bench-dnssec THREADS="1 2"
 #   make bench-compare BASE_REF=e4176ff THREADS="1 2 4"
 #   make image IMAGE=dns-rs:local
 #   make image-publish TAG=dev CONFIRM=1
@@ -55,7 +56,8 @@ DOCKER_BUILD_ARGS = \
 	clean clean-image \
 	fmt fmt-check clippy test test-doc test-all deny audit fuzz check ci \
 	coverage coverage-html \
-	bench bench-container bench-ci bench-compare bench-compare-quick \
+	bench bench-container bench-ci bench-miss bench-dnssec \
+	bench-compare bench-compare-quick bench-compare-miss bench-compare-dnssec \
 	image image-multiarch image-smoke image-size image-scan image-publish \
 	docker-run container-check ci-container ci-all \
 	compose-up compose-up-local compose-down compose-clean compose-logs compose-ps \
@@ -230,6 +232,12 @@ coverage-html: ## Write an HTML coverage report to target/llvm-cov/html
 bench: ## Run the loopback benchmark for THREADS (host binary)
 	scripts/bench-loopback.sh $(THREADS)
 
+bench-miss: ## Run the loopback benchmark on the cache-miss path
+	BENCH_SCENARIO=miss scripts/bench-loopback.sh $(THREADS)
+
+bench-dnssec: ## Run the loopback benchmark with DNSSEC validation
+	BENCH_SCENARIO=dnssec scripts/bench-loopback.sh $(THREADS)
+
 bench-container: image ## Build IMAGE and run the loopback benchmark against it
 	BENCH_SERVER_IMAGE="$(IMAGE)" scripts/bench-loopback.sh $(THREADS)
 
@@ -243,6 +251,12 @@ bench-compare: ## Interleaved A/B benchmark of BASE_REF vs. the working tree
 bench-compare-quick: ## Fast/noisy A/B sanity check (see docs/benchmarking.md)
 	AB_REPEATS=1 BENCH_WARMUP=2 BENCH_DURATION=5 \
 		scripts/bench-compare.sh $(BASE_REF) 1 2
+
+bench-compare-miss: ## Interleaved A/B benchmark of the cache-miss path
+	BENCH_SCENARIO=miss scripts/bench-compare.sh $(BASE_REF) $(THREADS)
+
+bench-compare-dnssec: ## Interleaved A/B benchmark of the DNSSEC path
+	BENCH_SCENARIO=dnssec scripts/bench-compare.sh $(BASE_REF) $(THREADS)
 
 ##@ Container
 

@@ -8,6 +8,10 @@ license.workspace = true
 
 [dependencies]
 dns-proto.workspace = true
+ring.workspace = true
+
+[dev-dependencies]
+dns-dnssec.workspace = true
 
 [lints]
 workspace = true

@@ -435,7 +435,9 @@ dependencies = [
 name = "dns-testutil"
 version = "0.1.12"
 dependencies = [
+ "dns-dnssec",
  "dns-proto",
+ "ring",
 ]
 
 [[package]]

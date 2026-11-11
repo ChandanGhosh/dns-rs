@@ -17,8 +17,13 @@ make bench
 make bench-compare
 make bench-compare BASE_REF=e4176ff THREADS="1 2 4"
 
-# Cache-miss A/B at high concurrency (see "Cache misses" below).
-make bench-compare THREADS="1 2 4" AB_REPEATS=3 BENCH_SCENARIO=miss
+# Cache-miss and DNSSEC-validation runs (see the sections below).
+make bench-miss THREADS="1 2 4"
+make bench-dnssec THREADS="1 2 4"
+
+# Interleaved A/B for those workloads.
+make bench-compare-miss THREADS="1 2 4" AB_REPEATS=3
+make bench-compare-dnssec THREADS="1 2 4" AB_REPEATS=3
 
 # Allocation A/B: both variants build with the counting allocator.
 make bench-compare BENCH_ALLOCS=1
@@ -48,7 +53,13 @@ selects the workload: `hit` (default) fixes the name set and 3600 s TTLs so
 every measured query is a message-cache hit as long as `BENCH_NAMES` fits in
 the 8,192-entry cache; `miss` answers with TTL 0 so nothing is cached and
 every query is a genuine miss, reporting how many reached the mock upstream
-and how many were coalesced away.
+and how many were coalesced away; `dnssec` runs the same TTL-0 miss path
+against a signed mock, adding one Ed25519 RRSIG verification per query.
+
+The signed mock is `crates/dns-testutil/src/bin/dnssec-mock.rs`, a cargo
+binary because it needs `dns-proto` and `ring` to generate a key and sign
+answers. It writes its own DNSKEY trust anchor to a temporary file, which the
+runner embeds in the resolver config.
 
 ### `scripts/bench-compare.sh` - interleaved A/B against a git ref
 
@@ -75,8 +86,18 @@ rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
 the miss scenario). `load` arguments are address, distinct names, zone,
 concurrency, warm-up seconds, and measured seconds. The mock prints
 `stats upstream_queries=N` every 250 ms, which the runner uses to bracket
-the load window in miss mode. The resolver needs a `bench.test.` stub zone
-pointing at the mock (both runners write this config for you).
+the load window in miss and dnssec mode. The resolver needs a `bench.test.`
+stub zone pointing at the mock (both runners write this config for you).
+
+To run the signed DNSSEC mock by hand, build it once and pass it the same
+address, zone, TTL, distinct-name count, and a path for the generated trust
+anchor:
+
+```bash
+cargo build --release -p dns-testutil --bin dnssec-mock
+target/release/dnssec-mock serve 127.0.0.1:15354 bench.test. 0 4000 /tmp/bench-anchor.txt &
+cat /tmp/bench-anchor.txt   # DNSKEY record to use as trust_anchor
+```
 
 ## Environment reference
 
@@ -84,7 +105,7 @@ pointing at the mock (both runners write this config for you).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `BENCH_SCENARIO` | `hit` | `hit` fixes TTLs at 3600 s so every query is a cache hit; `miss` uses a TTL-0 mock so every query is a genuine miss and the RESULT line gains `upstream=`/`saved=` |
+| `BENCH_SCENARIO` | `hit` | `hit` fixes TTLs at 3600 s so every query is a cache hit; `miss` uses a TTL-0 unsigned mock so every query is a genuine miss; `dnssec` uses a signed TTL-0 mock so every query also verifies an Ed25519 RRSIG. Both miss-style scenarios add `upstream=`/`saved=` to RESULT |
 | `BENCH_NAMES` | 4000 | Distinct query names. For `hit`, keep at or below 8192 so the working set fits the message cache (above it the run thrashes the cache); for `miss` it controls coalescing - 1 maximizes it, a large value with low concurrency nearly eliminates it |
 | `BENCH_CONCURRENCY` | 8 | Queries in flight |
 | `BENCH_WARMUP` | 5 | Warm-up seconds before measuring |
@@ -131,7 +152,10 @@ Fits 4,000 names in the 8,192-entry message cache; every query is a hit.
 
 ```bash
 # Honest misses: every query goes upstream through a TTL-0 mock.
-make bench-compare THREADS="1 2 4" AB_REPEATS=3 BENCH_SCENARIO=miss
+make bench-compare-miss THREADS="1 2 4" AB_REPEATS=3
+
+# Per-run form.
+make bench-miss THREADS="1 2 4"
 
 # Maximal single-flight coalescing: all in-flight queries share one name.
 BENCH_SCENARIO=miss BENCH_NAMES=1 scripts/bench-loopback.sh
@@ -152,6 +176,33 @@ The older `BENCH_NAMES=20000` cache-thrash proxy still works in hit mode
 (the runner warns that it exceeds the 8192-entry cache), but prefer the miss
 scenario: it measures the upstream path with a controlled upstream instead
 of evicting the cache.
+
+### DNSSEC validation
+
+```bash
+# Per-query signed validation, 4000 names, 8 in flight.
+make bench-dnssec THREADS="1 2 4"
+
+# Interleaved A/B of the validation path itself.
+make bench-compare-dnssec THREADS="1 2 4" AB_REPEATS=3
+```
+
+`BENCH_SCENARIO=dnssec` starts a signed authoritative mock instead of the
+unsigned one. On startup the mock generates an Ed25519 key, writes its
+DNSKEY record to a temporary file, and the runner configures that record as
+the `bench.test.` trust anchor. A answers are signed and carry TTL 0, so no
+answer is cached: every measured query walks to the mock, validates the A
+RRSIG, and returns. The benchmark therefore combines the miss path with
+signature verification, while the zone's DNSKEY (and its validated status)
+is cached for the DNSKEY TTL, as in steady-state resolution. Every measured
+answer must come back with the AD bit set; the runner aborts if it does not,
+so a broken or missing trust anchor cannot silently turn the run into a plain
+miss benchmark.
+
+Compare `dnssec` against `miss` to isolate validation overhead, not against
+`hit`: the hit path never reaches the mock or the validator. Use the same
+`BENCH_NAMES` and concurrency for both sides; expect the signed run to be
+substantially slower because every query pays for an RRSIG verification.
 
 ### Allocation counts
 
@@ -253,8 +304,9 @@ container image.
   same worker counts on both sides; change one thing at a time. Keep benchmark
   runs independent - if a run depends on a feature (for example caching),
   disable the feature on both sides.
-- **Kill stale processes between manual runs** with `pkill -9 dns-rs` and
-  `pkill -9 dns-bench` (exact names only; never `pkill -f`).
+- **Kill stale processes between manual runs** with `pkill -9 dns-rs`,
+  `pkill -9 dns-bench`, and `pkill -9 dnssec-mock` (exact names only; never
+  `pkill -f`).
 
 ## Reading the output
 
@@ -262,7 +314,7 @@ Per-run line printed by the runner:
 
 ```
 threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
-    samples=1460502 qps=97367 errors=0 rcode=0 p50_us=40.4 ... max_us=1486.6
+    samples=1460502 qps=97367 errors=0 rcode=0 ad=0 p50_us=40.4 ... max_us=1486.6
 ```
 
 | Field | Meaning |
@@ -271,7 +323,8 @@ threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
 | `sent` | Total queries sent by the load generator (warm-up plus measured) |
 | `p50_us` .. `p99_us`, `max_us` | Client-side send-to-response RTT percentiles, microseconds |
 | `errors` / `rcode` | Timed-out or malformed responses / non-zero response codes - any non-zero value makes the run suspect |
-| `upstream` / `saved` | Miss scenario only: mock queries observed during the load window, and `sent - upstream` - queries answered without reaching the mock (coalesced away) |
+| `ad` | Measured answers with the AD (authenticated data) bit set; the dnssec scenario fails the run unless this equals `samples` |
+| `upstream` / `saved` | Miss and dnssec scenarios: mock queries observed during the load window, and `sent - upstream` - queries answered without reaching the mock (coalesced away) |
 | `allocs` / `allocs_per_query` | `BENCH_ALLOCS=1` only: allocation requests during the load window, and that count divided by `sent` |
 | `phase_queue_us` .. `phase_send_us` | `BENCH_PHASES=1` only: per-phase time during the load window, microseconds divided by `sent` (see "Phase attribution") |
 | `idle_rss_kib` / `peak_rss_kib` | Resolver `VmRSS` at idle and `VmHWM` after the run |
@@ -284,8 +337,9 @@ errors.
 
 ## Known limitations
 
-- There is no TCP/DoT, DNSSEC-validation, large-response, or mixed-workload
-  scenario yet.
+- There is no TCP/DoT, large-response, or mixed-workload scenario yet.
+- The DNSSEC scenario validates positive answers only; negative (NSEC/NSEC3
+  denial) validation and first-time chain building are not measured.
 - Only the hit-path scenario feeds the README performance table.
 
 ## Cleanup

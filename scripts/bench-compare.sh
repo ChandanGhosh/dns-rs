@@ -33,6 +33,9 @@
 #
 # Example (honest cache-miss A/B, TTL-0 upstream):
 #   AB_REPEATS=3 BENCH_SCENARIO=miss scripts/bench-compare.sh origin/main 1 2 4
+#
+# Example (DNSSEC-validation A/B, signed TTL-0 upstream):
+#   AB_REPEATS=3 BENCH_SCENARIO=dnssec scripts/bench-compare.sh origin/main 1 2 4
 
 set -euo pipefail
 
@@ -83,6 +86,7 @@ echo "B = working tree (HEAD $(git rev-parse --short HEAD), $(git status --porce
 # Stale bench processes would hold the ports or steal CPU from the run.
 pkill -9 dns-rs 2>/dev/null || true
 pkill -9 dns-bench 2>/dev/null || true
+pkill -9 dnssec-mock 2>/dev/null || true
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/dns-rs-ab.XXXXXX")"
 cleanup() {

@@ -1,16 +1,20 @@
 #!/bin/bash
-# Loopback benchmark for the cache-hit and cache-miss paths. Builds the
-# release binary and a standalone load generator, then reports latency
-# percentiles, throughput, and RSS for 1, 2, and 4 worker threads.
+# Loopback benchmark for the cache-hit, cache-miss, and DNSSEC-validation
+# paths. Builds the release binary and a standalone load generator, then
+# reports latency percentiles, throughput, and RSS for 1, 2, and 4 worker
+# threads.
 #
 # Usage: scripts/bench-loopback.sh [THREADS...]
 #   THREADS defaults to "1 2 4".
 #
 # Environment overrides:
-#   BENCH_SCENARIO      hit (default) or miss. hit uses a 3600 s mock TTL so
-#                      every measured query is a cache hit; miss uses a TTL-0
-#                      mock so nothing is cached and every query is a genuine
-#                      miss, with upstream/saved reported (see below)
+#   BENCH_SCENARIO      hit (default), miss, or dnssec. hit uses a 3600 s mock
+#                      TTL so every measured query is a cache hit; miss uses a
+#                      TTL-0 mock so nothing is cached and every query is a
+#                      genuine miss, with upstream/saved reported (see below);
+#                      dnssec runs a signed TTL-0 mock authority, so every
+#                      measured query walks to the mock and verifies an Ed25519
+#                      RRSIG instead of being served from the message cache
 #   BENCH_NAMES        unique cache entries (default 4000; the message cache
 #                      holds 8192 entries, so keep this below that limit —
 #                      above it the run thrashes the cache and measures
@@ -52,6 +56,19 @@
 # Names repeat across the name set, so BENCH_NAMES=1 maximizes coalescing
 # (saved close to sent) while a large BENCH_NAMES with a small concurrency
 # coalesces almost nothing (saved near 0).
+#
+# In dnssec mode the same TTL-0 miss path runs against a signed authority: the
+# mock generates an Ed25519 key, writes its DNSKEY record to a trust-anchor
+# file, and serves signed A and DNSKEY answers. The result therefore includes
+# iterative resolution plus one Ed25519 RRSIG verification per query, and the
+# RESULT line reports upstream/saved just like miss mode. It also gains
+#   ad=N        measured answers that carried the AD bit
+# and the runner fails the run unless ad equals samples, so a broken trust
+# anchor cannot silently degrade the benchmark into a plain miss run. The zone
+# key itself is cached by the validator for the DNSKEY TTL, so long runs
+# measure steady-state signature verification rather than a fresh chain build
+# per query. The resolver's DNSSEC validation flag must stay at its default
+# (on).
 #
 # With BENCH_ALLOCS=1 the resolver runs a counting allocator (mimalloc
 # underneath) that prints `stats allocs=N` every 250 ms; the runner brackets
@@ -174,11 +191,24 @@ case "$scenario" in
         mock_ttl=0
         cache_mode="miss"
         ;;
+    dnssec)
+        # Signed answers at TTL 0 are revalidated on every query. The signed
+        # mock is a cargo binary because it needs dns-proto and ring.
+        mock_ttl=0
+        cache_mode="dnssec"
+        ;;
     *)
-        echo "BENCH_SCENARIO must be 'hit' or 'miss' (got: $scenario)" >&2
+        echo "BENCH_SCENARIO must be 'hit', 'miss', or 'dnssec' (got: $scenario)" >&2
         exit 1
         ;;
 esac
+
+# DNSSEC and miss runs both report how many queries reached the mock and how
+# many were coalesced away.
+measure_upstream=0
+if [ "$scenario" = "miss" ] || [ "$scenario" = "dnssec" ]; then
+    measure_upstream=1
+fi
 
 if [ -n "$server_image" ]; then
     if ! command -v docker >/dev/null 2>&1; then
@@ -196,6 +226,19 @@ fi
 if [ -z "$server_image" ] && [ ! -x "$binary" ]; then
     echo "resolver binary not found or not executable: $binary" >&2
     exit 1
+fi
+
+# The signed mock is a cargo binary (dns-proto + ring); the unsigned mock is a
+# standalone rustc program built into the temporary directory below.
+mock_binary=target/release/dnssec-mock
+if [ "$scenario" = "dnssec" ]; then
+    if [ "${SKIP_BUILD:-0}" != "1" ]; then
+        cargo build --release -p dns-testutil --bin dnssec-mock
+    fi
+    if [ ! -x "$mock_binary" ]; then
+        echo "mock binary not found or not executable: $mock_binary" >&2
+        exit 1
+    fi
 fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/dns-rs-bench.XXXXXX")"
@@ -238,13 +281,33 @@ if [ -n "$client_cpus" ]; then
     pin_client=(taskset -c "$client_cpus")
 fi
 
-"$tmp/dns-bench" serve "127.0.0.1:$mock_port" "$mock_ttl" >"$tmp/mock.log" 2>&1 &
+if [ "$scenario" = "dnssec" ]; then
+    "$mock_binary" serve "127.0.0.1:$mock_port" "$zone." "$mock_ttl" "$names" \
+        "$tmp/anchor.txt" >"$tmp/mock.log" 2>&1 &
+else
+    "$tmp/dns-bench" serve "127.0.0.1:$mock_port" "$mock_ttl" >"$tmp/mock.log" 2>&1 &
+fi
 mock_pid=$!
 sleep 0.3
 if ! kill -0 "$mock_pid" 2>/dev/null; then
     echo "mock authority failed to bind 127.0.0.1:$mock_port" >&2
     cat "$tmp/mock.log" >&2
     exit 1
+fi
+anchor=""
+if [ "$scenario" = "dnssec" ]; then
+    for _ in $(seq 1 50); do
+        if [ -s "$tmp/anchor.txt" ]; then
+            anchor="$(cat "$tmp/anchor.txt")"
+            break
+        fi
+        sleep 0.1
+    done
+    if [ -z "$anchor" ]; then
+        echo "signed mock did not write a trust anchor" >&2
+        cat "$tmp/mock.log" >&2
+        exit 1
+    fi
 fi
 
 printf 'scenario=%s names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
@@ -253,6 +316,11 @@ printf 'scenario=%s names=%s cache=%s concurrency=%s warmup=%ss duration=%ss ser
 
 for workers in "${threads[@]}"; do
     config="$tmp/bench-$workers.toml"
+    dnssec_config=""
+    if [ "$scenario" = "dnssec" ]; then
+        dnssec_config="dnssec_validation = true
+trust_anchor = [\"$anchor\"]"
+    fi
     cat >"$config" <<EOF
 [server]
 interfaces = ["127.0.0.1"]
@@ -264,6 +332,7 @@ do_ip6 = false
 do_udp = true
 do_tcp = false
 incoming_num_tcp = 0
+$dnssec_config
 
 [[stub_zones]]
 name = "$zone."
@@ -319,11 +388,11 @@ EOF
     fi
 
     idle_kib="$(awk '/^VmRSS:/ {print $2}' "/proc/$server_pid/status")"
-    # In miss mode the mock's cumulative query counter brackets the load
-    # window: the snapshot after the healthcheck excludes readiness queries,
-    # and the delta over the run measures how many queries actually went
-    # upstream versus being coalesced or answered from cache.
-    if [ "$scenario" = "miss" ]; then
+    # In miss and dnssec runs the mock's cumulative query counter brackets the
+    # load window: the snapshot after the healthcheck excludes readiness
+    # queries, and the delta over the run measures how many queries actually
+    # went upstream versus being coalesced or answered from cache.
+    if [ "$measure_upstream" = "1" ]; then
         up0="$(poll_stats "$tmp/mock.log" 's/^stats upstream_queries=//p')"
         up0="${up0:-0}"
     fi
@@ -351,14 +420,25 @@ EOF
     fi
     result="$("${pin_client[@]}" "$tmp/dns-bench" load "127.0.0.1:$port" "$names" \
         "$zone" "$concurrency" "$warmup" "$duration")"
-    if [ "$scenario" = "miss" ] || [ "${BENCH_ALLOCS:-0}" = "1" ] \
+    if [ "$scenario" = "dnssec" ]; then
+        # Every measured DNSSEC answer must be authenticated, otherwise the run
+        # is measuring the plain miss path with a broken or missing anchor.
+        ad="$(printf '%s\n' "$result" | sed -n 's/.* ad=\([0-9]*\).*/\1/p')"
+        measured="$(printf '%s\n' "$result" | sed -n 's/.* samples=\([0-9]*\).*/\1/p')"
+        if [ -z "$ad" ] || [ "$ad" != "$measured" ]; then
+            echo "dnssec scenario expected every measured answer to carry AD" \
+                "(ad=$ad samples=$measured); check the trust anchor" >&2
+            exit 1
+        fi
+    fi
+    if [ "$measure_upstream" = "1" ] || [ "${BENCH_ALLOCS:-0}" = "1" ] \
         || [ "${BENCH_PHASES:-0}" = "1" ]; then
         # The mock and the resolver's reporters all print every 250 ms; wait
         # for the post-load reading before snapshotting.
         sleep 1
         sent="$(printf '%s\n' "$result" | sed -n 's/.* sent=\([0-9]*\).*/\1/p')"
     fi
-    if [ "$scenario" = "miss" ]; then
+    if [ "$measure_upstream" = "1" ]; then
         up1="$(sed -n 's/^stats upstream_queries=//p' "$tmp/mock.log" | tail -1)"
         upstream=$((up1 - up0))
         saved=$((sent - upstream))
