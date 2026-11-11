@@ -49,7 +49,9 @@ fn schedule_backoff(entry: &mut InfraEntry) {
 
 #[derive(Clone)]
 pub struct InfraCache {
-    cache: Cache<String, InfraEntry>,
+    // `SocketAddr` is `Hash + Eq`, so keying by it directly avoids the
+    // per-lookup `String` allocation that formatting the address caused.
+    cache: Cache<SocketAddr, InfraEntry>,
 }
 
 impl InfraCache {
@@ -62,21 +64,17 @@ impl InfraCache {
         }
     }
 
-    fn key(addr: &SocketAddr) -> String {
-        addr.to_string()
-    }
-
     pub fn get(&self, addr: &SocketAddr) -> Option<InfraEntry> {
-        self.cache.get(&Self::key(addr))
+        self.cache.get(addr)
     }
 
     fn entry(&self, addr: &SocketAddr) -> InfraEntry {
-        self.cache.get(&Self::key(addr)).unwrap_or_default()
+        self.cache.get(addr).unwrap_or_default()
     }
 
     fn store(&self, addr: &SocketAddr, mut entry: InfraEntry) {
         entry.last_update = Instant::now();
-        self.cache.insert(Self::key(addr), entry);
+        self.cache.insert(*addr, entry);
     }
 
     pub fn update_rtt(&self, addr: &SocketAddr, rtt: Duration) {

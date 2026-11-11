@@ -94,7 +94,7 @@ pub fn nsec3_proves_nodata(nsec3: &NSEC3, qtype: RecordType) -> bool {
 
 /// Build the wildcard name for a closest encloser.
 pub fn wildcard_name(closest_encloser: &Name) -> Option<Name> {
-    Name::from_ascii(format!("*.{}", closest_encloser.to_ascii())).ok()
+    closest_encloser.prepend_label("*").ok()
 }
 
 /// Whether an NSEC3 record's hash algorithm is one we implement.

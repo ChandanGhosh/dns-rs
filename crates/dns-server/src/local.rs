@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::LazyLock;
 
 use dns_config::{AuthZoneConfig, Config, LocalZoneConfig, LocalZoneType};
 use dns_proto::{
@@ -460,30 +461,44 @@ fn base_response(query: &Query) -> Message {
     message
 }
 
+/// Built-in names, parsed once so the per-query path compares [`Name`] values
+/// instead of formatting the QNAME into a lowercased `String`.
+struct BuiltinNames {
+    localhost: Name,
+    server_id: Name,
+    hostname: Name,
+}
+
+static BUILTIN_NAMES: LazyLock<BuiltinNames> = LazyLock::new(|| BuiltinNames {
+    localhost: Name::from_ascii("localhost.").expect("built-in name is valid"),
+    server_id: Name::from_ascii("id.server.").expect("built-in name is valid"),
+    hostname: Name::from_ascii("hostname.bind.").expect("built-in name is valid"),
+});
+
 /// Generate a local static response for known built-in names.
 pub fn maybe_respond(query: &Query) -> Option<Message> {
-    let name = query.name.to_string().to_lowercase();
-    match name.as_str() {
-        "localhost." => {
-            let mut message = base_response(query);
-            if matches!(query.query_type, RecordType::A | RecordType::ANY) {
-                message.add_answer(Record::from_rdata(
-                    query.name.clone(),
-                    60,
-                    RData::A(Ipv4Addr::LOCALHOST.into()),
-                ));
-            }
-            if matches!(query.query_type, RecordType::AAAA | RecordType::ANY) {
-                message.add_answer(Record::from_rdata(
-                    query.name.clone(),
-                    60,
-                    RData::AAAA(Ipv6Addr::LOCALHOST.into()),
-                ));
-            }
-            Some(message)
+    let names = &*BUILTIN_NAMES;
+    if query.name == names.localhost {
+        let mut message = base_response(query);
+        if matches!(query.query_type, RecordType::A | RecordType::ANY) {
+            message.add_answer(Record::from_rdata(
+                query.name.clone(),
+                60,
+                RData::A(Ipv4Addr::LOCALHOST.into()),
+            ));
         }
-        "id.server." | "hostname.bind." => Some(base_response(query)),
-        _ => None,
+        if matches!(query.query_type, RecordType::AAAA | RecordType::ANY) {
+            message.add_answer(Record::from_rdata(
+                query.name.clone(),
+                60,
+                RData::AAAA(Ipv6Addr::LOCALHOST.into()),
+            ));
+        }
+        Some(message)
+    } else if query.name == names.server_id || query.name == names.hostname {
+        Some(base_response(query))
+    } else {
+        None
     }
 }
 
@@ -680,6 +695,30 @@ mod tests {
             panic!("global must answer");
         };
         assert_eq!(message.answers[0].data.to_string(), "192.0.2.1");
+    }
+
+    #[test]
+    fn builtin_names_match_case_insensitively() {
+        let a = maybe_respond(&query("LoCaLhOsT.", RecordType::A)).expect("localhost answer");
+        assert_eq!(a.answers.len(), 1);
+        assert_eq!(a.answers[0].data.to_string(), "127.0.0.1");
+
+        let any = maybe_respond(&query("localhost.", RecordType::ANY)).expect("any answer");
+        assert_eq!(any.answers.len(), 2);
+    }
+
+    #[test]
+    fn builtin_server_id_answers_without_records() {
+        let message =
+            maybe_respond(&query("HOSTNAME.BIND.", RecordType::TXT)).expect("server id answer");
+        assert!(message.answers.is_empty());
+    }
+
+    #[test]
+    fn builtin_names_require_a_qualified_name() {
+        let bare = Query::query(Name::from_ascii("localhost").expect("name"), RecordType::A);
+        assert!(maybe_respond(&bare).is_none());
+        assert!(maybe_respond(&query("example.test.", RecordType::A)).is_none());
     }
 
     #[test]

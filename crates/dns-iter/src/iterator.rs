@@ -2105,28 +2105,25 @@ fn group_rrsets(records: &[Record]) -> Vec<(Name, RecordType, Vec<Record>, u32)>
 
 /// Randomise letter case in every label (DNS 0x20).
 fn randomize_case(name: &Name) -> Name {
-    let ascii = name.to_ascii();
+    // `Name::to_ascii` escapes non-ASCII bytes, so the buffer is ASCII and
+    // can be case-flipped in place instead of being rebuilt character by
+    // character into a second `String`.
+    let mut mixed = name.to_ascii().into_bytes();
     let mut rng = rand::rng();
-    let mut mixed = String::with_capacity(ascii.len());
     let mut has_upper = false;
-    for character in ascii.chars() {
-        if character.is_ascii_alphabetic() && rng.random_bool(0.5) {
+    for byte in &mut mixed {
+        if byte.is_ascii_alphabetic() && rng.random_bool(0.5) {
+            *byte = byte.to_ascii_uppercase();
             has_upper = true;
-            mixed.push(character.to_ascii_uppercase());
-        } else {
-            mixed.push(character);
         }
     }
     if !has_upper {
         // Guarantee at least one flipped bit so the response check is useful.
-        if let Some(index) = mixed
-            .char_indices()
-            .find(|(_, character)| character.is_ascii_alphabetic())
-            .map(|(index, _)| index)
-        {
-            mixed.replace_range(index..=index, &mixed[index..=index].to_ascii_uppercase());
+        if let Some(byte) = mixed.iter_mut().find(|byte| byte.is_ascii_alphabetic()) {
+            *byte = byte.to_ascii_uppercase();
         }
     }
+    let mixed = String::from_utf8(mixed).expect("Name::to_ascii produces ASCII");
     Name::from_ascii(&mixed).unwrap_or_else(|_| name.clone())
 }
 
