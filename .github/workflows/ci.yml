@@ -204,12 +204,13 @@ jobs:
                   # tags have a separate tag object, so the peeled `^{}` line is
                   # the commit.
                   tags_out="$(git ls-remote --tags origin)"
-                  latest_version="$(printf '%s\n' "$tags_out" | awk '
+                  versions="$(printf '%s\n' "$tags_out" | awk '
                       $2 ~ /^refs\/tags\/v/ && $2 !~ /\^\{\}$/ {
                           v = $2
                           sub(/^refs\/tags\/v/, "", v)
-                          print v
-                      }' | sort -V | tail -1)"
+                          if (v != "") print v
+                      }' | sort -V)"
+                  latest_version="$(printf '%s\n' "$versions" | tail -1)"
                   tag_sha="$(printf '%s\n' "$tags_out" | awk -v t="refs/tags/v$version" '
                       $2 == t "^{}" { print $1; done = 1; exit }
                       $2 == t { base = $1 }
@@ -242,10 +243,15 @@ jobs:
                   } >> "$GITHUB_OUTPUT"
 
                   # The release notes list the commits between the previous
-                  # release tag and the one being cut. Only exported when a
-                  # release with a strictly newer version is about to be cut.
-                  if [ "$release" = true ] && [ -n "$latest_version" ] && [ "$latest_version" != "$version" ]; then
-                      echo "prev_tag=v$latest_version" >> "$GITHUB_OUTPUT"
+                  # release tag and the one being cut. Derive that tag as the
+                  # highest version strictly below this one rather than
+                  # assuming the current tag is absent, so a manually pushed
+                  # tag cannot suppress the changelog.
+                  prev_version="$(printf '%s\n%s\n' "$versions" "$version" | sort -V | awk -v cur="$version" '
+                      $0 == cur { if (have) print prev; exit }
+                      { prev = $0; have = 1 }')"
+                  if [ "$release" = true ] && [ -n "$prev_version" ]; then
+                      echo "prev_tag=v$prev_version" >> "$GITHUB_OUTPUT"
                   fi
             - uses: docker/setup-buildx-action@v4
               if: steps.latest.outputs.skip != 'true'
