@@ -38,6 +38,24 @@ features that write state (for example the RFC 5011
 `auto-trust-anchor-file`), mount a volume at `/var/lib/dns-rs`. If a feature
 needs a scratch directory, mount a small tmpfs at `/tmp`.
 
+The optional control socket also needs a writable directory. Mount a tmpfs and
+point `control-interface` at it, for example
+`--tmpfs /run:rw,noexec,nosuid,size=16m` with
+`control-interface: /run/dns-rs.sock`. The socket is mode `0600` and is owned
+by the container user (`65532`), so use `docker exec` (which runs as that same
+UID by default) for control requests:
+
+```bash
+docker exec dns-rs /usr/local/bin/dns-rs \
+    -c /etc/dns-rs/dns-rs.toml control status
+docker exec dns-rs /usr/local/bin/dns-rs \
+    -c /etc/dns-rs/dns-rs.toml control stats-prometheus
+```
+
+`make control-container` builds the image and runs this end-to-end, including
+`stop`. The socket path must be on a writable mount; a read-only root
+filesystem with only `/tmp` writable cannot create `/run/dns-rs.sock`.
+
 TLS verification uses roots compiled into the binary (`webpki-roots`), so the
 missing system CA store is not a problem. Name resolution for configuration
 values such as `forward-host` uses the C library resolver, so Docker's

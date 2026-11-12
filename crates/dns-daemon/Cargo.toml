@@ -14,13 +14,18 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 dns-config.workspace = true
+dns-control.workspace = true
 dns-proto.workspace = true
 dns-server.workspace = true
 mimalloc.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [features]
 # Bench-only instrumentation (BENCH_ALLOCS=1 in scripts/bench-loopback.sh):

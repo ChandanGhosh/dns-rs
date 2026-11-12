@@ -87,13 +87,6 @@ impl Config {
                 "cache-min-ttl must not exceed cache-max-ttl".to_owned(),
             ));
         }
-        // remote_control is not yet implemented; enable it only if you
-        // wire a control socket with Status/Stats/Reload support.
-        if self.remote_control.enabled {
-            return Err(ConfigError::Validation(
-                "remote_control is not implemented yet".to_owned(),
-            ));
-        }
         if server.min_ttl > server.max_ttl {
             return Err(ConfigError::Validation(
                 "min-ttl must not exceed max-ttl".to_owned(),
@@ -228,18 +221,7 @@ impl Config {
             }
         }
 
-        if self.remote_control.enabled {
-            if self.remote_control.interfaces.is_empty() {
-                return Err(ConfigError::Validation(
-                    "control-interface must be set when control-enable is enabled".to_owned(),
-                ));
-            }
-            if self.remote_control.port == 0 {
-                return Err(ConfigError::Validation(
-                    "control-port must be between 1 and 65535".to_owned(),
-                ));
-            }
-        }
+        self.remote_control.validate()?;
 
         Ok(())
     }
@@ -1451,14 +1433,18 @@ impl<'de> Deserialize<'de> for ForwardTarget {
 }
 
 /// Remote-control settings.
+///
+/// The control channel is a Unix domain socket only. `port` exists for
+/// `unbound.conf` compatibility and must remain the Unbound default so a
+/// configuration that expects TCP control cannot silently do nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RemoteControlConfig {
     /// Enable the control socket.
     pub enabled: bool,
-    /// Interfaces (IP addresses or Unix socket paths).
-    pub interfaces: Vec<String>,
-    /// TCP control port.
+    /// Absolute Unix socket paths to serve.
+    pub interfaces: Vec<PathBuf>,
+    /// Unbound compatibility field; must remain the default `8953`.
     pub port: u16,
 }
 
@@ -1466,9 +1452,51 @@ impl Default for RemoteControlConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            interfaces: vec!["127.0.0.1".to_owned()],
+            interfaces: Vec::new(),
             port: DEFAULT_CONTROL_PORT,
         }
+    }
+}
+
+impl RemoteControlConfig {
+    /// Validate control socket settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::Validation`] for a non-default port, an empty
+    /// interface list when enabled, a relative path, or a duplicate path.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.port != DEFAULT_CONTROL_PORT {
+            return Err(ConfigError::Validation(format!(
+                "control-port is not supported: the control channel is a Unix socket; \
+                 remove control-port or set it to {DEFAULT_CONTROL_PORT}"
+            )));
+        }
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.interfaces.is_empty() {
+            return Err(ConfigError::Validation(
+                "control-interface must be set when control-enable is enabled".to_owned(),
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        for path in &self.interfaces {
+            if !path.is_absolute() {
+                return Err(ConfigError::Validation(format!(
+                    "control-interface must be an absolute Unix socket path, not {:?}; \
+                     TCP control is not supported",
+                    path.display()
+                )));
+            }
+            if !paths.insert(path) {
+                return Err(ConfigError::Validation(format!(
+                    "duplicate control-interface {:?}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

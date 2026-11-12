@@ -686,10 +686,19 @@ impl Parser {
                 self.config.remote_control.enabled = parse_bool(path, line, key, value)?;
             }
             "control-interface" => {
+                let value = parse_scalar(value);
+                let value = value.strip_prefix("unix:").unwrap_or(&value);
+                if value.is_empty() {
+                    return Err(ConfigError::parse(
+                        path,
+                        line,
+                        "control-interface must not be empty",
+                    ));
+                }
                 self.config
                     .remote_control
                     .interfaces
-                    .push(parse_scalar(value));
+                    .push(PathBuf::from(value));
             }
             "control-port" => {
                 self.config.remote_control.port = parse_u16(path, line, key, value, true)?;
@@ -955,6 +964,7 @@ fn parse_u32(path: &Path, line: usize, key: &str, value: &str) -> Result<u32, Co
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
@@ -1058,10 +1068,9 @@ forward-zone:
             Some("/dns-query")
         );
 
-        // remote_control is not implemented; it is disabled by default.
-        // Uncomment the following lines and configure a control socket
-        // when the feature is wired up.
+        // The control socket is opt-in and has no default interface.
         assert!(!config.remote_control.enabled);
+        assert!(config.remote_control.interfaces.is_empty());
         assert!(loaded.warnings.is_empty());
     }
 
@@ -1287,5 +1296,115 @@ server:
         let loaded = parse_unbound_file(&path).expect("parse config");
         assert_eq!(loaded.config.server.interfaces[0].port, Some(5353));
         assert!(loaded.warnings.is_empty());
+    }
+
+    #[test]
+    fn parses_unix_control_interfaces() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("control.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+remote-control:
+    control-enable: yes
+    control-interface: unix:/run/dns-rs.sock
+    control-interface: "/run/dns-rs-2.sock"
+"#,
+        )
+        .expect("write config");
+
+        let config = parse_unbound_file(&path).expect("parse config").config;
+        assert!(config.remote_control.enabled);
+        assert_eq!(
+            config.remote_control.interfaces,
+            vec![
+                PathBuf::from("/run/dns-rs.sock"),
+                PathBuf::from("/run/dns-rs-2.sock"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_tcp_control_interfaces() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("control.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+remote-control:
+    control-enable: yes
+    control-interface: 127.0.0.1
+"#,
+        )
+        .expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("TCP control must fail");
+        assert!(error.to_string().contains("Unix socket path"));
+    }
+
+    #[test]
+    fn rejects_non_default_control_port() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("control.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+remote-control:
+    control-enable: yes
+    control-interface: /run/dns-rs.sock
+    control-port: 8954
+"#,
+        )
+        .expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("TCP port must fail");
+        assert!(error.to_string().contains("control-port is not supported"));
+    }
+
+    #[test]
+    fn rejects_duplicate_control_interfaces() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("control.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+remote-control:
+    control-enable: yes
+    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs.sock
+"#,
+        )
+        .expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("duplicate must fail");
+        assert!(error.to_string().contains("duplicate control-interface"));
+    }
+
+    #[test]
+    fn rejects_empty_control_interface() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("control.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+remote-control:
+    control-enable: yes
+    control-interface: ""
+"#,
+        )
+        .expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("empty path must fail");
+        assert!(error.to_string().contains("must not be empty"));
     }
 }

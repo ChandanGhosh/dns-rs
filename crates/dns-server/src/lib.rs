@@ -1,6 +1,8 @@
 //! DNS listeners and the client-facing query pipeline.
 
 mod acl;
+#[cfg(unix)]
+mod control;
 mod doh;
 mod dot;
 mod edns;
@@ -44,6 +46,10 @@ pub enum ServerError {
     /// Downstream TLS material could not be loaded.
     #[error("TLS configuration error: {0}")]
     Tls(String),
+    /// The control socket could not be bound or served.
+    #[cfg(unix)]
+    #[error("control socket error: {0}")]
+    Control(#[from] dns_control::ControlError),
 }
 
 /// Run the server until the shutdown token is cancelled.
@@ -315,6 +321,23 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                 listeners.push((addr, "tcp"));
             }
         }
+    }
+
+    // Bind after the DNS listeners so a bad control path fails startup. When
+    // TODO(#5) implements privilege drop, move this bind after the drop (or
+    // chown the socket to the target user), otherwise the 0600 root-owned path
+    // is unusable by the unprivileged daemon.
+    #[cfg(unix)]
+    if config.remote_control.enabled {
+        control::start(
+            &config.remote_control,
+            Arc::clone(&pipeline),
+            shutdown.clone(),
+        )?;
+    }
+    #[cfg(not(unix))]
+    if config.remote_control.enabled {
+        warn!("remote-control is only supported on Unix; control socket not started");
     }
 
     // TODO(#5): Drop privileges to the configured user.

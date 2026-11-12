@@ -27,6 +27,8 @@ PORT ?= 15353
 KEEP ?= 0
 PLATFORM ?=
 DOCKER_RUN_ARGS ?=
+BINARY ?= target/debug/dns-rs
+SKIP_BUILD ?= 0
 
 VERSION ?= $(shell sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 VCS_REF ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -59,12 +61,13 @@ DOCKER_BUILD_ARGS = \
 	bench bench-container bench-ci bench-miss bench-dnssec \
 	bench-compare bench-compare-quick bench-compare-miss bench-compare-dnssec \
 	image image-multiarch image-smoke image-size image-scan image-publish \
+	control-smoke control-container control-check \
 	docker-run container-check ci-container ci-all \
 	compose-up compose-up-local compose-down compose-clean compose-logs compose-ps \
 	doc doc-open
 
 # Cargo and Docker contend for locks and CPU; keep aggregate targets ordered.
-.NOTPARALLEL: check ci test-all container-check ci-container ci-all
+.NOTPARALLEL: check ci test-all container-check control-check ci-container ci-all
 
 ##@ General
 
@@ -86,6 +89,8 @@ help: ## Show this help
 	@printf '  %-24s %s\n' 'CONTAINER' 'smoke-test container name (default: $(CONTAINER))'
 	@printf '  %-24s %s\n' 'PORT' 'smoke-test and docker-run host port (default: $(PORT))'
 	@printf '  %-24s %s\n' 'KEEP' 'keep the smoke container running (default: $(KEEP))'
+	@printf '  %-24s %s\n' 'BINARY' 'local daemon for control-smoke (default: $(BINARY))'
+	@printf '  %-24s %s\n' 'SKIP_BUILD' 'reuse an existing BINARY for control-smoke (default: $(SKIP_BUILD))'
 	@printf '  %-24s %s\n' 'PLATFORM' 'smoke-test/docker-run platform (default: host)'
 	@printf '  %-24s %s\n' 'DOCKER_RUN_ARGS' 'extra flags for docker-run'
 	@printf '  %-24s %s\n' 'PLATFORMS' 'multi-arch platforms (default: $(PLATFORMS))'
@@ -257,6 +262,18 @@ bench-compare-miss: ## Interleaved A/B benchmark of the cache-miss path
 
 bench-compare-dnssec: ## Interleaved A/B benchmark of the DNSSEC path
 	BENCH_SCENARIO=dnssec scripts/bench-compare.sh $(BASE_REF) $(THREADS)
+
+##@ Control
+
+control-smoke: ## Run the control-socket end-to-end test against BINARY
+	BINARY="$(BINARY)" PORT="$(PORT)" SKIP_BUILD="$(SKIP_BUILD)" \
+		scripts/control-smoke.sh
+
+control-container: image ## Run the control-socket end-to-end test inside IMAGE
+	IMAGE="$(IMAGE)" CONTAINER="$(CONTAINER)-control" PLATFORM="$(PLATFORM)" \
+		scripts/container-control-smoke.sh
+
+control-check: control-smoke control-container ## Run the local and container control tests
 
 ##@ Container
 

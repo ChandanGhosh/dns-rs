@@ -10,6 +10,7 @@ license.workspace = true
 dns-cache.workspace = true
 dns-client.workspace = true
 dns-config.workspace = true
+dns-control.workspace = true
 dns-dnssec.workspace = true
 dns-iter.workspace = true
 dns-proto.workspace = true

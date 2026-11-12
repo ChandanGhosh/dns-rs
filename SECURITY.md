@@ -27,6 +27,8 @@ Never include credentials, private keys, or client data in a report.
 In scope:
 
 - the resolver, listeners (UDP, TCP, DoT, DoH), and query pipeline;
+- the optional Unix-domain control socket, including its peer authorization
+  and command handling;
 - DNS message parsing and encoding;
 - DNSSEC validation, including trust anchors, denial proofs, and the zone
   status cache;

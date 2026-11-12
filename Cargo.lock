@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "dns-cache"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "dns-proto",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "dns-client"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "dns-proto",
  "http-body-util",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "dns-config"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "dns-proto",
  "ipnet",
@@ -335,21 +335,31 @@ dependencies = [
 
 [[package]]
 name = "dns-control"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
+ "libc",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
 name = "dns-daemon"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "dns-config",
+ "dns-control",
  "dns-proto",
  "dns-server",
  "mimalloc",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -358,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "dns-dnssec"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "data-encoding",
  "dns-proto",
@@ -373,11 +383,11 @@ dependencies = [
 
 [[package]]
 name = "dns-filter"
-version = "0.1.14"
+version = "0.2.0"
 
 [[package]]
 name = "dns-iter"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "data-encoding",
  "dns-cache",
@@ -394,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "dns-proto"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "hickory-proto",
  "thiserror",
@@ -402,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "dns-server"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "dashmap",
@@ -410,6 +420,7 @@ dependencies = [
  "dns-cache",
  "dns-client",
  "dns-config",
+ "dns-control",
  "dns-dnssec",
  "dns-iter",
  "dns-proto",
@@ -433,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "dns-testutil"
-version = "0.1.14"
+version = "0.2.0"
 dependencies = [
  "dns-dnssec",
  "dns-proto",

@@ -1,5 +1,6 @@
 #[cfg(feature = "alloc-stats")]
 mod alloc_stats;
+mod control;
 mod healthcheck;
 
 use std::net::IpAddr;
@@ -9,8 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use dns_config::LoadedConfig;
+use dns_control::ControlCommand;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -71,10 +73,48 @@ struct Cli {
     command: Command,
 }
 
+/// Commands accepted by the `control` subcommand.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ControlCommandArg {
+    /// Print process information.
+    Status,
+    /// Print pipeline counters as JSON.
+    Stats,
+    /// Print pipeline counters in Prometheus text format.
+    StatsPrometheus,
+    /// Ask the daemon to reload its configuration.
+    Reload,
+    /// Ask the daemon to shut down.
+    Stop,
+}
+
+impl From<ControlCommandArg> for ControlCommand {
+    fn from(command: ControlCommandArg) -> Self {
+        match command {
+            ControlCommandArg::Status => Self::Status,
+            ControlCommandArg::Stats => Self::Stats,
+            ControlCommandArg::StatsPrometheus => Self::StatsPrometheus,
+            ControlCommandArg::Reload => Self::Reload,
+            ControlCommandArg::Stop => Self::Stop,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Validate the configuration and exit.
     Checkconf,
+    /// Send one command to a running resolver's control socket.
+    Control {
+        /// Command to send.
+        #[arg(value_enum)]
+        command: ControlCommandArg,
+
+        /// Control socket path. Defaults to the first enabled
+        /// `control-interface` in the configuration.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
     /// Run the resolver.
     Run,
     /// Query a running resolver and exit non-zero if it does not answer.
@@ -108,6 +148,13 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Checkconf => checkconf(&cli.config),
+        Command::Control { command, socket } => control::run(
+            &cli.config,
+            &control::Options {
+                socket: socket.as_deref(),
+                command: command.into(),
+            },
+        ),
         Command::Run => run(&cli),
         Command::Healthcheck {
             address,
@@ -152,6 +199,16 @@ fn checkconf(path: &Path) -> Result<()> {
     println!("  interfaces: {interfaces}");
     println!("  threads: {}", config.server.num_threads);
     println!("  forward zones: {}", config.forward_zones.len());
+    if config.remote_control.enabled {
+        let control = config
+            .remote_control
+            .interfaces
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  control: {control}");
+    }
     if !loaded.warnings.is_empty() {
         println!("  warnings: {}", loaded.warnings.len());
     }

@@ -201,13 +201,30 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
   is exempt).
 - Per-client rate limiting (`ratelimit`, `ratelimit-slip`) and concurrent-query
   limits.
-- Prometheus text rendering for pipeline counters (`PipelineStats`), not yet
-  exposed over the network.
+- Prometheus text rendering for pipeline counters (`PipelineStats`), served
+  through the optional control socket.
 
 **Operations**
 
 - `checkconf`, `run`, and `healthcheck` commands, configuration warnings, and structured logging.
 - Graceful shutdown on `SIGINT`/`SIGTERM`.
+- Opt-in control socket (`remote-control:`): one JSON command per connection
+  over a Unix domain socket. The socket is mode `0600`, only processes with the
+  daemon's effective UID may connect, and there is no TCP or TLS control
+  transport. The binary includes a small client:
+
+  ```bash
+  dns-rs -c /etc/dns-rs/dns-rs.conf control status
+  dns-rs -c /etc/dns-rs/dns-rs.conf control stats
+  dns-rs -c /etc/dns-rs/dns-rs.conf control stats-prometheus
+  dns-rs -c /etc/dns-rs/dns-rs.conf control stop
+  ```
+
+  `control` uses the first enabled `control-interface`; pass `--socket PATH` to
+  override it. Any client that can write one JSON line to the socket works too,
+  for example `printf '{"command":"stats"}\n' | socat - UNIX-CONNECT:/run/dns-rs.sock`.
+  `make control-smoke` exercises the socket against a local binary and
+  `make control-container` does the same inside the container image.
 - TOML configuration and an `unbound.conf`-compatible front-end.
 - Container image on a `scratch` runtime with a statically linked musl binary,
   published for `linux/amd64` and `linux/arm64`, with a `healthcheck`
@@ -216,8 +233,6 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
 
 ## Not yet implemented
 
-- Control socket and statistics endpoint. `dns-control` currently defines the
-  command type only.
 - RPZ, DNS64, and response-IP filtering. Local zones are served by `dns-server`;
   the `dns-filter` crate is a placeholder.
 - DNS-over-QUIC (the transport is named in `dns-client` but has no implementation).
@@ -225,7 +240,8 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
   are parsed for compatibility but not applied.
 - `forward-host`, `interface-view`, `response-ip`, and AXFR/URL fetching for
   auth zones. These are parsed and reported as warnings.
-- Configuration reload without restart.
+- Configuration reload without restart; the control socket's `reload` command
+  returns an unsupported error.
 - The Unbound `.rpl` replay harness (`docs/replay-harness.md` is still a design)
   and live interop tests.
 
@@ -393,7 +409,7 @@ publishes the numbers to the workflow summary.
 | `dns-dnssec` | RRSIG/DNSKEY/DS validation, NSEC/NSEC3 proofs, trust anchors, RFC 5011 autotrust |
 | `dns-filter` | Placeholder for RPZ, DNS64, and response-IP filtering |
 | `dns-server` | UDP/TCP/DoT/DoH listeners, ACLs, views, EDNS, rate limiting, local/auth zones, query pipeline, statistics |
-| `dns-control` | Control command types; socket server not wired up yet |
+| `dns-control` | Unix-socket control channel and JSON protocol for status, statistics, Prometheus text, and shutdown |
 | `dns-daemon` | `dns-rs` binary: `checkconf`, `run`, logging, signal handling |
 | `dns-testutil` | DNS message builders for tests plus the signed authoritative mock used by the DNSSEC benchmark; replay support still planned |
 
@@ -426,8 +442,13 @@ Supported `unbound.conf` blocks:
   downstream/upstream selection. Only zonefile loading is implemented.
 - `view:` — name, `view-first`, local zones/data, and local-data-ptr.
   `response-ip` is parsed but not implemented.
-- `remote-control:` — enable, interface, port. Parsed for compatibility; the
-  control socket is not served yet.
+- `remote-control:` — `control-enable` plus one or more absolute
+  `control-interface` Unix socket paths (an optional `unix:` prefix is
+  accepted). TCP control is not supported, so `control-port` must remain the
+  Unbound default `8953`. Commands are sent as one JSON line per connection:
+  `status`, `stats`, `stats-prometheus`, and `stop`. The socket is mode `0600`,
+  peers are authorized by effective UID, and `reload` returns an unsupported
+  error until live reconfiguration exists.
 - `include:` and `include-toplevel:` — relative or absolute files, with cycle
   detection.
 
