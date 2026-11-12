@@ -486,13 +486,30 @@ cargo test --workspace --doc
 scripts/container-smoke.sh
 ```
 
-CI additionally runs `cargo nextest`, `cargo deny`, `cargo audit`, and a
-short `cargo fuzz` smoke test for the message decoder. The container job builds
-the image, runs the smoke test, enforces a size budget, scans for
-vulnerabilities, and records informational one- and two-worker load stats. On
-pushes to `main`, a publish job runs after all gates and pushes the date-tagged
-multi-arch image to Docker Hub. The `delv` corpus-parity test in
+CI runs on every branch push and on every pull request, so a feature branch is
+validated before a PR is opened and again against the merge result. It runs
+`cargo nextest`, `cargo deny`, `cargo audit`, and a short `cargo fuzz` smoke
+test for the message decoder. The container job builds the image, runs the
+smoke test, enforces a size budget, scans for vulnerabilities, and records
+informational one- and two-worker load stats. On pushes to `main`, a publish
+job runs after all gates and pushes the date-tagged multi-arch image to Docker
+Hub. The `delv` corpus-parity test in
 `crates/dns-server/tests/delv_corpus.rs` is skipped when `delv` is not installed.
+
+### Branch naming
+
+Pull requests must come from a branch named `<type>/<description>`, for example
+`feature/control-socket`, `bugfix/cache-expiry`, or `chore/bump-deps`. The
+`Branch name` CI job accepts these types:
+
+`feature`, `bugfix`, `chore`, `docs`, `test`, `refactor`, `perf`, `ci`,
+`build`, `hotfix`, `release`, `dependabot`, `renovate`.
+
+The description may contain letters, digits, dots, underscores, and hyphens,
+and dependabot branches may add nested path components; no component may be
+empty or start with a dot. The check only applies to pull requests; pushes to
+`main` are unaffected. Make it mandatory by adding the `Branch name` job to the
+required status checks once branch protection is available.
 
 ### Releases and versioning
 
@@ -501,9 +518,32 @@ The workspace version in `Cargo.toml` is the release version. Every push to
 release when that version is newer than every existing `v*` tag. Otherwise the
 push just refreshes the date-tagged Docker image.
 
-So a code-only push that should not release leaves the version untouched, and
-an intended release bumps `version.workspace` in the same commit. The release
-notes are generated from the commits since the previous tag.
+A code-only push that should not release leaves the version untouched, and an
+intended release bumps `version.workspace` in the same commit. The `Release
+version` CI job fails a change that:
+
+- moves the version to one that is not strictly newer than the latest `v*` tag;
+- reuses an already released version;
+- gives an individual crate its own `version` instead of
+  `version.workspace = true`.
+
+Keep one release bump in flight at a time. Two PRs that bump to the same
+version can both pass before the first tag exists; only the first merge
+releases, and the second change needs another bump to get its own release. A
+merge queue or a release PR tool such as `release-plz` serializes this fully.
+
+The release notes are generated from the commits since the previous tag.
+
+### CI and workflow changes
+
+Only repository writers can push branches, and only merged changes affect
+`main`. `.github/CODEOWNERS` assigns `.github/workflows/` and
+`.github/actions/` to the repository owner; enable branch protection or a
+ruleset with **Require review from Code Owners** to make that mandatory.
+Classic branch protection and rulesets are not available on private free-plan
+repositories, so keep the collaborator list limited to trusted writers and
+accept external contributions from forks. Fork pull requests do not receive
+repository secrets.
 
 The Unbound replay harness design is in
 [`docs/replay-harness.md`](docs/replay-harness.md), container deployment is

@@ -2,7 +2,9 @@ name: CI
 
 on:
     push:
-        branches: [main, master]
+        # Run CI on every branch so a feature branch is validated before a PR
+        # is opened. Pull requests then run again against the merge result.
+        branches: ["**"]
     pull_request:
 
 permissions:
@@ -10,15 +12,42 @@ permissions:
 
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    # Do not cancel a main-branch run while it is publishing. Pull-request
-    # runs are still superseded as soon as a newer commit arrives.
-    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # Do not cancel a main-branch run while it is publishing. Feature-branch
+    # pushes and pull-request runs are superseded as soon as a newer commit
+    # arrives.
+    cancel-in-progress: >-
+        ${{ github.event_name == 'pull_request' ||
+        (github.event_name == 'push' && github.ref != 'refs/heads/main') }}
 
 env:
     CARGO_TERM_COLOR: always
     RUST_BACKTRACE: 1
 
 jobs:
+    branch:
+        name: Branch name
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            # Kept as a normal job (not job-level `if`) so it can be a required
+            # status check for pull requests once branch protection is enabled.
+            - name: Validate pull-request branch name
+              env:
+                  BRANCH: ${{ github.head_ref }}
+                  EVENT_NAME: ${{ github.event_name }}
+              run: |
+                  set -euo pipefail
+                  if [ "$EVENT_NAME" != "pull_request" ]; then
+                      echo "not a pull request; skipping branch-name check"
+                      exit 0
+                  fi
+                  pattern='^(feature|bugfix|chore|docs|test|refactor|perf|ci|build|hotfix|release|dependabot|renovate)/([A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*$'
+                  if [[ ! "$BRANCH" =~ $pattern ]] || [[ "$BRANCH" == *..* ]]; then
+                      echo "::error::branch '$BRANCH' must use <type>/<name>, where <type> is one of: feature, bugfix, chore, docs, test, refactor, perf, ci, build, hotfix, release, dependabot, renovate"
+                      exit 1
+                  fi
+                  echo "branch '$BRANCH' follows the naming convention"
+
     fmt:
         name: Format
         runs-on: ubuntu-latest
@@ -153,9 +182,99 @@ jobs:
             - run: cargo fuzz run decode_message --target x86_64-unknown-linux-gnu -- -runs=20000 -max_total_time=60
               working-directory: fuzz
 
+    version:
+        name: Release version
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  # Tags and the base commit are needed to decide whether this
+                  # change introduces a valid release version.
+                  fetch-depth: 0
+            - uses: dtolnay/rust-toolchain@stable
+            - name: Validate the workspace version
+              env:
+                  BASE_SHA: >-
+                      ${{ github.event_name == 'pull_request' &&
+                      github.event.pull_request.base.sha || github.event.before }}
+                  HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+                  EVENT_NAME: ${{ github.event_name }}
+              run: |
+                  set -euo pipefail
+                  version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+                  if [ -z "$version" ]; then
+                      echo "::error::could not read [workspace.package] version from Cargo.toml"
+                      exit 1
+                  fi
+
+                  # Every crate must inherit the single workspace version so a
+                  # release cannot ship mismatched packages.
+                  bad_versions="$(awk '
+                      /^\[package\]/ { in_package = 1; next }
+                      /^\[/ { in_package = 0 }
+                      in_package && /^version[[:space:]]*=/ && $0 !~ /version\.workspace/ {
+                          print FILENAME ":" FNR ": " $0
+                      }' crates/*/Cargo.toml)"
+                  if [ -n "$bad_versions" ]; then
+                      echo "::error::crate manifests must use version.workspace = true"
+                      echo "$bad_versions"
+                      exit 1
+                  fi
+
+                  # A version bump must also update Cargo.lock. --locked fails
+                  # instead of silently rewriting the lock in the runner.
+                  cargo metadata --locked --format-version 1 >/dev/null
+
+                  base_version=""
+                  base_sha="${BASE_SHA:-}"
+                  if [ "${EVENT_NAME:-}" = "pull_request" ] \
+                      && [ -n "${HEAD_SHA:-}" ] \
+                      && [ -n "$base_sha" ]; then
+                      # Compare with the branch point, not the current base tip:
+                      # a release merged into main must not hide a PR that
+                      # bumps to the version that was just released.
+                      merged_base="$(git merge-base "$HEAD_SHA" "$base_sha" 2>/dev/null || true)"
+                      if [ -n "$merged_base" ]; then
+                          base_sha="$merged_base"
+                      fi
+                  fi
+                  if [ -n "$base_sha" ] \
+                      && [ "$base_sha" != "0000000000000000000000000000000000000000" ]; then
+                      base_version="$(git show "$base_sha:Cargo.toml" 2>/dev/null \
+                          | sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' \
+                          | head -1 || true)"
+                  fi
+                  if [ -z "$base_version" ]; then
+                      echo "no base version available; skipping release-version check"
+                      exit 0
+                  fi
+                  if [ "$version" = "$base_version" ]; then
+                      echo "version unchanged at $version; no release will be cut"
+                      exit 0
+                  fi
+
+                  tags_out="$(git ls-remote --tags origin)"
+                  latest_version="$(printf '%s\n' "$tags_out" | awk '
+                      $2 ~ /^refs\/tags\/v/ && $2 !~ /\^\{\}$/ {
+                          v = $2
+                          sub(/^refs\/tags\/v/, "", v)
+                          if (v != "") print v
+                      }' | sort -V | tail -1)"
+
+                  if [ -n "$latest_version" ] \
+                      && [ "$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | tail -1)" != "$version" ]; then
+                      echo "::error::workspace version $version is not newer than the latest release tag v$latest_version"
+                      exit 1
+                  fi
+                  if [ "$version" = "$latest_version" ]; then
+                      echo "::error::workspace version $version was already released as v$latest_version; bump it again"
+                      exit 1
+                  fi
+                  echo "version $version is newer than ${latest_version:+v$latest_version}; a release will be cut"
+
     publish:
         name: Publish container
-        needs: [fmt, clippy, test, container, deny, audit, fuzz]
+        needs: [fmt, clippy, test, container, deny, audit, fuzz, version]
         if: >
             github.event_name == 'push' &&
             github.ref == 'refs/heads/main' &&

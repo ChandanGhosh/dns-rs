@@ -563,6 +563,12 @@ Bump it in the pull request that warrants a release:
 
 While the project is `0.x`, a minor bump may still break configuration.
 
+The `Release version` CI job rejects a version that is not strictly newer than
+the latest `v*` tag, a reused version, or a crate that declares its own
+`version` instead of `version.workspace = true`. Keep one release bump in
+flight at a time: two PRs that bump to the same version can both pass before
+the first tag exists, and only the first merge releases.
+
 The `publish` job in `.github/workflows/ci.yml` reads that version and compares
 it with the existing `v*` tags. When the version is newer, it also pushes the
 `X.Y.Z` and `latest` image tags, creates the annotated `vX.Y.Z` Git tag, and
