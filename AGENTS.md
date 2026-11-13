@@ -225,6 +225,7 @@ pub fn calculate_total(items: &[Item], tax_rate: f64) -> Result<f64, Calculation
 - No commented-out code or debug statements
 - No hardcoded credentials
 - **Before committing:** Show detailed commit message for approval. Do not commit until explicitly approved.
+- **Before proposing a version bump or tag:** check the latest GitHub release and remote tags (`gh release list --limit 1`, `git ls-remote --tags origin`) against the version in `Cargo.toml`. The proposed version must be strictly newer than the latest released tag, and must not skip an unreleased version or conflict with an existing release. Never suggest or push a tag that leaves a gap in the release sequence.
 - **Before pushing:** Show what will be pushed and get approval(when asked to push, confirm or follow the exact instruction).
 - **Never** add `Co-authored-by` lines to commit messages.
 - Follow conventional commit style where appropriate (e.g., `fix(security): ...`, `feat(io): ...`, `chore(release): ...`).
