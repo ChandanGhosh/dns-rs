@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dns_config::{Config, ListenAddress};
+use dns_config::{Config, ListenAddress, ThreadCount};
 use dns_proto::{
     Message, MessageType, Name, OpCode, Query, RecordType, ResponseCode, decode, encode,
 };
@@ -26,7 +26,7 @@ impl TestServer {
         let mut config = Config::default();
         config.server.interfaces = vec![ListenAddress::new(addr.ip(), Some(port))];
         config.server.port = port;
-        config.server.num_threads = 1;
+        config.server.num_threads = ThreadCount::Fixed(1);
         config.server.incoming_num_tcp = incoming_num_tcp;
         config.server.do_ip6 = false;
         config.server.do_udp = false;

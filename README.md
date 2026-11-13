@@ -276,7 +276,8 @@ filled; `num_threads` sets the Tokio worker count (on unix it also binds one
 workers lock-free, and on Linux each worker harvests up to 8 queued datagrams
 per receive syscall with `recvmmsg`). The daemon uses mimalloc, which raises
 idle RSS compared with the system allocator but keeps the per-query allocation
-path fast.
+path fast. `num_threads` defaults to 1; set it to `0` or `"auto"` to use the
+CPUs visible to the process, including CPU-affinity and cgroup limits.
 
 ### Running it
 

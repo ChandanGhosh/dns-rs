@@ -17,7 +17,7 @@ pub use error::{ConfigError, ConfigWarning, LoadedConfig};
 pub use model::{
     AccessAction, AccessControl, AccessControlView, AuthZoneConfig, Config, ForwardTarget,
     ForwardZoneConfig, ListenAddress, LocalZoneConfig, LocalZoneType, RemoteControlConfig,
-    ServerConfig, StubZoneConfig, ViewConfig,
+    ServerConfig, StubZoneConfig, ThreadCount, ViewConfig,
 };
 
 use std::path::Path;

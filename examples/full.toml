@@ -46,6 +46,8 @@ tls_service_pem = "/etc/dns-rs/tls/server.pem"
 # Log verbosity: 0 = warnings/errors, 1 = info, 2-3 = debug (adds one line per
 # query with cache hit/miss), 4-5 = trace. -v/-vv or RUST_LOG override it.
 verbosity = 1
+# Worker threads for the Tokio runtime. 0 or "auto" uses every CPU available to
+# the process (respecting affinity and cgroup limits). Default: 1.
 num_threads = 2
 # pidfile = "/run/dns-rs.pid"
 use_syslog = false

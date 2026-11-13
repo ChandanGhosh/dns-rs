@@ -57,10 +57,13 @@ impl Config {
                 "server port must be between 1 and 65535".to_owned(),
             ));
         }
-        if server.num_threads == 0 || server.num_threads > 1024 {
-            return Err(ConfigError::Validation(
-                "num-threads must be between 1 and 1024".to_owned(),
-            ));
+        if let ThreadCount::Fixed(count) = server.num_threads
+            && (count == 0 || count > ThreadCount::MAX)
+        {
+            return Err(ConfigError::Validation(format!(
+                "num-threads must be between 1 and {}, or 0/\"auto\" to use all CPUs",
+                ThreadCount::MAX
+            )));
         }
         if !server.do_ip4 && !server.do_ip6 {
             return Err(ConfigError::Validation(
@@ -227,6 +230,132 @@ impl Config {
     }
 }
 
+/// Worker-thread setting as written in the configuration.
+///
+/// Both the string `"auto"` and the number `0` mean "use every CPU available
+/// to the process". A positive number is used verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadCount {
+    /// Detect the CPUs visible to this process.
+    ///
+    /// Detection uses [`std::thread::available_parallelism`], which honours CPU
+    /// affinity and cgroup CPU quotas, so container limits are respected.
+    Auto,
+    /// Use exactly this many worker threads.
+    Fixed(usize),
+}
+
+impl ThreadCount {
+    /// Largest accepted worker count.
+    pub const MAX: usize = 1024;
+
+    /// Interpret a numeric configuration value, mapping zero to [`Self::Auto`].
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - Numeric value read from a configuration front-end
+    ///
+    /// # Returns
+    ///
+    /// [`Self::Auto`] for zero, otherwise [`Self::Fixed`].
+    pub fn from_count(count: usize) -> Self {
+        if count == 0 {
+            Self::Auto
+        } else {
+            Self::Fixed(count)
+        }
+    }
+
+    /// Resolve the setting to a concrete worker count.
+    ///
+    /// # Returns
+    ///
+    /// A value in `1..=MAX`. Automatic detection falls back to one worker when
+    /// the platform cannot report a CPU count.
+    pub fn resolve(self) -> usize {
+        let count = match self {
+            Self::Auto => std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1),
+            Self::Fixed(count) => count,
+        };
+        // A hand-built configuration can bypass parsing, so clamp instead of
+        // letting a zero reach the runtime or the TCP-capacity calculation.
+        count.clamp(1, Self::MAX)
+    }
+}
+
+impl fmt::Display for ThreadCount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // Include the detected value so `checkconf` and the startup log
+            // show the effective count rather than only the word "auto".
+            Self::Auto => write!(formatter, "auto ({})", self.resolve()),
+            Self::Fixed(count) => write!(formatter, "{count}"),
+        }
+    }
+}
+
+impl Serialize for ThreadCount {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Fixed(count) => serializer.serialize_u64(*count as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ThreadCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ThreadCountVisitor;
+
+        impl serde::de::Visitor<'_> for ThreadCountVisitor {
+            type Value = ThreadCount;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a thread count, 0, or \"auto\"")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let count =
+                    usize::try_from(value).map_err(|_| E::custom("thread count is too large"))?;
+                Ok(ThreadCount::from_count(count))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                let count = usize::try_from(value)
+                    .map_err(|_| E::custom("thread count must not be negative"))?;
+                Ok(ThreadCount::from_count(count))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if value.trim().eq_ignore_ascii_case("auto") {
+                    Ok(ThreadCount::Auto)
+                } else {
+                    Err(E::custom("expected a thread count or \"auto\""))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ThreadCountVisitor)
+    }
+}
+
 /// Global resolver settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -239,8 +368,9 @@ pub struct ServerConfig {
     /// and errors, 1 (default) adds info, 2-3 add per-query debug lines, and
     /// 4-5 add trace. `-v`/`-vv` or `RUST_LOG` override it.
     pub verbosity: u8,
-    /// Number of worker threads.
-    pub num_threads: usize,
+    /// Worker-thread setting. `0` or `"auto"` uses every CPU available to the
+    /// process; the default is 1.
+    pub num_threads: ThreadCount,
     /// Detach from the terminal.
     pub do_daemonize: bool,
     /// User to drop privileges to.
@@ -393,7 +523,7 @@ impl Default for ServerConfig {
             ],
             port: DEFAULT_PORT,
             verbosity: 1,
-            num_threads: 1,
+            num_threads: ThreadCount::Fixed(1),
             do_daemonize: false,
             username: None,
             chroot: None,
@@ -1515,7 +1645,37 @@ fn parse_port(value: &str) -> Result<u16, String> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::{AccessAction, AccessControl, Config, ForwardTarget, ListenAddress};
+    use super::{AccessAction, AccessControl, Config, ForwardTarget, ListenAddress, ThreadCount};
+
+    #[test]
+    fn thread_count_accepts_auto_and_zero() {
+        for value in ["\"auto\"", "\"AUTO\"", "0"] {
+            let config: Config = toml::from_str(&format!("[server]\nnum_threads = {value}\n"))
+                .expect("parse thread count");
+            assert_eq!(config.server.num_threads, ThreadCount::Auto);
+        }
+        let config: Config =
+            toml::from_str("[server]\nnum_threads = 6\n").expect("parse thread count");
+        assert_eq!(config.server.num_threads, ThreadCount::Fixed(6));
+    }
+
+    #[test]
+    fn thread_count_resolution_is_bounded() {
+        assert_eq!(ThreadCount::Fixed(0).resolve(), 1);
+        assert_eq!(
+            ThreadCount::Fixed(ThreadCount::MAX + 1).resolve(),
+            ThreadCount::MAX
+        );
+        assert!(ThreadCount::Auto.resolve() >= 1);
+    }
+
+    #[test]
+    fn rejects_excessive_thread_count() {
+        let mut config = Config::default();
+        config.server.num_threads = ThreadCount::Fixed(ThreadCount::MAX + 1);
+        let error = config.validate().expect_err("thread count must be bounded");
+        assert!(error.to_string().contains("num-threads"));
+    }
 
     #[test]
     fn parses_listen_address_with_port() {

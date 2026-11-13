@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE64;
-use dns_config::{Config, ForwardTarget, ForwardZoneConfig, ListenAddress};
+use dns_config::{Config, ForwardTarget, ForwardZoneConfig, ListenAddress, ThreadCount};
 use dns_proto::{
     Algorithm, DNSClass, DNSKEY, DNSSECRData, DS, DigestType, Edns, EdnsCode, EdnsOption, Message,
     MessageType, NS, NSEC, Name, OpCode, PublicKey, PublicKeyBuf, Query, RData, RRSIG, Record,
@@ -405,7 +405,7 @@ impl TestServer {
         let mut config = Config::default();
         config.server.interfaces = vec![ListenAddress::new(addr.ip(), Some(port))];
         config.server.port = port;
-        config.server.num_threads = 1;
+        config.server.num_threads = ThreadCount::Fixed(1);
         config.server.do_ip6 = false;
         config.server.qname_minimisation = false;
         config.server.use_caps_for_id = false;

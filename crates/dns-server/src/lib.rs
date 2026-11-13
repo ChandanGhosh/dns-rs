@@ -236,7 +236,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
             // of through a single loop. Without SO_REUSEPORT (non-unix), only
             // one socket can bind, matching the previous behavior.
             let socket_count = if cfg!(unix) {
-                config.server.num_threads.max(1)
+                config.server.num_threads.resolve()
             } else {
                 1
             };
@@ -381,19 +381,19 @@ fn tcp_capacity(config: &Config) -> Option<usize> {
     let capacity = config
         .server
         .incoming_num_tcp
-        .saturating_mul(config.server.num_threads);
+        .saturating_mul(config.server.num_threads.resolve());
     (capacity > 0).then_some(capacity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::tcp_capacity;
-    use dns_config::Config;
+    use dns_config::{Config, ThreadCount};
 
     #[test]
     fn tcp_capacity_is_per_thread_and_can_be_disabled() {
         let mut config = Config::default();
-        config.server.num_threads = 4;
+        config.server.num_threads = ThreadCount::Fixed(4);
         config.server.incoming_num_tcp = 8;
         assert_eq!(tcp_capacity(&config), Some(32));
 

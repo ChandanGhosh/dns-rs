@@ -5,7 +5,7 @@ use std::str::FromStr;
 use crate::error::{ConfigError, ConfigWarning, LoadedConfig};
 use crate::model::{
     AccessControl, AccessControlView, Config, ForwardTarget, ListenAddress, LocalZoneConfig,
-    LocalZoneType,
+    LocalZoneType, ThreadCount,
 };
 
 /// Parse an `unbound.conf`-style file.
@@ -250,7 +250,7 @@ impl Parser {
                 self.config.server.verbosity = verbosity;
             }
             "num-threads" => {
-                self.config.server.num_threads = parse_usize(path, line, key, value)?;
+                self.config.server.num_threads = parse_thread_count(path, line, key, value)?;
             }
             "do-daemonize" => self.config.server.do_daemonize = parse_bool(path, line, key, value)?,
             "username" => self.config.server.username = optional_string(value),
@@ -949,6 +949,22 @@ fn parse_u16(
     Ok(number)
 }
 
+fn parse_thread_count(
+    path: &Path,
+    line: usize,
+    key: &str,
+    value: &str,
+) -> Result<ThreadCount, ConfigError> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(ThreadCount::Auto);
+    }
+    let count = value.parse::<usize>().map_err(|_| {
+        ConfigError::parse(path, line, format!("invalid number for '{key}': {value:?}"))
+    })?;
+    Ok(ThreadCount::from_count(count))
+}
+
 fn parse_usize(path: &Path, line: usize, key: &str, value: &str) -> Result<usize, ConfigError> {
     value.trim().parse::<usize>().map_err(|_| {
         ConfigError::parse(path, line, format!("invalid number for '{key}': {value:?}"))
@@ -968,7 +984,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::model::LocalZoneType;
+    use crate::model::{LocalZoneType, ThreadCount};
 
     use super::parse_unbound_file;
 
@@ -1022,7 +1038,7 @@ forward-zone:
         assert_eq!(config.server.interfaces.len(), 2);
         assert_eq!(config.server.port, 5353);
         assert_eq!(config.server.verbosity, 2);
-        assert_eq!(config.server.num_threads, 2);
+        assert_eq!(config.server.num_threads, ThreadCount::Fixed(2));
         assert_eq!(config.server.incoming_num_tcp, 32);
         assert!(!config.server.do_daemonize);
         assert_eq!(config.server.access_control.len(), 2);
@@ -1406,5 +1422,25 @@ remote-control:
 
         let error = parse_unbound_file(&path).expect_err("empty path must fail");
         assert!(error.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn parses_automatic_thread_count() {
+        let directory = tempdir().expect("tempdir");
+        let cases = [
+            ("auto", ThreadCount::Auto),
+            ("0", ThreadCount::Auto),
+            ("6", ThreadCount::Fixed(6)),
+        ];
+        for (value, expected) in cases {
+            let path = directory.path().join("threads.conf");
+            fs::write(
+                &path,
+                format!("server:\n    interface: 127.0.0.1@5353\n    num-threads: {value}\n"),
+            )
+            .expect("write config");
+            let loaded = parse_unbound_file(&path).expect("parse config");
+            assert_eq!(loaded.config.server.num_threads, expected);
+        }
     }
 }

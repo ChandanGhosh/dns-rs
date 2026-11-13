@@ -222,8 +222,9 @@ fn run(cli: &Cli) -> Result<()> {
     init_tracing(cli.verbose, loaded.config.server.verbosity);
     // `num-threads` is the number of resolver worker threads. Build the
     // runtime explicitly so the setting controls Tokio's worker pool instead
-    // of always using one worker per available CPU.
-    let threads = loaded.config.server.num_threads;
+    // of always using one worker per available CPU. `0` and `"auto"` resolve
+    // to the CPUs visible to this process, including cgroup limits.
+    let threads = loaded.config.server.num_threads.resolve();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
@@ -248,7 +249,7 @@ async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
         version = VERSION,
         build_date = BUILD_DATE,
         config = %path.display(),
-        threads = config.server.num_threads,
+        threads = %config.server.num_threads,
         "starting dns-rs"
     );
 
