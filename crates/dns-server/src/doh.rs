@@ -4,7 +4,7 @@
 //! base64url-encoded `?dns=` parameter. HTTP/2 is preferred; HTTP/1.1 is
 //! accepted as a fallback.
 
-use std::convert::Infallible;
+use std::mem::DropGuard;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,15 +29,6 @@ use crate::pipeline::{QueryPipeline, Transport};
 
 const DNS_MESSAGE: &str = "application/dns-message";
 const MAX_REQUEST: usize = 65_535;
-
-/// Cancel upstream work when the HTTP request future is dropped.
-struct CancelOnDrop(CancellationToken);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
-    }
-}
 
 pub async fn run(
     listener: TcpListener,
@@ -137,7 +128,7 @@ async fn handle(
     pipeline: Arc<QueryPipeline>,
     client: SocketAddr,
     endpoint: String,
-) -> Result<Response<Full<Bytes>>, Infallible> {
+) -> Result<Response<Full<Bytes>>, !> {
     match handle_inner(request, pipeline, client, &endpoint).await {
         Ok(response) => Ok(response),
         Err(status) => Ok(error_response(status)),
@@ -183,7 +174,7 @@ async fn handle_inner(
                 })
                 .ok_or(StatusCode::BAD_REQUEST)?;
             let decoded = percent_decode(encoded);
-            let decoded = decoded.strip_suffix(b"=").unwrap_or(&decoded);
+            let decoded = decoded.trim_suffix(b"=");
             BASE64URL_NOPAD
                 .decode(decoded)
                 .map_err(|_| StatusCode::BAD_REQUEST)?
@@ -195,7 +186,7 @@ async fn handle_inner(
     }
 
     let cancel = CancellationToken::new();
-    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let _cancel_on_drop = DropGuard::new(cancel.clone(), |token| token.cancel());
     let response = pipeline
         .handle_with_cancel(&query, client, Transport::Https, cancel)
         .await

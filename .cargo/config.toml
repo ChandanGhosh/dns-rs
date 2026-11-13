@@ -1,0 +1,5 @@
+# Hold back dependency updates until a release has been public for a week.
+# Cargo 1.100's resolver still uses versions already in Cargo.lock, so this
+# only affects newly selected versions.
+[registry]
+global-min-publish-age = "7 days"

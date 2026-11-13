@@ -456,7 +456,7 @@ Options outside this set are accepted with a warning and ignored.
 
 ## Development
 
-Rust 1.88 or newer is required (`rust-version` in `Cargo.toml`). Host-mode
+Rust 1.100 or newer is required (`rust-version` in `Cargo.toml`). Host-mode
 benchmarking selects the recursive resolver's CPU list with `taskset`, and the
 container tooling targets Linux; macOS and Windows can build and run the
 resolver itself.
@@ -485,6 +485,11 @@ cargo test --workspace
 cargo test --workspace --doc
 scripts/container-smoke.sh
 ```
+
+Cargo 1.100 manifest lints are denied (`[workspace.lints.cargo]`), so an
+unused dependency or workspace field fails the build. `.cargo/config.toml`
+enforces a 7-day dependency cooldown: dependency resolution ignores versions
+published less than a week ago unless they are already in `Cargo.lock`.
 
 CI runs on every branch push and on every pull request, so a feature branch is
 validated before a PR is opened and again against the merge result. It runs

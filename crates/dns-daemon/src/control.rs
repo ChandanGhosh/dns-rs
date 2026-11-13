@@ -87,7 +87,7 @@ fn send(path: &Path, command: ControlCommand) -> Result<()> {
     if response.len() > MAX_RESPONSE_BYTES {
         bail!("control response exceeds the {MAX_RESPONSE_BYTES}-byte limit");
     }
-    let response = response.strip_suffix(b"\n").unwrap_or(&response);
+    let response = response.trim_suffix(b"\n");
     let response: ControlResponse =
         serde_json::from_slice(response).context("failed to decode the control response")?;
 

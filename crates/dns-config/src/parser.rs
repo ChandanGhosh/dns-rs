@@ -687,7 +687,7 @@ impl Parser {
             }
             "control-interface" => {
                 let value = parse_scalar(value);
-                let value = value.strip_prefix("unix:").unwrap_or(&value);
+                let value = value.trim_prefix("unix:");
                 if value.is_empty() {
                     return Err(ConfigError::parse(
                         path,

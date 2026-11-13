@@ -290,7 +290,7 @@ impl AutoTrustAnchor {
     /// Write the tracker to `path`.
     pub fn save(&self, path: &Path) -> Result<(), AutoTrustError> {
         if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
+            && !parent.is_empty()
         {
             std::fs::create_dir_all(parent).map_err(|source| AutoTrustError::Io {
                 path: path.to_path_buf(),
