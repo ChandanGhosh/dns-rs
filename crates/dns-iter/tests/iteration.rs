@@ -182,6 +182,31 @@ fn cname(owner: &str, target: &str) -> Record {
     Record::from_rdata(n(owner), 300, RData::CNAME(CNAME(n(target))))
 }
 
+/// Build `links` CNAME hops from `www.example.com.` to a terminal A record.
+///
+/// Eight links is the real-world chain used by Azure Traffic Manager for
+/// `dc.services.visualstudio.com`; the resolver must accept it.
+fn cname_chain(links: usize, terminal: [u8; 4]) -> Vec<Record> {
+    let names: Vec<String> = (0..=links)
+        .map(|index| {
+            if index == 0 {
+                "www.example.com.".to_owned()
+            } else {
+                format!("alias{index}.example.com.")
+            }
+        })
+        .collect();
+    let mut records: Vec<Record> = names
+        .windows(2)
+        .map(|pair| cname(&pair[0], &pair[1]))
+        .collect();
+    records.push(a(
+        names.last().expect("chain has a terminal name"),
+        terminal,
+    ));
+    records
+}
+
 fn soa(zone: &str) -> Record {
     Record::from_rdata(
         n(zone),
@@ -340,6 +365,40 @@ async fn cname_chain_in_single_message() {
             .iter()
             .any(|record| matches!(record.data, RData::A(_)))
     );
+}
+
+#[tokio::test]
+async fn cname_chain_at_the_limit_resolves() {
+    let server = MockAuth::start(with_zone(|query| {
+        answer(query, cname_chain(8, [192, 0, 2, 7]))
+    }))
+    .await;
+    let resolver = resolver(server.addr);
+
+    let message = resolver
+        .resolve("www.example.com.", RecordType::A)
+        .await
+        .expect("eight CNAME links followed by an address must resolve");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        message
+            .answers
+            .iter()
+            .any(|record| matches!(record.data, RData::A(_)))
+    );
+}
+
+#[tokio::test]
+async fn cname_chain_over_the_limit_is_rejected() {
+    let server = MockAuth::start(with_zone(|query| {
+        answer(query, cname_chain(9, [192, 0, 2, 8]))
+    }))
+    .await;
+    let resolver = resolver(server.addr);
+
+    let result = resolver.resolve("www.example.com.", RecordType::A).await;
+    assert!(matches!(result, Err(ResolveError::CnameChainTooLong)));
 }
 
 #[tokio::test]

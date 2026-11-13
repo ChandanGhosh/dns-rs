@@ -21,6 +21,8 @@ use std::time::Duration;
 pub enum ResolveError {
     #[error("query cycle detected")]
     Cycle,
+    #[error("CNAME chain too long")]
+    CnameChainTooLong,
     #[error("maximum recursion depth exceeded")]
     DepthExceeded,
     #[error("no reachable nameservers")]

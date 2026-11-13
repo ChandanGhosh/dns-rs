@@ -910,8 +910,9 @@ impl IteratorResolver {
         let mut origins: HashMap<Name, Name> = HashMap::new();
         let mut current = qname.clone();
         let mut seen = HashSet::new();
+        let mut links = 0usize;
 
-        for _ in 0..MAX_CNAME_CHAIN {
+        loop {
             if !seen.insert(current.clone()) {
                 return Err(ResolveError::Cycle);
             }
@@ -974,10 +975,12 @@ impl IteratorResolver {
                     .map(Some);
             }
 
+            if links == MAX_CNAME_CHAIN {
+                return Err(ResolveError::CnameChainTooLong);
+            }
+            links += 1;
             current = target;
         }
-
-        Err(ResolveError::Cycle)
     }
 
     /// Finish a CNAME chain by resolving `target` through the normal walk.
