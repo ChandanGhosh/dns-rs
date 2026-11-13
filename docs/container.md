@@ -22,7 +22,7 @@ docker run --rm chandanghosh/dns-rs:29102026 --version
 
 | Item | Value |
 |---|---|
-| Builder | `rust:1.99-bookworm` |
+| Builder | `rust:1.100-bookworm` |
 | Runtime | `scratch` |
 | Binary | `/usr/local/bin/dns-rs`, statically linked against musl |
 | User | numeric UID/GID `65532:65532` (no `/etc/passwd`) |

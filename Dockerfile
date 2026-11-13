@@ -12,7 +12,7 @@
 #
 # Multi-arch (requires buildx and QEMU only for running the foreign image):
 #   docker buildx build --platform linux/amd64,linux/arm64 -t dns-rs:dev .
-ARG RUST_VERSION=1.99
+ARG RUST_VERSION=1.100
 
 FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-bookworm AS builder
 
