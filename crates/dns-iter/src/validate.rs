@@ -39,6 +39,34 @@ const ZONE_STATUS_TTL: Duration = Duration::from_secs(ZONE_STATUS_TTL_SECS as u6
 const MIN_ZONE_STATUS_TTL: Duration = Duration::from_secs(30);
 const MAX_ZONE_STATUS_TTL: Duration = Duration::from_secs(3600);
 
+/// Maximum number of zone statuses retained, keyed by zone apex.
+///
+/// `entries` normally tracks real zones, so a few thousand entries cover a
+/// long-lived resolver; the cap bounds the key material a hostile delegation
+/// chain can pin.
+const ZONE_STATUS_CACHE_ENTRIES: usize = 8_192;
+
+/// Maximum number of per-name signing statuses retained.
+///
+/// `signed` is keyed by the queried name, not only by zone apex, so a stream
+/// of unique names in signed zones would otherwise grow it without bound.
+/// Evicting an entry only costs a later recomputation.
+const SIGNED_STATUS_CACHE_ENTRIES: usize = 32_768;
+
+/// Entries dropped at once when a cache reaches its cap.
+///
+/// Evicting in batches keeps the common insert path O(1) instead of paying a
+/// scan on every insert once the map is full. The batch size is small enough
+/// that the reclaimed memory is consumed promptly by new work.
+const ZONE_CACHE_EVICT_BATCH: usize = 64;
+
+/// Minimum spacing between over-cap sweeps.
+///
+/// Sweeping walks every entry, so it runs at most once per interval rather
+/// than on each over-cap insert. Between sweeps, batch eviction keeps the map
+/// bounded without needing the sweep.
+const ZONE_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Flags that affect one client-facing resolution.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ResolveOptions {
@@ -104,20 +132,33 @@ impl ZoneStatus {
 }
 
 #[derive(Clone, Debug)]
-struct CachedZone {
-    status: ZoneStatus,
+struct CachedZone<V> {
+    value: V,
     expires: Instant,
 }
 
-/// Cache of validated zone keys, keyed by zone apex.
+/// Cache of validated zone keys and per-name signing statuses.
 ///
 /// `Name` hashes and compares case-insensitively, so it is used directly as the
-/// map key. This mirrors the message cache and avoids formatting and
-/// lowercasing (two `String` allocations) on every validation lookup.
-#[derive(Default)]
+/// key. This mirrors the message cache and avoids formatting and lowercasing
+/// (two `String` allocations) on every validation lookup. Both maps are
+/// capacity-bounded so validation cannot turn attacker-supplied names into
+/// unbounded memory growth; evicting an entry only costs a later recomputation.
 pub(crate) struct ZoneCache {
-    entries: HashMap<Name, CachedZone>,
-    signed: HashMap<Name, CachedZone>,
+    entries: HashMap<Name, CachedZone<ZoneStatus>>,
+    signed: HashMap<Name, CachedZone<Security>>,
+    /// Time of the last over-cap sweep for expired entries.
+    last_sweep: Instant,
+}
+
+impl Default for ZoneCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            signed: HashMap::new(),
+            last_sweep: Instant::now(),
+        }
+    }
 }
 
 impl ZoneCache {
@@ -125,7 +166,7 @@ impl ZoneCache {
         {
             let entry = self.entries.get(zone)?;
             if entry.expires > Instant::now() {
-                return Some(entry.status.clone());
+                return Some(entry.value.clone());
             }
         }
         self.entries.remove(zone);
@@ -134,12 +175,13 @@ impl ZoneCache {
 
     fn insert(&mut self, zone: &Name, status: ZoneStatus, ttl: Duration) {
         let ttl = ttl.clamp(MIN_ZONE_STATUS_TTL, MAX_ZONE_STATUS_TTL);
-        self.entries.insert(
-            zone.clone(),
-            CachedZone {
-                status,
-                expires: Instant::now() + ttl,
-            },
+        insert_capped(
+            &mut self.entries,
+            &mut self.last_sweep,
+            ZONE_STATUS_CACHE_ENTRIES,
+            zone,
+            status,
+            ttl,
         );
     }
 
@@ -147,7 +189,7 @@ impl ZoneCache {
         {
             let entry = self.signed.get(name)?;
             if entry.expires > Instant::now() {
-                return Some(entry.status.security.clone());
+                return Some(entry.value.clone());
             }
         }
         self.signed.remove(name);
@@ -155,17 +197,53 @@ impl ZoneCache {
     }
 
     fn insert_signed(&mut self, name: &Name, security: Security, ttl: Duration) {
-        self.signed.insert(
-            name.clone(),
-            CachedZone {
-                status: ZoneStatus {
-                    security,
-                    keys: Vec::new(),
-                },
-                expires: Instant::now() + ttl,
-            },
+        let ttl = ttl.clamp(MIN_ZONE_STATUS_TTL, MAX_ZONE_STATUS_TTL);
+        insert_capped(
+            &mut self.signed,
+            &mut self.last_sweep,
+            SIGNED_STATUS_CACHE_ENTRIES,
+            name,
+            security,
+            ttl,
         );
     }
+}
+
+/// Insert `value` under `key`, keeping `map` within `cap` entries.
+///
+/// A redundant insert replaces the existing entry in place without evicting
+/// anything. Once the map is full, expired entries are swept at most once per
+/// [`ZONE_CACHE_SWEEP_INTERVAL`]; if that does not free room, a whole batch of
+/// live entries is dropped. Either way the map stays bounded and a missing
+/// entry is only ever a cache miss.
+fn insert_capped<V>(
+    map: &mut HashMap<Name, CachedZone<V>>,
+    last_sweep: &mut Instant,
+    cap: usize,
+    key: &Name,
+    value: V,
+    ttl: Duration,
+) {
+    let now = Instant::now();
+    if map.len() >= cap && !map.contains_key(key) {
+        if now.saturating_duration_since(*last_sweep) >= ZONE_CACHE_SWEEP_INTERVAL {
+            map.retain(|_, entry| entry.expires > now);
+            *last_sweep = now;
+        }
+        if map.len() >= cap {
+            let victims: Vec<Name> = map.keys().take(ZONE_CACHE_EVICT_BATCH).cloned().collect();
+            for victim in victims {
+                map.remove(&victim);
+            }
+        }
+    }
+    map.insert(
+        key.clone(),
+        CachedZone {
+            value,
+            expires: now + ttl,
+        },
+    );
 }
 
 impl IteratorResolver {
@@ -1287,10 +1365,12 @@ fn unix_now() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use dns_dnssec::{TrustAnchor, TrustStore};
+    use dns_dnssec::{Security, TrustAnchor, TrustStore};
     use dns_proto::{Algorithm, DNSKEY, DNSSECRData, Name, PublicKeyBuf, RData, Record};
 
-    use super::{IteratorResolver, ZONE_STATUS_TTL, ZoneStatus, common_suffix, next_closer};
+    use super::{
+        IteratorResolver, ZONE_STATUS_TTL, ZoneCache, ZoneStatus, common_suffix, next_closer,
+    };
     use crate::IteratorConfig;
 
     fn n(text: &str) -> Name {
@@ -1356,6 +1436,58 @@ mod tests {
         );
 
         assert!(!resolver.cached_insecure_cover(&n("www.secure.l.google.com.")));
+    }
+
+    #[test]
+    fn zone_cache_round_trips_statuses() {
+        let mut cache = ZoneCache::default();
+        let zone = n("example.com.");
+        cache.insert(&zone, ZoneStatus::insecure(), ZONE_STATUS_TTL);
+        assert_eq!(
+            cache.get(&zone).map(|status| status.security),
+            Some(Security::Insecure)
+        );
+
+        let signed = n("www.example.com.");
+        cache.insert_signed(&signed, Security::Secure, ZONE_STATUS_TTL);
+        assert_eq!(cache.get_signed(&signed), Some(Security::Secure));
+        assert_eq!(cache.get_signed(&n("other.example.com.")), None);
+    }
+
+    /// The cache is fed attacker-chosen names, so both maps must stay bounded
+    /// once they reach their caps instead of growing with the query stream.
+    #[test]
+    fn zone_cache_stays_within_capacity() {
+        use super::{SIGNED_STATUS_CACHE_ENTRIES, ZONE_STATUS_CACHE_ENTRIES};
+
+        let mut cache = ZoneCache::default();
+        let total = ZONE_STATUS_CACHE_ENTRIES + 1_000;
+        for index in 0..total {
+            cache.insert(
+                &n(&format!("zone{index}.example.com.")),
+                ZoneStatus::insecure(),
+                ZONE_STATUS_TTL,
+            );
+        }
+        assert!(
+            cache.entries.len() <= ZONE_STATUS_CACHE_ENTRIES,
+            "entries grew to {}",
+            cache.entries.len()
+        );
+
+        let total = SIGNED_STATUS_CACHE_ENTRIES + 1_000;
+        for index in 0..total {
+            cache.insert_signed(
+                &n(&format!("host{index}.example.com.")),
+                Security::Secure,
+                ZONE_STATUS_TTL,
+            );
+        }
+        assert!(
+            cache.signed.len() <= SIGNED_STATUS_CACHE_ENTRIES,
+            "signed grew to {}",
+            cache.signed.len()
+        );
     }
 
     #[test]
