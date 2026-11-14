@@ -1075,9 +1075,15 @@ impl IteratorResolver {
 
             scrub::scrub_authorities(&mut response, name);
 
-            if response.metadata.response_code == ResponseCode::NXDomain
-                || scrub::is_negative(&response)
-            {
+            // A recursive forwarder may answer NODATA (NOERROR with an empty
+            // answer section) without the SOA that `is_negative` requires; the
+            // SOA is only a SHOULD in RFC 2308 and nextdns.io omits it. Treat
+            // such a reply as negative here, otherwise every later forwarder is
+            // asked and the valid NODATA becomes `NoNameservers`.
+            let negative = response.metadata.response_code == ResponseCode::NXDomain
+                || (response.metadata.response_code == ResponseCode::NoError
+                    && response.answers.is_empty());
+            if negative {
                 return Ok(WalkAnswer::new(self.negative_message(
                     name.clone(),
                     qtype,

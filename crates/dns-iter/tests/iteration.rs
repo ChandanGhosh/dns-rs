@@ -788,6 +788,28 @@ async fn forward_zone_sends_recursive_queries_directly() {
 }
 
 #[tokio::test]
+async fn forward_zone_accepts_nodata_without_soa() {
+    // nextdns.io answers `*.test.nextdns.io HTTPS` with NOERROR and nothing
+    // else: no answer records and no SOA in the authority section.
+    let server = MockAuth::start(|query, _tcp| Some(reply(query, ResponseCode::NoError))).await;
+
+    let resolver = IteratorResolver::with_config(forwarding_config(server.addr, false), None)
+        .expect("resolver");
+    let message = resolver
+        .resolve("1l0b6k73l0d-421534.test.nextdns.io.", RecordType::HTTPS)
+        .await
+        .expect("a NODATA reply is a valid answer");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert!(message.answers.is_empty());
+    assert_eq!(
+        server.observed().len(),
+        1,
+        "the forwarder must not be retried for a valid NODATA reply"
+    );
+}
+
+#[tokio::test]
 async fn validating_resolver_sets_cd_on_forwarded_queries() {
     let server = MockAuth::start(|query, _tcp| {
         let question = query.queries.first()?;
