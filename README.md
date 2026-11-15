@@ -47,7 +47,7 @@ The same steps are available as `make image-smoke`.
 Published images are available for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull chandanghosh/dns-rs:29102026
+docker pull chandanghosh/dns-rs:0.3.0
 ```
 
 Each release also publishes immutable `X.Y.Z` and `latest` image tags and a
@@ -64,7 +64,7 @@ docker run -d --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:29102026
+  chandanghosh/dns-rs:0.3.0
 
 dig @127.0.0.1 -p 15353 example.com A
 docker stop dns-rs-test

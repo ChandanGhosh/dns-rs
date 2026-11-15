@@ -267,6 +267,18 @@ jobs:
                       exit 1
                   fi
                   if [ "$version" = "$latest_version" ]; then
+                      # A tag pushed by hand at this exact commit is the release
+                      # for this commit, which the publish job accepts; do not
+                      # fail the run for it. A tag at any other commit means the
+                      # version was already used for a different release.
+                      tag_sha="$(printf '%s\n' "$tags_out" | awk -v t="refs/tags/v$version" '
+                          $2 == t "^{}" { print $1; done = 1; exit }
+                          $2 == t { base = $1 }
+                          END { if (!done && base != "") print base }')"
+                      if [ -n "${GITHUB_SHA:-}" ] && [ "$tag_sha" = "$GITHUB_SHA" ]; then
+                          echo "::notice::version $version is already released as v$version at this commit"
+                          exit 0
+                      fi
                       echo "::error::workspace version $version was already released as v$latest_version; bump it again"
                       exit 1
                   fi

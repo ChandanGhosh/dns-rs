@@ -2,7 +2,7 @@ name: dns-rs
 
 services:
     resolver:
-        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:29102026}
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:0.3.0}
         container_name: dns-rs
         restart: unless-stopped
 
@@ -13,8 +13,10 @@ services:
             - "${DNS_RS_BIND_ADDR:-0.0.0.0}:${DNS_RS_HOST_PORT:-53}:53/tcp"
 
         volumes:
-            # Replace the image's default configuration with your own.
-            - ./packaging/container.toml:/etc/dns-rs/dns-rs.toml:ro
+            # Mount the configuration directory, not a single file. Reload
+            # (SIGHUP or `control reload`) re-reads this path, and a directory
+            # mount keeps working when an editor saves by renaming the file.
+            - ./packaging/config:/etc/dns-rs:ro
             # Persist the RFC 5011 auto-trust-anchor file when enabled.
             - dns-rs-data:/var/lib/dns-rs
             # Mount TLS material for DoT/DoH and enable the interfaces in the

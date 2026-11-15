@@ -18,6 +18,7 @@ fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/dns-rs-control-container.XXXXXX")"
 chmod 700 "$work"
+mkdir -p "$work/config"
 
 cleanup() {
     docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
@@ -25,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "$work/dns-rs.toml" <<'EOF'
+cat > "$work/config/dns-rs.toml" <<'EOF'
 [server]
 interfaces = ["0.0.0.0"]
 port = 53
@@ -57,7 +58,7 @@ docker run --detach \
     --cap-drop ALL \
     --cap-add NET_BIND_SERVICE \
     --security-opt no-new-privileges=true \
-    --volume "$work/dns-rs.toml:/etc/dns-rs/dns-rs.toml:ro" \
+    --volume "$work/config:/etc/dns-rs:ro" \
     "$IMAGE" >/dev/null
 
 for _ in $(seq 1 60); do
@@ -104,12 +105,50 @@ prometheus="$(control stats-prometheus)"
 grep -q 'dns_rs_cache_hits_total' <<<"$prometheus"
 echo "prometheus: ok"
 
-if reload="$(control reload 2>&1)"; then
-    echo "reload unexpectedly succeeded: $reload" >&2
+# The configuration directory is a bind mount, so a host-side edit that renames
+# a new file over the old one replaces the inode and the container still sees
+# the new content. An invalid edit must be rejected without disturbing the
+# running configuration.
+config="$work/config/dns-rs.toml"
+cp "$config" "$work/original.toml"
+cp "$work/original.toml" "$work/invalid.toml"
+printf '\nthis is not valid TOML\n' >> "$work/invalid.toml"
+mv "$work/invalid.toml" "$config"
+# Pass --socket explicitly: the client also parses the configuration to find
+# the socket, and the point here is to exercise the server's reload validation.
+if reload="$(docker exec "$CONTAINER" /usr/local/bin/dns-rs \
+    control --socket /run/dns-rs.sock reload 2>&1)"; then
+    echo "reload unexpectedly accepted an invalid configuration: $reload" >&2
     exit 1
 fi
-grep -q 'not implemented' <<<"$reload"
-echo "reload: rejected"
+echo "reload: invalid configuration rejected"
+mv "$work/original.toml" "$config"
+
+reload="$(control reload)"
+if [ "$reload" != "reloaded" ]; then
+    echo "unexpected reload reply: $reload" >&2
+    exit 1
+fi
+echo "reload: ok"
+
+# SIGHUP takes the same reload path. A process that did not install the handler
+# would terminate here; one that ignored it would not log another reload.
+reloads_before="$(docker logs "$CONTAINER" 2>&1 | grep -c 'configuration reloaded' || true)"
+docker kill --signal HUP "$CONTAINER" >/dev/null
+reloads_after="$reloads_before"
+for _ in $(seq 1 20); do
+    reloads_after="$(docker logs "$CONTAINER" 2>&1 | grep -c 'configuration reloaded' || true)"
+    if [ "$reloads_after" -gt "$reloads_before" ]; then
+        break
+    fi
+    sleep 0.5
+done
+if [ "$reloads_after" -le "$reloads_before" ]; then
+    echo "SIGHUP did not reload the configuration" >&2
+    docker logs "$CONTAINER" >&2 || true
+    exit 1
+fi
+echo "SIGHUP: ok"
 
 stop="$(control stop)"
 if [ "$stop" != "stopping" ]; then

@@ -101,7 +101,7 @@ LABEL org.opencontainers.image.title="dns-rs" \
       org.opencontainers.image.source="${SOURCE_URL}"
 
 COPY --from=builder /out/dns-rs /usr/local/bin/dns-rs
-COPY --chown=65532:65532 packaging/container.toml /etc/dns-rs/dns-rs.toml
+COPY --chown=65532:65532 packaging/config/dns-rs.toml /etc/dns-rs/dns-rs.toml
 COPY --from=builder --chown=65532:65532 /out/var/lib/dns-rs /var/lib/dns-rs
 COPY --from=builder --chown=65532:65532 /out/var/cache/dns-rs /var/cache/dns-rs
 

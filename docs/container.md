@@ -14,8 +14,8 @@ Published images live on Docker Hub at
 [`chandanghosh/dns-rs`](https://hub.docker.com/r/chandanghosh/dns-rs):
 
 ```bash
-docker pull chandanghosh/dns-rs:29102026
-docker run --rm chandanghosh/dns-rs:29102026 --version
+docker pull chandanghosh/dns-rs:0.3.0
+docker run --rm chandanghosh/dns-rs:0.3.0 --version
 ```
 
 ## Image layout
@@ -70,21 +70,21 @@ dns-rs`) applies it.
 When reloading, mount the configuration directory rather than a single file.
 Editors that save by renaming replace the host inode, and a single-file bind
 mount keeps pointing at the old inode, so the daemon would re-read the old
-content. The compose example mounts `packaging/container.toml` as one file, so
-either restart the container after editing it or switch to a directory mount.
+content. The compose example mounts `packaging/config`, which contains
+`dns-rs.toml`, as a directory; do the same for your own configuration.
 
 `make control-container` builds the image and runs this end-to-end, including
-`stop`. The socket path must be on a writable mount; a read-only root
-filesystem with only `/tmp` writable cannot create `/run/dns-rs.sock`.
+`reload` and `stop`. The socket path must be on a writable mount; a read-only
+root filesystem with only `/tmp` writable cannot create `/run/dns-rs.sock`.
 
 TLS verification uses roots compiled into the binary (`webpki-roots`), so the
 missing system CA store is not a problem. Name resolution for configuration
 values such as `forward-host` uses the C library resolver, so Docker's
 bind-mounted `/etc/resolv.conf` and `/etc/hosts` are still consulted.
 
-The default configuration in `packaging/container.toml` listens on `0.0.0.0:53`
-and allows loopback, RFC 1918, and Docker bridge clients. Replace it before
-exposing the resolver to a wider network.
+The default configuration in `packaging/config/dns-rs.toml` listens on
+`0.0.0.0:53` and allows loopback, RFC 1918, and Docker bridge clients. Replace
+it before exposing the resolver to a wider network.
 
 ## Access control
 
@@ -291,13 +291,13 @@ The smoke script runs the image with:
 If `docker build` is slow while iterating, set `SKIP_BUILD=1` after building.
 Set `KEEP=1` to leave the container running for manual queries. To smoke-test a
 foreign architecture through QEMU, set `PLATFORM`, for example
-`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:29102026 scripts/container-smoke.sh`.
+`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:0.3.0 scripts/container-smoke.sh`.
 
 ## Run manually with `docker run`
 
 Because the image is `scratch`, it has no shell. Use `docker logs`,
 `docker inspect`, and `docker exec ... /usr/local/bin/dns-rs` for diagnostics;
-`docker exec ... sh` will not work. The optional `packaging/container.toml`
+`docker exec ... sh` will not work. The optional `packaging/config` directory
 mount below assumes the repository root; omit it to use the image's built-in
 configuration.
 
@@ -315,7 +315,7 @@ docker run --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:29102026
+  chandanghosh/dns-rs:0.3.0
 ```
 
 ```bash
@@ -340,9 +340,9 @@ docker run -d --name dns-rs \
   --security-opt no-new-privileges=true \
   -p 53:53/udp \
   -p 53:53/tcp \
-  -v "$PWD/packaging/container.toml:/etc/dns-rs/dns-rs.toml:ro" \
+  -v "$PWD/packaging/config:/etc/dns-rs:ro" \
   -v dns-rs-data:/var/lib/dns-rs \
-  chandanghosh/dns-rs:29102026
+  chandanghosh/dns-rs:0.3.0
 ```
 
 Operate it with:
@@ -390,9 +390,10 @@ stub resolver first. Check with `ss -lntup '( sport = :53 )'`.
 ## Run with Docker Compose
 
 The compose file (`docker-compose.yml`) pulls the published image from Docker
-Hub, mounts `packaging/container.toml`, persists `/var/lib/dns-rs` in the
-`dns-rs-data` volume, and applies the same hardening as the manual `docker run`
-examples. It does not build the image locally.
+Hub, mounts `packaging/config` (the directory containing `dns-rs.toml`),
+persists `/var/lib/dns-rs` in the `dns-rs-data` volume, and applies the same
+hardening as the manual `docker run` examples. It does not build the image
+locally.
 
 ### Start with the published image
 
@@ -446,10 +447,10 @@ docker compose down
 docker compose down -v
 ```
 
-The compose file mounts `packaging/container.toml` read-only over the image's
-default configuration. Edit that file or mount your own. The named
-`dns-rs-data` volume is available for `/var/lib/dns-rs`, which is where the RFC
-5011 `auto-trust-anchor-file` lives when enabled.
+The compose file mounts `packaging/config` read-only over the image's default
+configuration directory. Edit `packaging/config/dns-rs.toml` or mount your own
+directory. The named `dns-rs-data` volume is available for `/var/lib/dns-rs`,
+which is where the RFC 5011 `auto-trust-anchor-file` lives when enabled.
 
 ### Configuration and TLS material
 
@@ -526,7 +527,7 @@ and CM5 running 64-bit Raspberry Pi OS (or another 64-bit ARM Linux). Pi 1,
 Pi 2, Pi 3, and Pi Zero are not supported by the published tags.
 
 ```bash
-docker pull chandanghosh/dns-rs:29102026
+docker pull chandanghosh/dns-rs:0.3.0
 DNS_RS_HOST_PORT=53 docker compose up -d
 ```
 
@@ -581,7 +582,7 @@ Image tags fall into two families under `chandanghosh/dns-rs`:
 | `latest` | no | alongside each `X.Y.Z` release |
 
 All of them carry `linux/amd64` and `linux/arm64` manifests plus BuildKit SBOM
-and provenance attestations. The current edge tag is `29102026` (29 October
+and provenance attestations. The current edge tag is `15112026` (15 November
 2026).
 
 ### Versioning
@@ -596,10 +597,10 @@ Bump it in the pull request that warrants a release:
 While the project is `0.x`, a minor bump may still break configuration.
 
 The `Release version` CI job rejects a version that is not strictly newer than
-the latest `v*` tag, a reused version, or a crate that declares its own
-`version` instead of `version.workspace = true`. Keep one release bump in
-flight at a time: two PRs that bump to the same version can both pass before
-the first tag exists, and only the first merge releases.
+the latest `v*` tag, a version already tagged on another commit, or a crate that
+declares its own `version` instead of `version.workspace = true`. Keep one
+release bump in flight at a time: two PRs that bump to the same version can both
+pass before the first tag exists, and only the first merge releases.
 
 The `publish` job in `.github/workflows/ci.yml` reads that version and compares
 it with the existing `v*` tags. When the version is newer, it also pushes the
