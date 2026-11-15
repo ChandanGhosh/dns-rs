@@ -312,7 +312,7 @@ async fn serve_connection(
     };
 
     let stop = request.command == ControlCommand::Stop;
-    let response = dispatch(&*service, request.command);
+    let response = dispatch(&*service, request.command).await;
     write_response(&mut stream, &response).await?;
     if stop {
         service.stop();
@@ -320,14 +320,14 @@ async fn serve_connection(
     Ok(())
 }
 
-fn dispatch(service: &dyn ControlService, command: ControlCommand) -> ControlResponse {
+async fn dispatch(service: &dyn ControlService, command: ControlCommand) -> ControlResponse {
     match command {
         ControlCommand::Status => ControlResponse::Status(service.status()),
         ControlCommand::Stats => ControlResponse::Stats(service.stats()),
         ControlCommand::StatsPrometheus => ControlResponse::Prometheus {
             text: service.prometheus(),
         },
-        ControlCommand::Reload => match service.reload() {
+        ControlCommand::Reload => match service.reload().await {
             Ok(()) => ControlResponse::Reloaded,
             Err(message) => ControlResponse::Error { message },
         },
@@ -433,8 +433,8 @@ mod tests {
             "dns_rs_cache_hits_total 11\n".to_owned()
         }
 
-        fn reload(&self) -> Result<(), String> {
-            Err("configuration reload is not implemented; restart the daemon".to_owned())
+        fn reload(&self) -> crate::ReloadFuture<'_> {
+            Box::pin(async { Ok(()) })
         }
 
         fn stop(&self) {
@@ -607,15 +607,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_reports_that_it_is_unavailable() {
+    async fn reload_reports_success() {
         let directory = secure_tempdir();
         let path = socket_path(&directory);
         let (_service, shutdown, handle) = start(&path);
 
         let response = exchange(&path, b"{\"command\":\"reload\"}\n").await;
-        assert!(
-            matches!(response, ControlResponse::Error { message } if message.contains("not implemented"))
-        );
+        assert_eq!(response, ControlResponse::Reloaded);
 
         shutdown.cancel();
         handle.await.expect("join").expect("run");

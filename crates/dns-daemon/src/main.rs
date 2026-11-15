@@ -256,8 +256,11 @@ async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
     let server_config = Arc::clone(&config);
-    let mut server =
-        tokio::spawn(async move { dns_server::serve(server_config, server_shutdown).await });
+    let config_path = path.to_path_buf();
+    let mut server = tokio::spawn(async move {
+        // The server owns `SIGHUP` and the control socket's `reload` command.
+        dns_server::serve_with_reload(server_config, config_path, server_shutdown).await
+    });
 
     tokio::select! {
         result = &mut server => {

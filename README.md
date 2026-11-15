@@ -207,7 +207,8 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
 **Operations**
 
 - `checkconf`, `run`, and `healthcheck` commands, configuration warnings, and structured logging.
-- Graceful shutdown on `SIGINT`/`SIGTERM`.
+- Graceful shutdown on `SIGINT`/`SIGTERM`, and live configuration reload on
+  `SIGHUP` or the control socket's `reload` command.
 - Opt-in control socket (`remote-control:`): one JSON command per connection
   over a Unix domain socket. The socket is mode `0600`, only processes with the
   daemon's effective UID may connect, and there is no TCP or TLS control
@@ -217,8 +218,17 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
   dns-rs -c /etc/dns-rs/dns-rs.conf control status
   dns-rs -c /etc/dns-rs/dns-rs.conf control stats
   dns-rs -c /etc/dns-rs/dns-rs.conf control stats-prometheus
+  dns-rs -c /etc/dns-rs/dns-rs.conf control reload
   dns-rs -c /etc/dns-rs/dns-rs.conf control stop
   ```
+
+  `reload` re-reads the file the daemon was started with, rebuilds the query
+  pipeline, and flushes the caches. The swap is atomic: in-flight resolutions
+  finish on the old pipeline. A failed reload leaves the running configuration
+  in place. Settings fixed when the listeners were bound (interfaces, ports,
+  TLS files, thread count, socket buffers, control sockets, and verbosity) need
+  a restart; a change to one of them is logged and the running listener is
+  kept.
 
   `control` uses the first enabled `control-interface`; pass `--socket PATH` to
   override it. Any client that can write one JSON line to the socket works too,
@@ -240,8 +250,8 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
   are parsed for compatibility but not applied.
 - `forward-host`, `interface-view`, `response-ip`, and AXFR/URL fetching for
   auth zones. These are parsed and reported as warnings.
-- Configuration reload without restart; the control socket's `reload` command
-  returns an unsupported error.
+- Applying listener, TLS, thread-count, socket-buffer, control-socket, or
+  verbosity changes through a reload; those require a restart.
 - The Unbound `.rpl` replay harness (`docs/replay-harness.md` is still a design)
   and live interop tests.
 
@@ -410,8 +420,8 @@ publishes the numbers to the workflow summary.
 | `dns-dnssec` | RRSIG/DNSKEY/DS validation, NSEC/NSEC3 proofs, trust anchors, RFC 5011 autotrust |
 | `dns-filter` | Placeholder for RPZ, DNS64, and response-IP filtering |
 | `dns-server` | UDP/TCP/DoT/DoH listeners, ACLs, views, EDNS, rate limiting, local/auth zones, query pipeline, statistics |
-| `dns-control` | Unix-socket control channel and JSON protocol for status, statistics, Prometheus text, and shutdown |
-| `dns-daemon` | `dns-rs` binary: `checkconf`, `run`, logging, signal handling |
+| `dns-control` | Unix-socket control channel and JSON protocol for status, statistics, Prometheus text, reload, and shutdown |
+| `dns-daemon` | `dns-rs` binary: `checkconf`, `run`, logging, signal handling (`SIGTERM`/`SIGINT`/`SIGHUP`) |
 | `dns-testutil` | DNS message builders for tests plus the signed authoritative mock used by the DNSSEC benchmark; replay support still planned |
 
 ## Configuration
@@ -447,9 +457,9 @@ Supported `unbound.conf` blocks:
   `control-interface` Unix socket paths (an optional `unix:` prefix is
   accepted). TCP control is not supported, so `control-port` must remain the
   Unbound default `8953`. Commands are sent as one JSON line per connection:
-  `status`, `stats`, `stats-prometheus`, and `stop`. The socket is mode `0600`,
-  peers are authorized by effective UID, and `reload` returns an unsupported
-  error until live reconfiguration exists.
+  `status`, `stats`, `stats-prometheus`, `reload`, and `stop`. The socket is
+  mode `0600`, peers are authorized by effective UID, and `reload` re-reads the
+  daemon's own configuration file (the request cannot name a path).
 - `include:` and `include-toplevel:` — relative or absolute files, with cycle
   detection.
 

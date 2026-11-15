@@ -9,14 +9,14 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::pipeline::{QueryPipeline, Transport};
+use crate::pipeline::{PipelineHandle, Transport};
 use crate::tcp;
 use dns_proto::buffer_pool::BufferPool;
 
 pub async fn run(
     listener: TcpListener,
     acceptor: TlsAcceptor,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     shutdown: CancellationToken,
     connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
@@ -40,7 +40,7 @@ pub async fn run(
                             }
                         };
                         let acceptor = acceptor.clone();
-                        let pipeline = Arc::clone(&pipeline);
+                        let pipeline = pipeline.clone();
                         let pool = pool.clone();
                         tokio::spawn(async move {
                             let _permit = permit;

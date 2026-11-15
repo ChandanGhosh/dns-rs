@@ -12,6 +12,8 @@ mod pipeline;
 mod ratelimit;
 #[cfg(target_os = "linux")]
 mod recv_batch;
+#[cfg(unix)]
+mod reload;
 #[cfg(target_os = "linux")]
 mod send_batch;
 mod tcp;
@@ -19,6 +21,7 @@ mod tls;
 mod udp;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
@@ -30,7 +33,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-pub use pipeline::{PipelineStats, QueryPipeline, Transport};
+pub use pipeline::{PipelineHandle, PipelineStats, QueryPipeline, Transport};
 
 /// Start the `stats phases ...` reporter used by the benchmark runner.
 /// Only exists in `phase-stats` builds.
@@ -54,7 +57,62 @@ pub enum ServerError {
 
 /// Run the server until the shutdown token is cancelled.
 pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(), ServerError> {
-    let pipeline = Arc::new(QueryPipeline::new(Arc::clone(&config)));
+    serve_inner(config, None, shutdown).await
+}
+
+/// Run the server with live configuration reload enabled from `config_path`.
+///
+/// A reload is triggered by `SIGHUP` or the control socket's `reload` command.
+/// It re-reads `config_path`, builds a fresh pipeline (and therefore empty
+/// caches), and swaps it in atomically without interrupting in-flight queries.
+/// If the file cannot be read, parsed, or validated, the running configuration
+/// is kept.
+///
+/// Settings that are fixed when the listeners are bound (interfaces, ports,
+/// TLS files, thread count, socket buffers, control sockets, and verbosity)
+/// cannot be applied by a reload. A change to one of them is logged and the
+/// running listener is kept; restart the process to apply it.
+pub async fn serve_with_reload(
+    config: Arc<Config>,
+    config_path: PathBuf,
+    shutdown: CancellationToken,
+) -> Result<(), ServerError> {
+    #[cfg(unix)]
+    {
+        serve_inner(config, Some(config_path), shutdown).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config_path;
+        warn!("configuration reload is only supported on Unix; starting without it");
+        serve_inner(config, None, shutdown).await
+    }
+}
+
+async fn serve_inner(
+    config: Arc<Config>,
+    config_path: Option<PathBuf>,
+    shutdown: CancellationToken,
+) -> Result<(), ServerError> {
+    let pipeline = PipelineHandle::new(Arc::clone(&config));
+    #[cfg(unix)]
+    let reloader = config_path.map(|path| reload::Reloader::new(path, pipeline.clone()));
+    #[cfg(not(unix))]
+    let _ = config_path;
+    // Install the SIGHUP handler before binding anything. If a reload request
+    // arrives during startup it is queued and handled once the server is up,
+    // instead of taking the default action and terminating the process.
+    #[cfg(unix)]
+    let hangup = reloader.as_ref().and_then(|_| {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::hangup()) {
+            Ok(signal) => Some(signal),
+            Err(error) => {
+                warn!(%error, "failed to install SIGHUP handler; signal reload is unavailable");
+                None
+            }
+        }
+    });
     let tls_material = tls::load(&config.server)?;
 
     // Unbound's `incoming-num-tcp` is per thread. Enforce the combined limit
@@ -132,7 +190,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                         return Err(ServerError::Io(err));
                     }
                 };
-                let pipeline = Arc::clone(&pipeline);
+                let pipeline = pipeline.clone();
                 let shutdown = shutdown.clone();
                 let acceptor = acceptor.clone();
                 let connections = Arc::clone(connections);
@@ -205,7 +263,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                         return Err(ServerError::Io(err));
                     }
                 };
-                let pipeline = Arc::clone(&pipeline);
+                let pipeline = pipeline.clone();
                 let shutdown = shutdown.clone();
                 let acceptor = acceptor.clone();
                 let endpoint = config.server.http_endpoint.clone();
@@ -247,7 +305,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                     config.server.udp_send_buffer_size,
                 ) {
                     Ok(socket) => {
-                        let pipeline = Arc::clone(&pipeline);
+                        let pipeline = pipeline.clone();
                         let shutdown = shutdown.clone();
                         tokio::spawn(async move {
                             if let Err(err) = udp::run(socket, pipeline, shutdown).await {
@@ -310,7 +368,7 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
                         return Err(ServerError::Io(err));
                     }
                 };
-                let pipeline = Arc::clone(&pipeline);
+                let pipeline = pipeline.clone();
                 let shutdown = shutdown.clone();
                 let connections = Arc::clone(connections);
                 tokio::spawn(async move {
@@ -331,13 +389,19 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
     if config.remote_control.enabled {
         control::start(
             &config.remote_control,
-            Arc::clone(&pipeline),
+            pipeline.clone(),
+            reloader.clone(),
             shutdown.clone(),
         )?;
     }
     #[cfg(not(unix))]
     if config.remote_control.enabled {
         warn!("remote-control is only supported on Unix; control socket not started");
+    }
+
+    #[cfg(unix)]
+    if let (Some(reloader), Some(hangup)) = (reloader, hangup) {
+        spawn_hangup_handler(reloader, hangup, shutdown.clone());
     }
 
     // TODO(#5): Drop privileges to the configured user.
@@ -363,6 +427,34 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
     shutdown.cancelled().await;
     info!("server stopped");
     Ok(())
+}
+
+/// Reload the configuration when the process receives `SIGHUP`.
+///
+/// The handler lives for the whole server lifetime and exits when `shutdown`
+/// fires. A failed reload is logged; the running configuration is kept.
+#[cfg(unix)]
+fn spawn_hangup_handler(
+    reloader: reload::Reloader,
+    mut hangup: tokio::signal::unix::Signal,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = hangup.recv() => {
+                    info!("SIGHUP received; reloading configuration");
+                    if let Err(error) = reloader.reload().await {
+                        warn!(
+                            %error,
+                            "configuration reload failed; keeping the running configuration"
+                        );
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn is_family_allowed(config: &Config, addr: &SocketAddr) -> bool {

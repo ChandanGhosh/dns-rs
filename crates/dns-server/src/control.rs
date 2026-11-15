@@ -1,8 +1,9 @@
 //! Control socket service backed by the query pipeline.
 //!
-//! The service only reads counters and asks the existing shutdown token to
-//! cancel. It has no command that executes code, changes policy, or takes a
-//! filesystem path.
+//! The service reads counters, asks the existing shutdown token to cancel, and
+//! re-reads the daemon's own configuration file. It has no command that
+//! executes code and no command that takes a filesystem path: a reload can only
+//! read the file the daemon was started with.
 
 use std::process;
 use std::sync::Arc;
@@ -10,12 +11,13 @@ use std::time::Instant;
 
 use dns_config::RemoteControlConfig;
 use dns_control::{
-    ControlError, ControlService, PROTOCOL_VERSION, Server, StatsSnapshot, StatusInfo,
+    ControlError, ControlService, PROTOCOL_VERSION, ReloadFuture, Server, StatsSnapshot, StatusInfo,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::pipeline::{PipelineStats, QueryPipeline};
+use crate::pipeline::{PipelineHandle, PipelineStats};
+use crate::reload::Reloader;
 
 /// Prefer the version injected by container builds, matching the daemon.
 const VERSION: &str = match option_env!("DNS_RS_VERSION") {
@@ -24,7 +26,8 @@ const VERSION: &str = match option_env!("DNS_RS_VERSION") {
 };
 
 struct Service {
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
+    reloader: Option<Reloader>,
     shutdown: CancellationToken,
     started: Instant,
 }
@@ -47,8 +50,17 @@ impl ControlService for Service {
         self.pipeline.stats().render_prometheus()
     }
 
-    fn reload(&self) -> Result<(), String> {
-        Err("configuration reload is not implemented; restart the daemon".to_owned())
+    fn reload(&self) -> ReloadFuture<'_> {
+        Box::pin(async move {
+            let Some(reloader) = &self.reloader else {
+                return Err(
+                    "configuration reload is disabled; the daemon was not started with a \
+                     configuration file"
+                        .to_owned(),
+                );
+            };
+            reloader.reload().await.map_err(|error| error.to_string())
+        })
     }
 
     fn stop(&self) {
@@ -76,7 +88,8 @@ fn snapshot(stats: PipelineStats) -> StatsSnapshot {
 /// startup without leaving a partially active control channel.
 pub(crate) fn start(
     config: &RemoteControlConfig,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
+    reloader: Option<Reloader>,
     shutdown: CancellationToken,
 ) -> Result<(), ControlError> {
     let mut servers = Vec::with_capacity(config.interfaces.len());
@@ -86,6 +99,7 @@ pub(crate) fn start(
 
     let service = Arc::new(Service {
         pipeline,
+        reloader,
         shutdown: shutdown.clone(),
         started: Instant::now(),
     });

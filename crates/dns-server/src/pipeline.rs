@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use dns_cache::{
     CacheHitMeta, CacheStats, CoalesceStats, DEFAULT_STALE_TTL, InfraCache, MessageCache, QueryKey,
     QueryRegistry, RegistryEntry, RrsetCache, WireRequest, patch_question, patch_wire,
@@ -373,6 +374,89 @@ pub struct QueryPipeline {
     auth_downstream: local::LocalZones,
     auth_upstream: local::LocalZones,
     private: PrivateAddressFilter,
+    /// Stops long-lived background work (RFC 5011 maintenance) when the last
+    /// handle to this pipeline is dropped, for example after a reload.
+    _lifetime: Arc<PipelineLifetime>,
+}
+
+/// Cancels a pipeline's background work when its last clone is dropped.
+///
+/// `QueryPipeline` is cloned per query and per prefetch, so cancellation
+/// cannot live in `Drop for QueryPipeline`: dropping a short-lived per-query
+/// clone must not stop the maintenance task of the pipeline that is still
+/// installed. Every clone shares this guard, and the token fires only when the
+/// last clone goes away (for example after a reload swaps in a new pipeline).
+struct PipelineLifetime(CancellationToken);
+
+impl Drop for PipelineLifetime {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// A handle to the active query pipeline that can be swapped on reload.
+///
+/// Listeners and the control service hold this handle instead of an
+/// `Arc<QueryPipeline>`. A reload builds a fresh pipeline and stores it
+/// atomically; queries already in flight keep the pipeline they started with
+/// until they finish, so a reload never interrupts an upstream resolution.
+#[derive(Clone)]
+pub struct PipelineHandle {
+    current: Arc<ArcSwap<QueryPipeline>>,
+}
+
+impl PipelineHandle {
+    /// Create a handle around a pipeline built from `config`.
+    pub fn new(config: Arc<Config>) -> Self {
+        Self {
+            current: Arc::new(ArcSwap::from_pointee(QueryPipeline::new(config))),
+        }
+    }
+
+    /// Handle one raw query, cancelling upstream work when `cancel` fires.
+    pub async fn handle_with_cancel(
+        &self,
+        bytes: &[u8],
+        client: SocketAddr,
+        transport: Transport,
+        cancel: CancellationToken,
+    ) -> Option<Vec<u8>> {
+        // Load the pipeline once and keep it alive across the await. The
+        // query must not observe a pipeline that is replaced mid-flight.
+        let pipeline = self.current.load_full();
+        pipeline
+            .handle_with_cancel(bytes, client, transport, cancel)
+            .await
+    }
+
+    /// Run the synchronous front half of one query.
+    pub(crate) fn prepare(
+        &self,
+        bytes: &[u8],
+        client: SocketAddr,
+        transport: Transport,
+        cancel: CancellationToken,
+        reply_pool: &mut Vec<Vec<u8>>,
+    ) -> Prepared {
+        self.current
+            .load()
+            .prepare(bytes, client, transport, cancel, reply_pool)
+    }
+
+    /// Return a snapshot of the current pipeline's counters.
+    pub fn stats(&self) -> PipelineStats {
+        self.current.load().stats()
+    }
+
+    /// Atomically install a fully built pipeline.
+    pub(crate) fn replace(&self, pipeline: QueryPipeline) {
+        self.current.store(Arc::new(pipeline));
+    }
+
+    /// The configuration consumed by the current pipeline.
+    pub(crate) fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.current.load().config)
+    }
 }
 
 impl QueryPipeline {
@@ -582,10 +666,17 @@ impl QueryPipeline {
             .map_err(|error| warn!(%error, "failed to create iterative resolver"))
             .ok();
 
+        let lifetime = Arc::new(PipelineLifetime(CancellationToken::new()));
         if let (Some((tracker, path)), Some(resolver)) = (auto_anchor, resolver.clone())
             && config.server.dnssec_validation
         {
-            spawn_autotrust(resolver, trust_store.clone(), tracker, path);
+            spawn_autotrust(
+                resolver,
+                trust_store.clone(),
+                tracker,
+                path,
+                lifetime.0.clone(),
+            );
         }
 
         let local_policy = local::LocalPolicy::from_config(&config);
@@ -613,6 +704,7 @@ impl QueryPipeline {
             auth_downstream,
             auth_upstream,
             private,
+            _lifetime: lifetime,
         }
     }
 
@@ -1578,6 +1670,7 @@ fn spawn_autotrust(
     store: TrustStore,
     mut tracker: AutoTrustAnchor,
     path: PathBuf,
+    cancel: CancellationToken,
 ) {
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
         return;
@@ -1586,12 +1679,19 @@ fn spawn_autotrust(
         let mut ticker = tokio::time::interval(Duration::from_secs(3600));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = ticker.tick() => {}
+            }
             let now = unix_now();
             if !tracker.is_due(now) {
                 continue;
             }
-            match resolver.probe_dnskey(&tracker.zone).await {
+            let probed = tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = resolver.probe_dnskey(&tracker.zone) => result,
+            };
+            match probed {
                 Ok(probed) => {
                     tracker.update_with_revocations(&probed.keys, &probed.revoked, now);
                     tracker.record_success(now);
@@ -1683,6 +1783,22 @@ mod tests {
 
     fn client() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234)
+    }
+
+    #[test]
+    fn per_query_clones_do_not_cancel_the_pipeline_lifetime() {
+        let pipeline = pipeline();
+        let lifetime = pipeline._lifetime.0.clone();
+
+        // The query path clones the pipeline for every cache miss. Dropping
+        // such a clone must not stop the installed pipeline's maintenance task.
+        let per_query = pipeline.clone();
+        drop(per_query);
+        assert!(!lifetime.is_cancelled());
+
+        // Dropping the last clone (a reload) releases the background work.
+        drop(pipeline);
+        assert!(lifetime.is_cancelled());
     }
 
     #[tokio::test]

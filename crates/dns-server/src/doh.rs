@@ -25,7 +25,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::pipeline::{QueryPipeline, Transport};
+use crate::pipeline::{PipelineHandle, Transport};
 
 const DNS_MESSAGE: &str = "application/dns-message";
 const MAX_REQUEST: usize = 65_535;
@@ -34,7 +34,7 @@ pub async fn run(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     endpoint: String,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     shutdown: CancellationToken,
     connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
@@ -61,7 +61,7 @@ pub async fn run(
                             }
                         };
                         let acceptor = acceptor.clone();
-                        let pipeline = Arc::clone(&pipeline);
+                        let pipeline = pipeline.clone();
                         let endpoint = endpoint.clone();
                         tokio::spawn(async move {
                             // Held for the whole connection lifetime, like the
@@ -91,7 +91,7 @@ pub async fn run(
                                         };
 
                                     let service = service_fn(move |request| {
-                                        handle(request, Arc::clone(&pipeline), client, endpoint.clone())
+                                        handle(request, pipeline.clone(), client, endpoint.clone())
                                     });
                                     let mut builder = Builder::new(TokioExecutor::new());
                                     // Without a timer, hyper enforces no header-read or
@@ -125,7 +125,7 @@ pub async fn run(
 
 async fn handle(
     request: Request<Incoming>,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     client: SocketAddr,
     endpoint: String,
 ) -> Result<Response<Full<Bytes>>, !> {
@@ -137,7 +137,7 @@ async fn handle(
 
 async fn handle_inner(
     request: Request<Incoming>,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     client: SocketAddr,
     endpoint: &str,
 ) -> Result<Response<Full<Bytes>>, StatusCode> {

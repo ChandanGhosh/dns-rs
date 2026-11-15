@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+arc-swap.workspace = true
 dns-cache.workspace = true
 dns-client.workspace = true
 dns-config.workspace = true
@@ -43,6 +44,7 @@ libc.workspace = true
 
 [dev-dependencies]
 dns-testutil.workspace = true
+tempfile = "3"
 rcgen = "0.13"
 ring.workspace = true
 tokio = { workspace = true, features = ["test-util", "time"] }

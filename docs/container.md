@@ -50,7 +50,28 @@ docker exec dns-rs /usr/local/bin/dns-rs \
     -c /etc/dns-rs/dns-rs.toml control status
 docker exec dns-rs /usr/local/bin/dns-rs \
     -c /etc/dns-rs/dns-rs.toml control stats-prometheus
+
+# Re-read the configuration and flush the caches without a restart.
+docker exec dns-rs /usr/local/bin/dns-rs \
+    -c /etc/dns-rs/dns-rs.toml control reload
+
+# Equivalent: SIGHUP to the daemon, which is the container's PID 1.
+docker kill -s HUP dns-rs
 ```
+
+A reload replaces the query pipeline atomically: in-flight queries finish on
+the old pipeline, and a file that fails to parse or validate leaves the running
+configuration untouched. Interfaces, ports, TLS certificate/key paths, the
+thread count, socket buffer sizes, control socket paths, and `verbosity` are
+fixed when the listeners are bound. A change to one of them is logged as
+requiring a restart; `docker compose restart resolver` (or `docker restart
+dns-rs`) applies it.
+
+When reloading, mount the configuration directory rather than a single file.
+Editors that save by renaming replace the host inode, and a single-file bind
+mount keeps pointing at the old inode, so the daemon would re-read the old
+content. The compose example mounts `packaging/container.toml` as one file, so
+either restart the container after editing it or switch to a directory mount.
 
 `make control-container` builds the image and runs this end-to-end, including
 `stop`. The socket path must be on a writable mount; a read-only root
@@ -409,7 +430,13 @@ docker compose ps
 docker compose exec resolver \
   /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.toml healthcheck
 
-# Restart after editing packaging/container.toml
+# Apply a configuration edit without dropping in-flight queries. This covers
+# resolver policy, zones, ACLs, DNSSEC, and cache settings. Listener, TLS,
+# thread-count, and socket-buffer changes still need a restart.
+docker compose exec resolver \
+  /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.toml control reload
+
+# Restart to apply listener/TLS/thread changes or to re-read a single-file mount
 docker compose restart resolver
 
 # Stop, then remove the container and network
@@ -439,6 +466,11 @@ Files must be readable by UID 65532. For DoT/DoH, enable the matching
 interfaces in the configuration (for example `0.0.0.0@853` and `0.0.0.0@443`)
 and set `tls_service_key` and `tls_service_pem`. The daemon selects the
 listener protocol from the port, as in Unbound.
+
+A reload re-reads the configuration but does not replace certificates or bind
+new ports. Rotating TLS material, adding an interface, or changing the thread
+count requires a restart. Rotating a certificate at the same path still needs a
+restart because the acceptor is built once at startup.
 
 ## Healthcheck
 

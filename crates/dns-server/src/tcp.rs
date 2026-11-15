@@ -8,7 +8,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::pipeline::{QueryPipeline, Transport};
+use crate::pipeline::{PipelineHandle, Transport};
 use dns_proto::buffer_pool::BufferPool;
 use dns_proto::{decode, encode};
 
@@ -45,7 +45,7 @@ impl Probe for tokio_rustls::server::TlsStream<TcpStream> {
 
 pub async fn run(
     listener: TcpListener,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     shutdown: CancellationToken,
     connections: Arc<Semaphore>,
 ) -> std::io::Result<()> {
@@ -71,7 +71,7 @@ pub async fn run(
                                 }
                             }
                         };
-                        let pipeline = Arc::clone(&pipeline);
+                        let pipeline = pipeline.clone();
                         let pool = pool.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
@@ -102,7 +102,7 @@ const MAX_TCP_MESSAGE: usize = u16::MAX as usize;
 pub async fn serve_connection<S>(
     mut stream: S,
     client: SocketAddr,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     transport: Transport,
     pool: BufferPool,
 ) where

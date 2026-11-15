@@ -68,6 +68,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db4c94f57a570fce5d381be3289b3f79aef6332d72948fe82ab5772e423ccf92"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -293,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "dns-cache"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "dns-proto",
@@ -305,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dns-client"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "dns-proto",
  "http-body-util",
@@ -322,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "dns-config"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "dns-proto",
  "ipnet",
@@ -334,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "dns-control"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -348,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "dns-daemon"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -367,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "dns-dnssec"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "data-encoding",
  "dns-proto",
@@ -380,11 +389,11 @@ dependencies = [
 
 [[package]]
 name = "dns-filter"
-version = "0.2.5"
+version = "0.3.0"
 
 [[package]]
 name = "dns-iter"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "data-encoding",
  "dns-cache",
@@ -401,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "dns-proto"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "hickory-proto",
  "thiserror",
@@ -409,8 +418,9 @@ dependencies = [
 
 [[package]]
 name = "dns-server"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
+ "arc-swap",
  "bytes",
  "dashmap",
  "data-encoding",
@@ -432,6 +442,7 @@ dependencies = [
  "ring",
  "rustls",
  "socket2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -441,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "dns-testutil"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "dns-dnssec",
  "dns-proto",

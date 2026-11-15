@@ -10,7 +10,7 @@ use tracing::debug;
 use tracing::warn;
 
 use crate::phase::{Phase, PhaseTimer};
-use crate::pipeline::{Prepared, QueryPipeline, Transport};
+use crate::pipeline::{PipelineHandle, Prepared, Transport};
 
 /// Largest possible DNS message; matches `dns_proto`'s buffer pool size.
 pub(crate) const MAX_DATAGRAM: usize = 65_535;
@@ -53,7 +53,7 @@ pub fn bind(
 /// flush; listener errors are reported as `Err`
 pub async fn run(
     socket: UdpSocket,
-    pipeline: Arc<QueryPipeline>,
+    pipeline: PipelineHandle,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     let socket = Arc::new(socket);
@@ -77,7 +77,7 @@ pub async fn run(
 #[cfg(target_os = "linux")]
 async fn receive_loop(
     socket: &Arc<UdpSocket>,
-    pipeline: &Arc<QueryPipeline>,
+    pipeline: &PipelineHandle,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     let mut batch = crate::recv_batch::RecvBatch::new();
@@ -197,7 +197,7 @@ fn recycle_prefix(pool: &mut Vec<Vec<u8>>, answers: &mut Vec<(Vec<u8>, SocketAdd
 #[cfg(not(target_os = "linux"))]
 async fn receive_loop(
     socket: &Arc<UdpSocket>,
-    pipeline: &Arc<QueryPipeline>,
+    pipeline: &PipelineHandle,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
     // One scratch datagram per receive loop. Dispatch is fully synchronous
@@ -233,7 +233,7 @@ async fn receive_loop(
 /// `query` must borrow no state that outlives this call: both reply kinds
 /// either send here or move into a task that owns everything it needs.
 #[cfg(not(target_os = "linux"))]
-fn dispatch(socket: &Arc<UdpSocket>, pipeline: &QueryPipeline, query: &[u8], client: SocketAddr) {
+fn dispatch(socket: &Arc<UdpSocket>, pipeline: &PipelineHandle, query: &[u8], client: SocketAddr) {
     let mut reply_pool = Vec::new();
     let prepared = pipeline.prepare(
         query,

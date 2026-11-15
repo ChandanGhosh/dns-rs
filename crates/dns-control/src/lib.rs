@@ -2,9 +2,12 @@
 //!
 //! The control channel is a Unix domain socket carrying one bounded JSON
 //! request per connection. It deliberately has no network transport and no
-//! command that executes code: a process can only query the daemon or ask it
-//! to stop if it has the daemon's effective UID.
+//! command that executes code or names a filesystem path: a process can only
+//! query the daemon, ask it to re-read its own configuration, or ask it to stop
+//! if it has the daemon's effective UID.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -41,8 +44,7 @@ pub enum ControlCommand {
     Stats,
     /// Return pipeline counters in Prometheus text format.
     StatsPrometheus,
-    /// Replace the running configuration when supported; currently returns an
-    /// error because live reload is not implemented.
+    /// Re-read the configuration file and replace the running configuration.
     Reload,
     /// Stop the daemon gracefully.
     Stop,
@@ -114,6 +116,13 @@ pub enum ControlResponse {
     },
 }
 
+/// Future returned by [`ControlService::reload`].
+///
+/// Reloading reads and validates a file, so it is asynchronous. The boxed
+/// future keeps the trait object-safe without pulling in an async-trait
+/// dependency.
+pub type ReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
 /// What the daemon exposes to the control socket.
 ///
 /// Implementations must be cheap and non-blocking: they run on the control
@@ -126,8 +135,8 @@ pub trait ControlService: Send + Sync + 'static {
     fn stats(&self) -> StatsSnapshot;
     /// Render the counters in Prometheus text format.
     fn prometheus(&self) -> String;
-    /// Replace the running configuration, or explain why that is impossible.
-    fn reload(&self) -> Result<(), String>;
+    /// Re-read the configuration file, or explain why that is impossible.
+    fn reload(&self) -> ReloadFuture<'_>;
     /// Request a graceful shutdown.
     fn stop(&self);
 }

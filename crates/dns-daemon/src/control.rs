@@ -58,13 +58,23 @@ fn socket_from_config(path: &Path) -> Result<PathBuf> {
 fn send(path: &Path, command: ControlCommand) -> Result<()> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     use dns_control::{CONNECTION_TIMEOUT, ControlRequest, ControlResponse, MAX_RESPONSE_BYTES};
 
+    /// A reload re-reads the file and may resolve upstream hostnames, so it can
+    /// take longer than a status or statistics request.
+    const RELOAD_TIMEOUT: Duration = Duration::from_secs(30);
+
+    let timeout = if command == ControlCommand::Reload {
+        RELOAD_TIMEOUT
+    } else {
+        CONNECTION_TIMEOUT
+    };
     let mut stream = UnixStream::connect(path)
         .with_context(|| format!("failed to connect to control socket {}", path.display()))?;
     stream
-        .set_read_timeout(Some(CONNECTION_TIMEOUT))
+        .set_read_timeout(Some(timeout))
         .context("failed to set the control read timeout")?;
     stream
         .set_write_timeout(Some(CONNECTION_TIMEOUT))
