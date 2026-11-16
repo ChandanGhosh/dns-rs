@@ -14,8 +14,8 @@ Published images live on Docker Hub at
 [`chandanghosh/dns-rs`](https://hub.docker.com/r/chandanghosh/dns-rs):
 
 ```bash
-docker pull chandanghosh/dns-rs:0.3.0
-docker run --rm chandanghosh/dns-rs:0.3.0 --version
+docker pull chandanghosh/dns-rs:0.3.1
+docker run --rm chandanghosh/dns-rs:0.3.1 --version
 ```
 
 ## Image layout
@@ -291,7 +291,7 @@ The smoke script runs the image with:
 If `docker build` is slow while iterating, set `SKIP_BUILD=1` after building.
 Set `KEEP=1` to leave the container running for manual queries. To smoke-test a
 foreign architecture through QEMU, set `PLATFORM`, for example
-`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:0.3.0 scripts/container-smoke.sh`.
+`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:0.3.1 scripts/container-smoke.sh`.
 
 ## Run manually with `docker run`
 
@@ -315,7 +315,7 @@ docker run --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:0.3.0
+  chandanghosh/dns-rs:0.3.1
 ```
 
 ```bash
@@ -342,7 +342,7 @@ docker run -d --name dns-rs \
   -p 53:53/tcp \
   -v "$PWD/packaging/config:/etc/dns-rs:ro" \
   -v dns-rs-data:/var/lib/dns-rs \
-  chandanghosh/dns-rs:0.3.0
+  chandanghosh/dns-rs:0.3.1
 ```
 
 Operate it with:
@@ -527,7 +527,7 @@ and CM5 running 64-bit Raspberry Pi OS (or another 64-bit ARM Linux). Pi 1,
 Pi 2, Pi 3, and Pi Zero are not supported by the published tags.
 
 ```bash
-docker pull chandanghosh/dns-rs:0.3.0
+docker pull chandanghosh/dns-rs:0.3.1
 DNS_RS_HOST_PORT=53 docker compose up -d
 ```
 
