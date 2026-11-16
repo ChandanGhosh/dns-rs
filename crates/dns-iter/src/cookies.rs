@@ -15,6 +15,9 @@ use ring::hmac;
 const COOKIE_OPTION_CODE: u16 = 10;
 /// Total cookie length we send upstream: 8-byte client part + 8-byte server part.
 const SERVER_COOKIE_LEN: usize = 8;
+/// Maximum number of upstream server cookies remembered. Each value is at most
+/// 32 bytes, so this bounds the jar when a zone rotates nameserver addresses.
+const MAX_SERVER_COOKIES: usize = 4096;
 
 #[derive(Clone)]
 pub struct CookieJar {
@@ -89,6 +92,14 @@ impl CookieJar {
         if data.len() > 8
             && let Ok(mut cookies) = self.server_cookies.lock()
         {
+            if cookies.len() >= MAX_SERVER_COOKIES
+                && !cookies.contains_key(&server)
+                && let Some(evicted) = cookies.keys().next().copied()
+            {
+                // Evict one entry so a zone that keeps rotating nameserver
+                // addresses cannot grow the jar without bound.
+                cookies.remove(&evicted);
+            }
             cookies.insert(server, data[8..].to_vec());
         }
         true
@@ -129,7 +140,7 @@ mod tests {
 
     use dns_proto::{EDNS_COOKIE, Edns, EdnsOption};
 
-    use super::CookieJar;
+    use super::{CookieJar, MAX_SERVER_COOKIES};
 
     fn server() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 41, 0, 4)), 53)
@@ -169,6 +180,26 @@ mod tests {
             panic!("cookie option expected");
         };
         assert_eq!(sent.len(), 16);
+    }
+
+    #[test]
+    fn bounds_the_server_cookie_jar() {
+        let jar = CookieJar::new(b"test-secret");
+        for port in 0..(MAX_SERVER_COOKIES + 16) {
+            let server = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), port as u16);
+            let mut data = jar.client_cookie(server).to_vec();
+            data.extend_from_slice(&[7u8; 8]);
+            let mut edns = Edns::new();
+            edns.options_mut().insert(EdnsOption::Unknown(10, data));
+            assert!(jar.validate_response(server, Some(&edns)));
+        }
+
+        let stored = jar
+            .server_cookies
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        assert_eq!(stored, MAX_SERVER_COOKIES);
     }
 
     #[test]

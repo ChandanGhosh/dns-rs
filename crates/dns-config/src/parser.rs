@@ -252,13 +252,60 @@ impl Parser {
             "num-threads" => {
                 self.config.server.num_threads = parse_thread_count(path, line, key, value)?;
             }
-            "do-daemonize" => self.config.server.do_daemonize = parse_bool(path, line, key, value)?,
+            "do-daemonize" => {
+                let enabled = parse_bool(path, line, key, value)?;
+                self.config.server.do_daemonize = enabled;
+                if enabled {
+                    self.warn(
+                        path,
+                        line,
+                        "do-daemonize is parsed but not enforced; run the resolver under a process supervisor",
+                    );
+                }
+            }
             "username" => self.config.server.username = optional_string(value),
-            "chroot" => self.config.server.chroot = optional_path(value),
+            "chroot" => {
+                self.config.server.chroot = optional_path(value);
+                if self.config.server.chroot.is_some() {
+                    self.warn(
+                        path,
+                        line,
+                        "chroot is parsed but not enforced; the resolver does not change its root directory",
+                    );
+                }
+            }
             "directory" => self.config.server.directory = optional_path(value),
-            "logfile" => self.config.server.logfile = optional_path(value),
-            "pidfile" => self.config.server.pidfile = optional_path(value),
-            "use-syslog" => self.config.server.use_syslog = parse_bool(path, line, key, value)?,
+            "logfile" => {
+                self.config.server.logfile = optional_path(value);
+                if self.config.server.logfile.is_some() {
+                    self.warn(
+                        path,
+                        line,
+                        "logfile is parsed but not enforced; collect logs from stderr or the process supervisor",
+                    );
+                }
+            }
+            "pidfile" => {
+                self.config.server.pidfile = optional_path(value);
+                if self.config.server.pidfile.is_some() {
+                    self.warn(
+                        path,
+                        line,
+                        "pidfile is parsed but not enforced; track the process through its supervisor",
+                    );
+                }
+            }
+            "use-syslog" => {
+                let enabled = parse_bool(path, line, key, value)?;
+                self.config.server.use_syslog = enabled;
+                if enabled {
+                    self.warn(
+                        path,
+                        line,
+                        "use-syslog is parsed but not enforced; logs go to stderr",
+                    );
+                }
+            }
             "do-ip4" => self.config.server.do_ip4 = parse_bool(path, line, key, value)?,
             "do-ip6" => self.config.server.do_ip6 = parse_bool(path, line, key, value)?,
             "do-udp" => self.config.server.do_udp = parse_bool(path, line, key, value)?,
@@ -1257,6 +1304,42 @@ server:
                 .any(|warning| warning.message.contains("msg-cache-size"))
         );
         assert!(loaded.config.server.dnssec_validation);
+    }
+
+    #[test]
+    fn warns_about_security_options_that_are_not_enforced() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+    chroot: "/var/lib/dns-rs"
+    username: "dns"
+    do-daemonize: yes
+    logfile: "/var/log/dns-rs.log"
+    pidfile: "/run/dns-rs.pid"
+    use-syslog: yes
+"#,
+        )
+        .expect("write config");
+
+        let loaded = parse_unbound_file(&path).expect("parse config");
+        for key in ["chroot", "do-daemonize", "logfile", "pidfile", "use-syslog"] {
+            assert!(
+                loaded
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.message.contains(key)),
+                "missing warning for {key}: {:?}",
+                loaded.warnings
+            );
+        }
+        assert_eq!(
+            loaded.config.server.chroot.as_deref(),
+            Some(std::path::Path::new("/var/lib/dns-rs"))
+        );
     }
 
     #[test]

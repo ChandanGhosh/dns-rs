@@ -1476,7 +1476,7 @@ impl QueryPipeline {
                 if wire.len() <= limit {
                     Some(wire)
                 } else {
-                    Some(truncate(message, limit))
+                    truncate(message, limit)
                 }
             }
         }
@@ -1729,13 +1729,16 @@ fn ede_payload(info_code: u16, text: &str) -> Vec<u8> {
 ///
 /// The TC bit is always set; records are dropped in order of increasing
 /// importance (additional, authority, answer, OPT) so clients retry over TCP.
-fn truncate(mut message: Message, limit: usize) -> Vec<u8> {
+///
+/// Returns `None` when even a question-only message cannot be encoded, so the
+/// caller drops the query instead of sending a zero-length datagram.
+fn truncate(mut message: Message, limit: usize) -> Option<Vec<u8>> {
     message.metadata.truncation = true;
     loop {
         if let Ok(wire) = encode(&message)
             && wire.len() <= limit
         {
-            return wire;
+            return Some(wire);
         }
 
         if !message.additionals.is_empty() {
@@ -1758,7 +1761,7 @@ fn truncate(mut message: Message, limit: usize) -> Vec<u8> {
             message.queries.clear();
             continue;
         }
-        return encode(&message).unwrap_or_default();
+        return encode(&message).ok();
     }
 }
 
@@ -2024,7 +2027,7 @@ mod tests {
             ));
         }
 
-        let wire = super::truncate(message, 128);
+        let wire = super::truncate(message, 128).expect("truncated response");
         assert!(wire.len() <= 128);
 
         let truncated = Message::from_vec(&wire).expect("decode truncated response");

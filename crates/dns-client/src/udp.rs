@@ -12,6 +12,10 @@ use crate::ClientError;
 /// Idle sockets retained per upstream server. The pool bounds both memory
 /// and the source-port set a server sees from this resolver.
 const MAX_IDLE_PER_SERVER: usize = 16;
+/// Maximum number of upstream servers tracked per shard. Combined with
+/// [`MAX_IDLE_PER_SERVER`] this bounds the map and the idle descriptors a
+/// hostile zone can accumulate by churning nameserver addresses.
+const MAX_SERVERS_PER_SHARD: usize = 32;
 const SHARD_COUNT: usize = 32;
 
 type UdpSocketList = Vec<UdpSocket>;
@@ -191,10 +195,20 @@ impl UdpClient {
         let mut pool = self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let idle = pool.entry(server).or_default();
-        if idle.len() < MAX_IDLE_PER_SERVER {
-            idle.push(socket);
+        if let Some(idle) = pool.get_mut(&server) {
+            if idle.len() < MAX_IDLE_PER_SERVER {
+                idle.push(socket);
+            }
+            return;
         }
+        if pool.len() >= MAX_SERVERS_PER_SHARD
+            && let Some(evicted) = pool.keys().next().copied()
+        {
+            // Drop one server's idle sockets so a zone that keeps rotating
+            // nameserver addresses cannot grow the map without bound.
+            pool.remove(&evicted);
+        }
+        pool.insert(server, vec![socket]);
     }
 }
 
@@ -256,5 +270,29 @@ mod tests {
         assert_eq!(&second[..2], &query[..2]);
 
         handler.await.expect("handler");
+    }
+
+    #[tokio::test]
+    async fn pool_bounds_the_tracked_server_count() {
+        let client = UdpClient::new(None).expect("client");
+        // Fill every shard to capacity; `put` only needs a full map to
+        // exercise eviction.
+        for shard in client.pool.shards.iter() {
+            let mut map = shard.lock().unwrap_or_else(|error| error.into_inner());
+            for port in 0..MAX_SERVERS_PER_SHARD {
+                map.insert(SocketAddr::from(([127, 0, 0, 1], port as u16)), Vec::new());
+            }
+        }
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
+        let server = SocketAddr::from(([192, 0, 2, 1], 53));
+        client.put(server, socket);
+
+        let idx = shard_index(client.pool.shards.len(), server);
+        let map = client.pool.shards[idx]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(map.len(), MAX_SERVERS_PER_SHARD);
+        assert!(map.contains_key(&server));
     }
 }

@@ -152,7 +152,7 @@ async fn handle_inner(
                 .get(CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
-            if !content_type.starts_with(DNS_MESSAGE) {
+            if !is_dns_message(content_type) {
                 return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
             }
             Limited::new(request.into_body(), MAX_REQUEST)
@@ -242,5 +242,32 @@ fn hex(byte: u8) -> Option<u8> {
         b'a'..=b'f' => Some(byte - b'a' + 10),
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
+    }
+}
+
+/// Whether a `Content-Type` value names the DNS wire-format media type.
+///
+/// Parameters after `;` are ignored and the media type compares
+/// case-insensitively, but the type and subtype must match exactly so a value
+/// such as `application/dns-message-extra` is rejected.
+fn is_dns_message(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(DNS_MESSAGE))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dns_message;
+
+    #[test]
+    fn accepts_only_the_dns_message_media_type() {
+        assert!(is_dns_message("application/dns-message"));
+        assert!(is_dns_message("application/dns-message; charset=utf-8"));
+        assert!(is_dns_message("Application/DNS-Message"));
+        assert!(!is_dns_message("application/dns-message-extra"));
+        assert!(!is_dns_message("application/octet-stream"));
+        assert!(!is_dns_message(""));
     }
 }

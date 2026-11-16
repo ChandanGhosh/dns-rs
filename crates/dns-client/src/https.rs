@@ -28,6 +28,10 @@ use crate::tls::client_config;
 
 const DNS_MESSAGE: &str = "application/dns-message";
 const MAX_RESPONSE: usize = 65_535;
+/// Maximum number of upstream HTTP/2 connections kept alive. Bounds the map
+/// and the idle connections when a configuration churns through many
+/// forwarder addresses.
+const MAX_SENDERS: usize = 1024;
 
 type SenderKey = (SocketAddr, String);
 type SenderCache = Arc<Mutex<HashMap<SenderKey, SendRequest<Full<Bytes>>>>>;
@@ -114,7 +118,15 @@ impl HttpsClient {
             let _ = connection.await;
         });
 
-        self.senders.lock().await.insert(key, sender.clone());
+        let mut senders = self.senders.lock().await;
+        if senders.len() >= MAX_SENDERS
+            && !senders.contains_key(&key)
+            && let Some(evicted) = senders.keys().next().cloned()
+        {
+            senders.remove(&evicted);
+        }
+        senders.insert(key, sender.clone());
+        drop(senders);
         Ok(sender)
     }
 

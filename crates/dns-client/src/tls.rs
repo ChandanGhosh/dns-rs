@@ -31,6 +31,10 @@ use tokio_rustls::client::TlsStream;
 use crate::{ClientError, exchange};
 
 const MAX_IDLE_PER_SERVER: usize = 4;
+/// Maximum number of upstream servers tracked per shard. Combined with
+/// [`MAX_IDLE_PER_SERVER`] this bounds the map and the idle connections a
+/// hostile zone can accumulate by churning nameserver addresses.
+const MAX_SERVERS_PER_SHARD: usize = 32;
 const SHARD_COUNT: usize = 32;
 
 type PoolKey = (SocketAddr, Option<String>);
@@ -192,10 +196,20 @@ impl TlsClient {
         let mut pool = self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let idle = pool.entry(key).or_default();
-        if idle.len() < MAX_IDLE_PER_SERVER {
-            idle.push(stream);
+        if let Some(idle) = pool.get_mut(&key) {
+            if idle.len() < MAX_IDLE_PER_SERVER {
+                idle.push(stream);
+            }
+            return;
         }
+        if pool.len() >= MAX_SERVERS_PER_SHARD
+            && let Some(evicted) = pool.keys().next().cloned()
+        {
+            // Drop one server's idle connections so a zone that keeps rotating
+            // nameserver addresses cannot grow the map without bound.
+            pool.remove(&evicted);
+        }
+        pool.insert(key, vec![stream]);
     }
 
     /// Drop all idle connections to `key`. This is called when an exchange

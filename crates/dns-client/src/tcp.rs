@@ -17,6 +17,10 @@ use tokio::time::timeout;
 use crate::{ClientError, exchange};
 
 const MAX_IDLE_PER_SERVER: usize = 4;
+/// Maximum number of upstream servers tracked per shard. Combined with
+/// [`MAX_IDLE_PER_SERVER`] this bounds the map and the idle connections a
+/// hostile zone can accumulate by churning nameserver addresses.
+const MAX_SERVERS_PER_SHARD: usize = 32;
 const SHARD_COUNT: usize = 32;
 
 type TcpStreamList = Vec<TcpStream>;
@@ -137,10 +141,20 @@ impl TcpClient {
         let mut pool = self.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let idle = pool.entry(server).or_default();
-        if idle.len() < MAX_IDLE_PER_SERVER {
-            idle.push(stream);
+        if let Some(idle) = pool.get_mut(&server) {
+            if idle.len() < MAX_IDLE_PER_SERVER {
+                idle.push(stream);
+            }
+            return;
         }
+        if pool.len() >= MAX_SERVERS_PER_SHARD
+            && let Some(evicted) = pool.keys().next().copied()
+        {
+            // Drop one server's idle connections so a zone that keeps rotating
+            // nameserver addresses cannot grow the map without bound.
+            pool.remove(&evicted);
+        }
+        pool.insert(server, vec![stream]);
     }
 
     fn clear(&self, server: SocketAddr) {

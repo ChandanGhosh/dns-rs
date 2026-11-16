@@ -12,7 +12,9 @@
 //! timestamps are Unix seconds.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE64;
@@ -287,7 +289,16 @@ impl AutoTrustAnchor {
         output
     }
 
-    /// Write the tracker to `path`.
+    /// Write the tracker to `path` atomically.
+    ///
+    /// The state is written to a unique temporary file in the same directory,
+    /// synced, and renamed over the destination. A crash therefore leaves the
+    /// previous state file intact instead of a truncated one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutoTrustError::Io`] when the directory cannot be created, the
+    /// temporary file cannot be written, or the rename fails.
     pub fn save(&self, path: &Path) -> Result<(), AutoTrustError> {
         if let Some(parent) = path.parent()
             && !parent.is_empty()
@@ -297,10 +308,24 @@ impl AutoTrustAnchor {
                 source,
             })?;
         }
-        std::fs::write(path, self.render()).map_err(|source| AutoTrustError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+        let temp = temp_path(path);
+        let rendered = self.render();
+        let written = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temp)?;
+            file.write_all(rendered.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp, path)
+        })();
+        if let Err(source) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(AutoTrustError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+        sync_parent(path);
+        Ok(())
     }
 
     /// Records that are currently trusted.
@@ -599,6 +624,33 @@ pub enum AutoTrustError {
     Parse(String),
 }
 
+/// Build a unique sibling path for the atomic write.
+///
+/// The process id and a per-process counter keep concurrent saves of different
+/// anchors from colliding on the same temporary name.
+fn temp_path(path: &Path) -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "autotrust".to_owned());
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.tmp.{}.{sequence}", std::process::id()))
+}
+
+/// Flush the directory entry so the rename survives a power loss.
+///
+/// Directory fsync is Unix-specific and best-effort: the data file is already
+/// synced and the rename is atomic, so a failure here does not invalidate it.
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::File::open(parent).and_then(|directory| directory.sync_all());
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -805,6 +857,39 @@ mod tests {
         assert_eq!(loaded.trusted_keys().len(), 1);
         assert_eq!(loaded.last_success, tracker.last_success);
         assert_eq!(loaded.next_probe, tracker.next_probe);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_replaces_the_state_file_and_leaves_no_temporary() {
+        let mut tracker = tracker();
+        tracker.update(&[key(1, 257)], ADD_HOLD_DOWN + 10);
+        tracker.record_success(ADD_HOLD_DOWN + 10);
+
+        let dir = std::env::temp_dir().join(format!(
+            "dns-rs-autotrust-atomic-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("root.key");
+        tracker.save(&path).expect("first save");
+        tracker.save(&path).expect("second save");
+
+        let loaded = AutoTrustAnchor::load(&path).expect("load");
+        assert_eq!(loaded.keys.len(), 1);
+
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "root.key")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary files left behind: {leftovers:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

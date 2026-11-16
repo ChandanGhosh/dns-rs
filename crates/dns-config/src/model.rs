@@ -371,19 +371,21 @@ pub struct ServerConfig {
     /// Worker-thread setting. `0` or `"auto"` uses every CPU available to the
     /// process; the default is 1.
     pub num_threads: ThreadCount,
-    /// Detach from the terminal.
+    /// Detach from the terminal. Parsed for Unbound compatibility but not
+    /// enforced; run the resolver under a process supervisor.
     pub do_daemonize: bool,
-    /// User to drop privileges to.
+    /// User to drop privileges to. Parsed but not enforced yet; the server
+    /// logs a warning when it is set.
     pub username: Option<String>,
-    /// Directory to chroot into.
+    /// Directory to chroot into. Parsed but not enforced.
     pub chroot: Option<PathBuf>,
     /// Working directory.
     pub directory: Option<PathBuf>,
-    /// Log file path. Empty or unset means stderr/syslog.
+    /// Log file path. Parsed but not enforced; logs go to stderr.
     pub logfile: Option<PathBuf>,
-    /// PID file path.
+    /// PID file path. Parsed but not enforced.
     pub pidfile: Option<PathBuf>,
-    /// Send logs to syslog.
+    /// Send logs to syslog. Parsed but not enforced; logs go to stderr.
     pub use_syslog: bool,
     /// Enable IPv4 service.
     pub do_ip4: bool,
