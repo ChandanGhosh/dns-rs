@@ -1,3 +1,4 @@
+use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -93,10 +94,41 @@ pub async fn run(
 /// its permit) indefinitely by dripping bytes across two separate timeouts.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Write window for one response. A client that receives but never ACKs can
-/// otherwise park `write_all` forever while holding its connection permit.
+/// otherwise park the write forever while holding its connection permit.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum message that fits a 2-byte length prefix.
 const MAX_TCP_MESSAGE: usize = u16::MAX as usize;
+
+/// Write a 2-byte length prefix followed by `body` as two vectored slices.
+///
+/// The response is written straight from the pipeline's buffer instead of
+/// being copied into a fixed-size frame buffer, so a message at the protocol
+/// maximum is framable without extra capacity.
+///
+/// # Arguments
+///
+/// * `stream` - Destination stream
+/// * `prefix` - Big-endian message length
+/// * `body` - Encoded DNS message
+///
+/// # Errors
+///
+/// Returns an error when the stream fails or accepts zero bytes.
+async fn write_framed<W>(stream: &mut W, prefix: [u8; 2], body: &[u8]) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut bufs = [IoSlice::new(&prefix), IoSlice::new(body)];
+    let mut remaining: &mut [IoSlice<'_>] = &mut bufs;
+    while !remaining.is_empty() {
+        let written = stream.write_vectored(remaining).await?;
+        if written == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        IoSlice::advance_slices(&mut remaining, written);
+    }
+    Ok(())
+}
 
 /// Serve length-prefixed DNS messages on one connection until it closes.
 pub async fn serve_connection<S>(
@@ -184,31 +216,29 @@ pub async fn serve_connection<S>(
                 Err(_) => None,
             };
             let Some(truncation) = truncation else { break };
-            let trunc_len = truncation.len();
-            let Ok(length) = u16::try_from(trunc_len) else {
+            let Ok(length) = u16::try_from(truncation.len()) else {
                 break;
             };
-            let mut out = pool.get();
-            out[0..2].copy_from_slice(&length.to_be_bytes());
-            out[2..2 + trunc_len].copy_from_slice(&truncation);
-            if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out[0..2 + trunc_len]))
-                .await
-                .is_err()
+            if tokio::time::timeout(
+                WRITE_TIMEOUT,
+                write_framed(&mut stream, length.to_be_bytes(), &truncation),
+            )
+            .await
+            .is_err()
             {
                 debug!(%client, "TCP write timed out");
             }
             break;
         }
-        let mut out = pool.get();
-        let response_len = response.len();
-        if response_len > u16::MAX as usize {
+        let Ok(length) = u16::try_from(response.len()) else {
             break;
-        }
-        out[0..2].copy_from_slice(&(response_len as u16).to_be_bytes());
-        out[2..2 + response_len].copy_from_slice(&response);
-        if tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&out[0..2 + response_len]))
-            .await
-            .is_err()
+        };
+        if tokio::time::timeout(
+            WRITE_TIMEOUT,
+            write_framed(&mut stream, length.to_be_bytes(), &response),
+        )
+        .await
+        .is_err()
         {
             debug!(%client, "TCP write timed out");
             break;
@@ -218,12 +248,14 @@ pub async fn serve_connection<S>(
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use std::time::Duration;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::Probe;
+    use super::{Probe, write_framed};
 
     #[tokio::test]
     async fn probe_reports_eof_without_consuming_data() {
@@ -250,5 +282,63 @@ mod tests {
 
         drop(client);
         assert_eq!(server.probe().await.expect("probe eof"), 0);
+    }
+
+    #[tokio::test]
+    async fn write_framed_accepts_a_full_size_message() {
+        let body = vec![0xABu8; u16::MAX as usize];
+        let mut out = Vec::new();
+
+        write_framed(&mut out, 0x1234u16.to_be_bytes(), &body)
+            .await
+            .expect("write");
+
+        assert_eq!(out.len(), 2 + body.len());
+        assert_eq!(&out[..2], &[0x12, 0x34]);
+        assert_eq!(&out[2..], body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn write_framed_retries_partial_writes() {
+        let body: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let mut writer = ChunkedWriter {
+            written: Vec::new(),
+            max_per_write: 7,
+        };
+
+        write_framed(&mut writer, [0x00, 0x2A], &body)
+            .await
+            .expect("write");
+
+        assert_eq!(writer.written.len(), 2 + body.len());
+        assert_eq!(&writer.written[..2], &[0x00, 0x2A]);
+        assert_eq!(&writer.written[2..], body.as_slice());
+    }
+
+    /// Writer that accepts at most `max_per_write` bytes per call, so the
+    /// vectored loop has to advance through partially written slices.
+    struct ChunkedWriter {
+        written: Vec<u8>,
+        max_per_write: usize,
+    }
+
+    impl AsyncWrite for ChunkedWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let take = buf.len().min(self.max_per_write);
+            self.written.extend_from_slice(&buf[..take]);
+            Poll::Ready(Ok(take))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
     }
 }
