@@ -20,6 +20,29 @@ pub(crate) fn parse_unbound_file(path: &Path) -> Result<LoadedConfig, ConfigErro
     })
 }
 
+/// Parse an `unbound.conf`-style configuration from an in-memory string.
+///
+/// `include` directives are reported as warnings and ignored, so this never
+/// touches the filesystem. Use [`crate::load`] to resolve includes from a
+/// file.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Parse`] when a line is malformed and
+/// [`ConfigError::Validation`] when the parsed configuration is not usable.
+pub fn parse_unbound_str(text: &str) -> Result<LoadedConfig, ConfigError> {
+    let mut parser = Parser {
+        resolve_includes: false,
+        ..Parser::default()
+    };
+    parser.parse_text(Path::new("<memory>"), text)?;
+    parser.config.validate()?;
+    Ok(LoadedConfig {
+        config: parser.config,
+        warnings: parser.warnings,
+    })
+}
+
 #[derive(Debug, Clone)]
 enum Block {
     None,
@@ -38,6 +61,8 @@ struct Parser {
     include_stack: Vec<PathBuf>,
     private_address_explicit: bool,
     private_domain_explicit: bool,
+    /// When false, `include` directives warn instead of reading the filesystem.
+    resolve_includes: bool,
 }
 
 impl Default for Parser {
@@ -61,6 +86,7 @@ impl Default for Parser {
             include_stack: Vec::new(),
             private_address_explicit: false,
             private_domain_explicit: false,
+            resolve_includes: true,
         }
     }
 }
@@ -114,6 +140,14 @@ impl Parser {
                             line_number,
                             "include path is empty",
                         ));
+                    }
+                    if !self.resolve_includes {
+                        self.warn(
+                            path,
+                            line_number,
+                            "include is not resolved when parsing from a string; entry ignored",
+                        );
+                        continue;
                     }
                     if include.contains(['*', '?', '[']) {
                         self.warn(
@@ -1333,6 +1367,23 @@ server:
         assert_eq!(
             loaded.config.server.chroot.as_deref(),
             Some(std::path::Path::new("/var/lib/dns-rs"))
+        );
+    }
+
+    #[test]
+    fn string_parsing_ignores_includes() {
+        let loaded = super::parse_unbound_str(
+            "server:\n  interface: 127.0.0.1@5353\ninclude: \"/nonexistent.conf\"\n",
+        )
+        .expect("parse config");
+        assert_eq!(loaded.config.server.interfaces.len(), 1);
+        assert!(
+            loaded
+                .warnings
+                .iter()
+                .any(|warning| warning.message.contains("include")),
+            "{:?}",
+            loaded.warnings
         );
     }
 

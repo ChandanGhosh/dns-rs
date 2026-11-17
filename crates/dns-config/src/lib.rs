@@ -20,6 +20,7 @@ pub use model::{
     ForwardZoneConfig, ListenAddress, LocalZoneConfig, LocalZoneType, RemoteControlConfig,
     ServerConfig, StubZoneConfig, ThreadCount, ViewConfig,
 };
+pub use parser::parse_unbound_str;
 
 use std::path::Path;
 
