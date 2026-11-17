@@ -379,7 +379,8 @@ pub struct ServerConfig {
     pub username: Option<String>,
     /// Directory to chroot into. Parsed but not enforced.
     pub chroot: Option<PathBuf>,
-    /// Working directory.
+    /// Working directory. Parsed but not enforced; the resolver keeps the
+    /// directory it was started in.
     pub directory: Option<PathBuf>,
     /// Log file path. Parsed but not enforced; logs go to stderr.
     pub logfile: Option<PathBuf>,

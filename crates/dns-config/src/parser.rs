@@ -7,6 +7,7 @@ use crate::model::{
     AccessControl, AccessControlView, Config, ForwardTarget, ListenAddress, LocalZoneConfig,
     LocalZoneType, ThreadCount,
 };
+use crate::warnings::{CHROOT, DIRECTORY, DO_DAEMONIZE, LOGFILE, PIDFILE, USE_SYSLOG};
 
 /// Parse an `unbound.conf`-style file.
 pub(crate) fn parse_unbound_file(path: &Path) -> Result<LoadedConfig, ConfigError> {
@@ -256,54 +257,39 @@ impl Parser {
                 let enabled = parse_bool(path, line, key, value)?;
                 self.config.server.do_daemonize = enabled;
                 if enabled {
-                    self.warn(
-                        path,
-                        line,
-                        "do-daemonize is parsed but not enforced; run the resolver under a process supervisor",
-                    );
+                    self.warn(path, line, DO_DAEMONIZE);
                 }
             }
             "username" => self.config.server.username = optional_string(value),
             "chroot" => {
                 self.config.server.chroot = optional_path(value);
                 if self.config.server.chroot.is_some() {
-                    self.warn(
-                        path,
-                        line,
-                        "chroot is parsed but not enforced; the resolver does not change its root directory",
-                    );
+                    self.warn(path, line, CHROOT);
                 }
             }
-            "directory" => self.config.server.directory = optional_path(value),
+            "directory" => {
+                self.config.server.directory = optional_path(value);
+                if self.config.server.directory.is_some() {
+                    self.warn(path, line, DIRECTORY);
+                }
+            }
             "logfile" => {
                 self.config.server.logfile = optional_path(value);
                 if self.config.server.logfile.is_some() {
-                    self.warn(
-                        path,
-                        line,
-                        "logfile is parsed but not enforced; collect logs from stderr or the process supervisor",
-                    );
+                    self.warn(path, line, LOGFILE);
                 }
             }
             "pidfile" => {
                 self.config.server.pidfile = optional_path(value);
                 if self.config.server.pidfile.is_some() {
-                    self.warn(
-                        path,
-                        line,
-                        "pidfile is parsed but not enforced; track the process through its supervisor",
-                    );
+                    self.warn(path, line, PIDFILE);
                 }
             }
             "use-syslog" => {
                 let enabled = parse_bool(path, line, key, value)?;
                 self.config.server.use_syslog = enabled;
                 if enabled {
-                    self.warn(
-                        path,
-                        line,
-                        "use-syslog is parsed but not enforced; logs go to stderr",
-                    );
+                    self.warn(path, line, USE_SYSLOG);
                 }
             }
             "do-ip4" => self.config.server.do_ip4 = parse_bool(path, line, key, value)?,
@@ -1316,6 +1302,7 @@ server:
 server:
     interface: 127.0.0.1@5353
     chroot: "/var/lib/dns-rs"
+    directory: "/var/lib/dns-rs"
     username: "dns"
     do-daemonize: yes
     logfile: "/var/log/dns-rs.log"
@@ -1326,7 +1313,14 @@ server:
         .expect("write config");
 
         let loaded = parse_unbound_file(&path).expect("parse config");
-        for key in ["chroot", "do-daemonize", "logfile", "pidfile", "use-syslog"] {
+        for key in [
+            "chroot",
+            "directory",
+            "do-daemonize",
+            "logfile",
+            "pidfile",
+            "use-syslog",
+        ] {
             assert!(
                 loaded
                     .warnings

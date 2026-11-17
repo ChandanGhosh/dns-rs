@@ -12,6 +12,7 @@
 mod error;
 mod model;
 mod parser;
+mod warnings;
 
 pub use error::{ConfigError, ConfigWarning, LoadedConfig};
 pub use model::{
@@ -48,8 +49,69 @@ fn load_toml(path: &Path) -> Result<LoadedConfig, ConfigError> {
         source,
     })?;
     config.validate()?;
-    Ok(LoadedConfig {
-        config,
-        warnings: Vec::new(),
-    })
+    let warnings = warnings::unenforced(&config, path);
+    Ok(LoadedConfig { config, warnings })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::load;
+
+    #[test]
+    fn toml_reports_unenforced_options() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.toml");
+        fs::write(
+            &path,
+            r#"
+[server]
+interfaces = ["127.0.0.1"]
+port = 5353
+chroot = "/var/lib/dns-rs"
+directory = "/var/lib/dns-rs"
+logfile = "/var/log/dns-rs.log"
+pidfile = "/run/dns-rs.pid"
+use_syslog = true
+do_daemonize = true
+"#,
+        )
+        .expect("write config");
+
+        let loaded = load(&path).expect("load config");
+        for key in [
+            "chroot",
+            "directory",
+            "do-daemonize",
+            "logfile",
+            "pidfile",
+            "use-syslog",
+        ] {
+            assert!(
+                loaded
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.message.contains(key)),
+                "missing warning for {key}: {:?}",
+                loaded.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn toml_defaults_report_no_warnings() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.toml");
+        fs::write(
+            &path,
+            "[server]\ninterfaces = [\"127.0.0.1\"]\nport = 5353\n",
+        )
+        .expect("write config");
+
+        let loaded = load(&path).expect("load config");
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
 }

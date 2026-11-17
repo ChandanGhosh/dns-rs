@@ -60,7 +60,7 @@ impl ConfigError {
 pub struct ConfigWarning {
     /// File containing the warning.
     pub path: PathBuf,
-    /// One-based line number.
+    /// One-based line number, or 0 when the source has no line information.
     pub line: usize,
     /// Human-readable description.
     pub message: String,
@@ -68,13 +68,19 @@ pub struct ConfigWarning {
 
 impl std::fmt::Display for ConfigWarning {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "{}:{}: {}",
-            self.path.display(),
-            self.line,
-            self.message
-        )
+        // TOML sources have no line numbers; omit the `:0` rather than print a
+        // misleading line that does not exist.
+        if self.line == 0 {
+            write!(formatter, "{}: {}", self.path.display(), self.message)
+        } else {
+            write!(
+                formatter,
+                "{}:{}: {}",
+                self.path.display(),
+                self.line,
+                self.message
+            )
+        }
     }
 }
 
@@ -85,4 +91,29 @@ pub struct LoadedConfig {
     pub config: Config,
     /// Unsupported options and other non-fatal issues.
     pub warnings: Vec<ConfigWarning>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::ConfigWarning;
+
+    fn warning(line: usize) -> ConfigWarning {
+        ConfigWarning {
+            path: PathBuf::from("dns-rs.toml"),
+            line,
+            message: "example".to_owned(),
+        }
+    }
+
+    #[test]
+    fn display_includes_a_known_line() {
+        assert_eq!(warning(12).to_string(), "dns-rs.toml:12: example");
+    }
+
+    #[test]
+    fn display_omits_a_missing_line() {
+        assert_eq!(warning(0).to_string(), "dns-rs.toml: example");
+    }
 }
