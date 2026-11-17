@@ -123,17 +123,18 @@ impl BufferPool {
         }
     }
 
+    /// Pick a shard from the calling thread's id without allocating.
+    ///
+    /// `BufferPool::get` runs on every received message, so hashing the thread
+    /// id directly avoids the `String` that formatting it would allocate on
+    /// each call.
     fn shard_index(&self) -> usize {
-        let id = thread::current().id();
-        // Use the thread id's address/hash as a simple shard selector.
-        let ptr = format!("{id:?}");
-        // Fallback to a fast hash
-        let mut h: usize = 1469598103934665603;
-        for b in ptr.as_bytes() {
-            h ^= *b as usize;
-            h = h.wrapping_mul(1099511628211);
-        }
-        h % self.inner.shards.len()
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        thread::current().id().hash(&mut hasher);
+        (hasher.finish() as usize) % self.inner.shards.len()
     }
 
     /// Return `buf` to the pool unless it was resized or the pool is full.
@@ -271,6 +272,14 @@ mod tests {
 
         let second = pool.get();
         assert_eq!(second.as_ptr(), addr);
+    }
+
+    #[test]
+    fn shard_index_is_stable_and_in_range() {
+        let pool = BufferPool::new(64, 4);
+        let index = pool.shard_index();
+        assert!(index < pool.inner.shards.len());
+        assert_eq!(index, pool.shard_index());
     }
 
     #[test]
