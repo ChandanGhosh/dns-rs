@@ -32,6 +32,12 @@ make bench-compare BENCH_ALLOCS=1
 # Phase attribution A/B: both variants build with per-phase timers.
 make bench-compare BENCH_PHASES=1
 
+# TCP framing, with 100-record answers to size the response write path.
+BENCH_TRANSPORT=tcp BENCH_RECORDS=100 scripts/bench-loopback.sh 1 2 4
+
+# Interleaved A/B of the TCP write path.
+BENCH_TRANSPORT=tcp BENCH_RECORDS=100 scripts/bench-compare.sh origin/main 1 2 4
+
 # Longer sample for one worker count.
 make bench THREADS="2" BENCH_DURATION=30
 ```
@@ -62,6 +68,15 @@ binary because it needs `dns-proto` and `ring` to generate a key and sign
 answers. It writes its own DNSKEY trust anchor to a temporary file, which the
 runner embeds in the resolver config.
 
+`BENCH_TRANSPORT=tcp` switches the load generator to one persistent TCP
+connection per client thread and length-prefixes each query, so the measured
+RTT includes the resolver's TCP framing path. The upstream leg to the mock
+stays UDP, and the resolver still serves the cached answer over TCP.
+`BENCH_RECORDS=N` makes the unsigned mock answer with N A records (capped at
+1000), which sizes the response the resolver writes back; pair it with
+`BENCH_TRANSPORT=tcp` and `BENCH_SCENARIO=hit` to isolate the TCP write path.
+The signed DNSSEC mock always answers one record.
+
 ### `scripts/bench-compare.sh` - interleaved A/B against a git ref
 
 Builds a baseline ref once in a worktree under `target/ab/<sha>/` (with its
@@ -83,12 +98,19 @@ rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
 /tmp/dns-bench load 127.0.0.1:15353 4000 bench.test 8 5 10
 ```
 
-`serve` arguments are address and the answer TTL in seconds (pass `0` for
-the miss scenario). `load` arguments are address, distinct names, zone,
-concurrency, warm-up seconds, and measured seconds. The mock prints
-`stats upstream_queries=N` every 250 ms, which the runner uses to bracket
-the load window in miss and dnssec mode. The resolver needs a `bench.test.`
-stub zone pointing at the mock (both runners write this config for you).
+`serve` arguments are address, the answer TTL in seconds (pass `0` for the
+miss scenario), and the A-record count per answer (default 1). `load`
+arguments are address, distinct names, zone, concurrency, warm-up seconds,
+measured seconds, and the transport (`udp`, the default, or `tcp`). The mock
+prints `stats upstream_queries=N` every 250 ms, which the runner uses to
+bracket the load window in miss and dnssec mode. The resolver needs a
+`bench.test.` stub zone pointing at the mock (both runners write this config
+for you). For the TCP write path:
+
+```bash
+/tmp/dns-bench serve 127.0.0.1:15354 3600 100 &
+/tmp/dns-bench load 127.0.0.1:15353 4000 bench.test 8 5 10 tcp
+```
 
 To run the signed DNSSEC mock by hand, build it once and pass it the same
 address, zone, TTL, distinct-name count, and a path for the generated trust
@@ -109,9 +131,11 @@ cat /tmp/bench-anchor.txt   # DNSKEY record to use as trust_anchor
 | `BENCH_SCENARIO` | `hit` | `hit` fixes TTLs at 3600 s so every query is a cache hit; `miss` uses a TTL-0 unsigned mock so every query is a genuine miss; `dnssec` uses a signed TTL-0 mock so every query also verifies an Ed25519 RRSIG. Both miss-style scenarios add `upstream=`/`saved=` to RESULT |
 | `BENCH_NAMES` | 4000 | Distinct query names. For `hit`, keep at or below 8192 so the working set fits the message cache (above it the run thrashes the cache); for `miss` it controls coalescing - 1 maximizes it, a large value with low concurrency nearly eliminates it |
 | `BENCH_CONCURRENCY` | 8 | Queries in flight |
+| `BENCH_TRANSPORT` | `udp` | Client transport: `udp` or `tcp`. `tcp` keeps one persistent connection per load-generator thread and measures the resolver's TCP framing path; the upstream leg stays UDP |
+| `BENCH_RECORDS` | 1 | A records per unsigned-mock answer, capped at 1000. Raise it with `BENCH_TRANSPORT=tcp` to size the response written back; the signed DNSSEC mock always answers one record |
 | `BENCH_WARMUP` | 5 | Warm-up seconds before measuring |
 | `BENCH_DURATION` | 10 | Measured seconds |
-| `BENCH_PORT` | 15353 | Resolver UDP port |
+| `BENCH_PORT` | 15353 | Resolver port (UDP listener, and the TCP listener when `BENCH_TRANSPORT=tcp`) |
 | `BENCH_MOCK_PORT` | 15354 | Mock authority UDP port |
 | `BENCH_SERVER_CPUS` | 0-3 (hosts with >= 8 CPUs) | CPU list for the resolver (`taskset`) |
 | `BENCH_CLIENT_CPUS` | remaining CPUs | CPU list for the load generator |
@@ -210,6 +234,27 @@ Compare `dnssec` against `miss` to isolate validation overhead, not against
 `hit`: the hit path never reaches the mock or the validator. Use the same
 `BENCH_NAMES` and concurrency for both sides; expect the signed run to be
 substantially slower because every query pays for an RRSIG verification.
+
+### TCP framing and large responses
+
+```bash
+# Cached 100-record answers served over TCP, one persistent connection per
+# client thread.
+BENCH_SCENARIO=hit BENCH_TRANSPORT=tcp BENCH_RECORDS=100 \
+    scripts/bench-loopback.sh 1 2 4
+
+# A/B the server's TCP write path against a ref.
+BENCH_SCENARIO=hit BENCH_TRANSPORT=tcp BENCH_RECORDS=100 \
+    scripts/bench-compare.sh <ref> 1 2 4
+```
+
+`BENCH_TRANSPORT=tcp` enables the resolver's TCP listener (`incoming_num_tcp =
+128`) and makes the load generator reuse one length-prefixed connection per
+thread. `BENCH_RECORDS=100` makes the mock return 100 A records, so each
+cached answer is roughly 1.6 KB and the framing write is a meaningful share of
+the RTT. The upstream leg stays UDP, which keeps the mock simple and isolates
+the downstream TCP path. Use `hit` mode: the answer is cached after warm-up,
+so the measured loop is decode, cache probe, encode, and frame.
 
 ### Allocation counts
 
@@ -344,7 +389,10 @@ errors.
 
 ## Known limitations
 
-- There is no TCP/DoT, large-response, or mixed-workload scenario yet.
+- DoT and mixed UDP/TCP workloads are not measured. `BENCH_TRANSPORT=tcp`
+  exercises the TCP listener only, and the upstream leg to the mock stays UDP.
+- The TCP scenario uses one persistent connection per client thread; it does
+  not measure connection churn or pipelined queries.
 - The DNSSEC scenario validates positive answers only; negative (NSEC/NSEC3
   denial) validation and first-time chain building are not measured.
 - The signed mock uses Ed25519, the cheapest common algorithm. RSA/SHA-256

@@ -3,7 +3,8 @@
 //   rustc --edition 2024 -O -o /tmp/dns-bench scripts/dns-bench.rs
 
 use std::env;
-use std::net::{SocketAddr, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -66,15 +67,18 @@ fn question_end(message: &[u8]) -> Option<usize> {
 /// Answer queries until killed, stamping answers with `ttl` seconds.
 ///
 /// A TTL of 0 makes the resolver's `cache_min_ttl` clamp keep the entry at 0,
-/// so nothing is stored and every query is a genuine cache miss. Prints
-/// `stats upstream_queries=N` on stdout every 250 ms so the runner can
-/// snapshot the count around a measurement window.
-fn serve(addr: SocketAddr, ttl: u32) -> ! {
+/// so nothing is stored and every query is a genuine cache miss. `records`
+/// controls how many A records each answer carries, which sizes the response
+/// the resolver writes back over TCP. Prints `stats upstream_queries=N` on
+/// stdout every 250 ms so the runner can snapshot the count around a
+/// measurement window.
+fn serve(addr: SocketAddr, ttl: u32, records: usize) -> ! {
     let socket = UdpSocket::bind(addr).unwrap_or_else(|e| {
         eprintln!("mock: bind {addr}: {e}");
         process::exit(1);
     });
-    eprintln!("mock: listening on {addr} ttl={ttl}");
+    let records = records.clamp(1, 1000);
+    eprintln!("mock: listening on {addr} ttl={ttl} records={records}");
     let answered = Arc::new(AtomicU64::new(0));
     let reporter = Arc::clone(&answered);
     thread::spawn(move || loop {
@@ -94,23 +98,22 @@ fn serve(addr: SocketAddr, ttl: u32) -> ! {
         let Some(end) = question_end(&buf[..len]) else {
             continue;
         };
-        let mut response = Vec::with_capacity(end + 16);
+        let mut response = Vec::with_capacity(end + 16 * records);
         response.extend_from_slice(&buf[..end]);
         response[2] = 0x84; // QR + AA
         response[3] = buf[3] & 0x01; // echo RD
-        response[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT
+        response[6..8].copy_from_slice(&(records as u16).to_be_bytes()); // ANCOUNT
         response[8..10].copy_from_slice(&0u16.to_be_bytes()); // NSCOUNT
         response[10..12].copy_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-        response.extend_from_slice(&[
-            0xC0, 0x0C, // name pointer to the question
-            0x00, 0x01, // A
-            0x00, 0x01, // IN
-        ]);
-        response.extend_from_slice(&ttl_bytes);
-        response.extend_from_slice(&[
-            0x00, 0x04, // RDLENGTH
-            192, 0, 2, 1,
-        ]);
+        for index in 0..records {
+            response.extend_from_slice(&[
+                0xC0, 0x0C, // name pointer to the question
+                0x00, 0x01, // A
+                0x00, 0x01, // IN
+            ]);
+            response.extend_from_slice(&ttl_bytes);
+            response.extend_from_slice(&[0x00, 0x04, 192, 0, 2, (index & 0xFF) as u8]);
+        }
         let _ = socket.send_to(&response, peer);
         answered.fetch_add(1, Ordering::Relaxed);
     }
@@ -132,14 +135,114 @@ struct ThreadResult {
     sent: u64,
 }
 
-fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
-    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind client socket");
-    socket
-        .connect(config.target)
-        .expect("connect client socket");
-    socket
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .expect("read timeout");
+/// One client-side transport. `send` and `recv` are separate so the timer
+/// starts after the request is on the wire, matching the UDP metric.
+trait Exchange {
+    fn send(&mut self, wire: &[u8]) -> Result<(), ()>;
+    fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()>;
+}
+
+struct UdpExchange {
+    socket: UdpSocket,
+}
+
+impl UdpExchange {
+    fn new(target: SocketAddr) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind client socket");
+        socket.connect(target).expect("connect client socket");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("read timeout");
+        Self { socket }
+    }
+}
+
+impl Exchange for UdpExchange {
+    fn send(&mut self, wire: &[u8]) -> Result<(), ()> {
+        self.socket.send(wire).map(|_| ()).map_err(|_| ())
+    }
+
+    fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        self.socket.recv(buf).map_err(|_| ())
+    }
+}
+
+/// Persistent TCP connection. A failed read or write leaves the stream
+/// desynchronised, so the connection is dropped and rebuilt lazily.
+struct TcpExchange {
+    target: SocketAddr,
+    stream: Option<TcpStream>,
+}
+
+impl TcpExchange {
+    fn new(target: SocketAddr) -> Self {
+        Self {
+            target,
+            stream: None,
+        }
+    }
+
+    fn connect(&mut self) -> Result<(), ()> {
+        let stream = TcpStream::connect(self.target).map_err(|_| ())?;
+        stream.set_nodelay(true).map_err(|_| ())?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(|_| ())?;
+        self.stream = Some(stream);
+        Ok(())
+    }
+}
+
+impl Exchange for TcpExchange {
+    fn send(&mut self, wire: &[u8]) -> Result<(), ()> {
+        let result = self.try_send(wire);
+        if result.is_err() {
+            self.stream = None;
+        }
+        result
+    }
+
+    fn recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        let result = self.try_recv(buf);
+        if result.is_err() {
+            self.stream = None;
+        }
+        result
+    }
+}
+
+impl TcpExchange {
+    fn try_send(&mut self, wire: &[u8]) -> Result<(), ()> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        let stream = self.stream.as_mut().ok_or(())?;
+        let len = u16::try_from(wire.len()).map_err(|_| ())?;
+        stream.write_all(&len.to_be_bytes()).map_err(|_| ())?;
+        stream.write_all(wire).map_err(|_| ())
+    }
+
+    fn try_recv(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        if self.stream.is_none() {
+            self.connect()?;
+        }
+        let stream = self.stream.as_mut().ok_or(())?;
+        let mut lenbuf = [0u8; 2];
+        stream.read_exact(&mut lenbuf).map_err(|_| ())?;
+        let response_len = usize::from(u16::from_be_bytes(lenbuf));
+        let out = buf.get_mut(..response_len).ok_or(())?;
+        stream.read_exact(out).map_err(|_| ())?;
+        Ok(response_len)
+    }
+}
+
+fn run_thread<E: Exchange>(
+    config: &Config,
+    id: usize,
+    barrier: &Barrier,
+    mut transport: E,
+    buf: &mut [u8],
+) -> ThreadResult {
     let mut seq = (id as u32) << 24;
     let total = config.warmup + config.duration;
     let mut samples = Vec::with_capacity(250_000);
@@ -147,7 +250,6 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
     let mut rcode_errors = 0u64;
     let mut authenticated = 0u64;
     let mut sent = 0u64;
-    let mut buf = [0u8; 2048];
     let mut wire = Vec::with_capacity(64);
 
     let start = Instant::now();
@@ -164,14 +266,14 @@ fn run_thread(config: &Config, id: usize, barrier: &Barrier) -> ThreadResult {
         wire.extend_from_slice(packet);
         wire[0..2].copy_from_slice(&id.to_be_bytes());
         sent += 1;
-        if socket.send(&wire).is_err() {
+        if transport.send(&wire).is_err() {
             errors += 1;
             continue;
         }
         let sent = Instant::now();
-        let received = match socket.recv(&mut buf) {
+        let received = match transport.recv(buf) {
             Ok(len) => len,
-            Err(_) => {
+            Err(()) => {
                 errors += 1;
                 continue;
             }
@@ -209,6 +311,12 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
+#[derive(Clone, Copy)]
+enum Transport {
+    Udp,
+    Tcp,
+}
+
 fn load(
     target: SocketAddr,
     names: usize,
@@ -216,6 +324,7 @@ fn load(
     concurrency: usize,
     warmup: Duration,
     duration: Duration,
+    transport: Transport,
 ) -> ! {
     let queries = build_queries(names, zone);
     let config = Arc::new(Config {
@@ -229,7 +338,28 @@ fn load(
     for id in 0..concurrency {
         let barrier = Arc::clone(&barrier);
         let config = Arc::clone(&config);
-        handles.push(thread::spawn(move || run_thread(&config, id, &barrier)));
+        handles.push(thread::spawn(move || match transport {
+            Transport::Udp => {
+                let mut buf = [0u8; 2048];
+                run_thread(
+                    &config,
+                    id,
+                    &barrier,
+                    UdpExchange::new(config.target),
+                    &mut buf,
+                )
+            }
+            Transport::Tcp => {
+                let mut buf = vec![0u8; 65_535];
+                run_thread(
+                    &config,
+                    id,
+                    &barrier,
+                    TcpExchange::new(config.target),
+                    &mut buf,
+                )
+            }
+        }));
     }
     barrier.wait();
     let wall = Instant::now();
@@ -270,7 +400,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "usage: dnsbench serve ADDR [TTL_SECS] | dnsbench load ADDR NAMES ZONE CONCURRENCY [WARMUP_SECS] [DURATION_SECS]"
+            "usage: dnsbench serve ADDR [TTL_SECS] [RECORDS] | dnsbench load ADDR NAMES ZONE CONCURRENCY [WARMUP_SECS] [DURATION_SECS] [udp|tcp]"
         );
         process::exit(2);
     }
@@ -280,7 +410,10 @@ fn main() {
             let ttl: u32 = args
                 .get(3)
                 .map_or(3600, |value| value.parse().expect("ttl"));
-            serve(addr, ttl);
+            let records: usize = args
+                .get(4)
+                .map_or(1, |value| value.parse().expect("records"));
+            serve(addr, ttl, records);
         }
         "load" => {
             let target: SocketAddr = args[2].parse().expect("target address");
@@ -293,6 +426,14 @@ fn main() {
             let duration: u64 = args
                 .get(7)
                 .map_or(10, |value| value.parse().expect("duration"));
+            let transport = match args.get(8).map(String::as_str) {
+                None | Some("udp") => Transport::Udp,
+                Some("tcp") => Transport::Tcp,
+                Some(other) => {
+                    eprintln!("transport must be udp or tcp (got {other})");
+                    process::exit(2);
+                }
+            };
             load(
                 target,
                 names,
@@ -300,6 +441,7 @@ fn main() {
                 concurrency,
                 Duration::from_secs(warmup),
                 Duration::from_secs(duration),
+                transport,
             );
         }
         other => {

@@ -21,6 +21,14 @@
 #                      upstream misses instead of cache hits)
 #   BENCH_CONCURRENCY  queries in flight (default 8; enough to pipeline
 #                      loopback queries without queueing behind one worker)
+#   BENCH_TRANSPORT    client transport: udp (default) or tcp. tcp keeps one
+#                      persistent connection per load-generator thread and
+#                      measures the server's TCP framing path; the upstream
+#                      leg to the mock stays UDP
+#   BENCH_RECORDS      A records per unsigned-mock answer (default 1). Raise
+#                      it with BENCH_TRANSPORT=tcp to size the response the
+#                      resolver writes back; capped at 1000. The signed DNSSEC
+#                      mock always answers one record
 #   BENCH_WARMUP       warm-up seconds (default 5)
 #   BENCH_DURATION     measured seconds (default 10)
 #   BENCH_PORT         resolver UDP port (default 15353)
@@ -109,6 +117,8 @@ fi
 
 names="${BENCH_NAMES:-4000}"
 scenario="${BENCH_SCENARIO:-hit}"
+transport="${BENCH_TRANSPORT:-udp}"
+records="${BENCH_RECORDS:-1}"
 concurrency="${BENCH_CONCURRENCY:-8}"
 warmup="${BENCH_WARMUP:-5}"
 duration="${BENCH_DURATION:-10}"
@@ -204,6 +214,21 @@ case "$scenario" in
         ;;
 esac
 
+case "$transport" in
+    udp)
+        do_tcp=false
+        incoming_num_tcp=0
+        ;;
+    tcp)
+        do_tcp=true
+        incoming_num_tcp=128
+        ;;
+    *)
+        echo "BENCH_TRANSPORT must be 'udp' or 'tcp' (got: $transport)" >&2
+        exit 1
+        ;;
+esac
+
 # DNSSEC and miss runs both report how many queries reached the mock and how
 # many were coalesced away.
 measure_upstream=0
@@ -286,7 +311,7 @@ if [ "$scenario" = "dnssec" ]; then
     "$mock_binary" serve "127.0.0.1:$mock_port" "$zone." "$mock_ttl" "$names" \
         "$tmp/anchor.txt" >"$tmp/mock.log" 2>&1 &
 else
-    "$tmp/dns-bench" serve "127.0.0.1:$mock_port" "$mock_ttl" >"$tmp/mock.log" 2>&1 &
+    "$tmp/dns-bench" serve "127.0.0.1:$mock_port" "$mock_ttl" "$records" >"$tmp/mock.log" 2>&1 &
 fi
 mock_pid=$!
 sleep 0.3
@@ -311,8 +336,8 @@ if [ "$scenario" = "dnssec" ]; then
     fi
 fi
 
-printf 'scenario=%s names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
-    "$scenario" "$names" "$cache_mode" "$concurrency" "$warmup" "$duration" \
+printf 'scenario=%s transport=%s records=%s names=%s cache=%s concurrency=%s warmup=%ss duration=%ss server_cpus=%s client_cpus=%s server=%s\n' \
+    "$scenario" "$transport" "$records" "$names" "$cache_mode" "$concurrency" "$warmup" "$duration" \
     "${server_cpus:-any}" "${client_cpus:-any}" "${server_image:-host}"
 
 for workers in "${threads[@]}"; do
@@ -331,8 +356,8 @@ num_threads = $workers
 do_ip4 = true
 do_ip6 = false
 do_udp = true
-do_tcp = false
-incoming_num_tcp = 0
+do_tcp = $do_tcp
+incoming_num_tcp = $incoming_num_tcp
 $dnssec_config
 
 [[stub_zones]]
@@ -420,7 +445,7 @@ EOF
         fi
     fi
     result="$("${pin_client[@]}" "$tmp/dns-bench" load "127.0.0.1:$port" "$names" \
-        "$zone" "$concurrency" "$warmup" "$duration")"
+        "$zone" "$concurrency" "$warmup" "$duration" "$transport")"
     if [ "$scenario" = "dnssec" ]; then
         # Every measured DNSSEC answer must be authenticated, otherwise the run
         # is measuring the plain miss path with a broken or missing anchor.
