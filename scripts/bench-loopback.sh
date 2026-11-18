@@ -341,30 +341,40 @@ printf 'scenario=%s transport=%s records=%s names=%s cache=%s concurrency=%s war
     "${server_cpus:-any}" "${client_cpus:-any}" "${server_image:-host}"
 
 for workers in "${threads[@]}"; do
-    config="$tmp/bench-$workers.toml"
+    config="$tmp/bench-$workers.conf"
     dnssec_config=""
     if [ "$scenario" = "dnssec" ]; then
-        dnssec_config="dnssec_validation = true
-trust_anchor = [\"$anchor\"]"
+        dnssec_config="    trust-anchor: \"$anchor\""
     fi
+    # The config uses the unbound.conf front-end so this script can pass an
+    # option that older A/B baselines do not know: they warn and ignore it,
+    # which is equivalent to their (nonexistent) loopback blocking. A TOML
+    # config would reject the unknown field in those baselines.
     cat >"$config" <<EOF
-[server]
-interfaces = ["127.0.0.1"]
-port = $port
-verbosity = 0
-num_threads = $workers
-do_ip4 = true
-do_ip6 = false
-do_udp = true
-do_tcp = $do_tcp
-incoming_num_tcp = $incoming_num_tcp
+server:
+    interface: 127.0.0.1
+    port: $port
+    verbosity: 0
+    num-threads: $workers
+    do-ip4: yes
+    do-ip6: no
+    do-udp: yes
+    do-tcp: $do_tcp
+    incoming-num-tcp: $incoming_num_tcp
+    # Unlike the TOML front-end, unbound.conf starts with no access-control
+    # rules (matching Unbound's explicit-ACL model), so the loopback client
+    # needs an allow rule before the healthcheck can query the server.
+    access-control: 127.0.0.1/32 allow
+    # The benchmark's stub authority runs on loopback, which Unbound also
+    # blocks by default unless do-not-query-localhost is turned off.
+    do-not-query-localhost: no
 $dnssec_config
 
-[[stub_zones]]
-name = "$zone."
-stub_addrs = ["127.0.0.1@$mock_port"]
-stub_first = false
-stub_no_cache = false
+stub-zone:
+    name: "$zone."
+    stub-addr: 127.0.0.1@$mock_port
+    stub-first: no
+    stub-no-cache: no
 EOF
 
     if [ -n "$server_image" ]; then
@@ -375,8 +385,8 @@ EOF
             docker_args+=(--cpuset-cpus "$server_cpus")
         fi
         docker "${docker_args[@]}" \
-            -v "$config:/etc/dns-rs/dns-rs.toml:ro" \
-            "$server_image" -c /etc/dns-rs/dns-rs.toml run >"$tmp/server-$workers.log" 2>&1 \
+            -v "$config:/etc/dns-rs/dns-rs.conf:ro" \
+            "$server_image" -c /etc/dns-rs/dns-rs.conf run >"$tmp/server-$workers.log" 2>&1 \
             || {
                 cat "$tmp/server-$workers.log" >&2
                 exit 1
@@ -391,7 +401,7 @@ EOF
     for _ in $(seq 1 100); do
         if [ -n "$server_image" ]; then
             if docker exec "$container_name" /usr/local/bin/dns-rs \
-                -c /etc/dns-rs/dns-rs.toml healthcheck \
+                -c /etc/dns-rs/dns-rs.conf healthcheck \
                 --name "n00000.$zone" --port "$port" >/dev/null 2>&1; then
                 ready=1
                 break

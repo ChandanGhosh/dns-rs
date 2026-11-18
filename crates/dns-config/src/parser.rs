@@ -4,15 +4,16 @@ use std::str::FromStr;
 
 use crate::error::{ConfigError, ConfigWarning, LoadedConfig};
 use crate::model::{
-    AccessControl, AccessControlView, Config, ForwardTarget, ListenAddress, LocalZoneConfig,
-    LocalZoneType, ThreadCount,
+    AccessAction, AccessControl, AccessControlView, Config, ForwardTarget, ListenAddress,
+    LocalZoneConfig, LocalZoneType, ThreadCount,
 };
 use crate::warnings::{CHROOT, DIRECTORY, DO_DAEMONIZE, LOGFILE, PIDFILE, USE_SYSLOG};
 
 /// Parse an `unbound.conf`-style file.
 pub(crate) fn parse_unbound_file(path: &Path) -> Result<LoadedConfig, ConfigError> {
     let mut parser = Parser::default();
-    parser.load_file(path)?;
+    let mut block = Block::None;
+    parser.load_file(path, &mut block)?;
     parser.config.validate()?;
     Ok(LoadedConfig {
         config: parser.config,
@@ -35,7 +36,8 @@ pub fn parse_unbound_str(text: &str) -> Result<LoadedConfig, ConfigError> {
         resolve_includes: false,
         ..Parser::default()
     };
-    parser.parse_text(Path::new("<memory>"), text)?;
+    let mut block = Block::None;
+    parser.parse_text(Path::new("<memory>"), text, &mut block)?;
     parser.config.validate()?;
     Ok(LoadedConfig {
         config: parser.config,
@@ -92,7 +94,7 @@ impl Default for Parser {
 }
 
 impl Parser {
-    fn load_file(&mut self, path: &Path) -> Result<(), ConfigError> {
+    fn load_file(&mut self, path: &Path, block: &mut Block) -> Result<(), ConfigError> {
         let canonical = std::fs::canonicalize(path).map_err(|source| ConfigError::Io {
             path: path.to_path_buf(),
             source,
@@ -106,14 +108,74 @@ impl Parser {
         })?;
 
         self.include_stack.push(canonical.clone());
-        let result = self.parse_text(&canonical, &text);
+        // A guard would be nicer, but the error path must also pop, and the
+        // borrow checker cannot see through the early returns above.
+        let result = self.parse_text(&canonical, &text, block);
         self.include_stack.pop();
         result
     }
 
-    fn parse_text(&mut self, path: &Path, text: &str) -> Result<(), ConfigError> {
-        let mut block = Block::None;
+    /// Expand an `include` pattern and parse every matched file.
+    ///
+    /// Relative patterns are resolved against the directory of the including
+    /// file, then against the working directory (which is how Unbound resolves
+    /// them). Wildcards follow `glob(7)` and are processed in sorted order so
+    /// the resulting configuration is deterministic.
+    fn include(
+        &mut self,
+        path: &Path,
+        line: usize,
+        pattern: &str,
+        block: &mut Block,
+    ) -> Result<(), ConfigError> {
+        let candidates = include_candidates(path, pattern);
+        let mut matched = 0usize;
+        for candidate in &candidates {
+            let mut paths = match glob::glob(&candidate.to_string_lossy()) {
+                Ok(paths) => paths.collect::<Result<Vec<_>, _>>().map_err(|error| {
+                    ConfigError::parse(
+                        path,
+                        line,
+                        format!("failed to expand include {pattern:?}: {error}"),
+                    )
+                })?,
+                Err(error) => {
+                    return Err(ConfigError::parse(
+                        path,
+                        line,
+                        format!("invalid include pattern {pattern:?}: {error}"),
+                    ));
+                }
+            };
+            // `glob` does not guarantee an order across platforms.
+            paths.sort();
+            for include_path in paths {
+                // Directories match wildcards such as `unbound.conf.d/*`, but
+                // they are not configuration files.
+                if include_path.is_dir() {
+                    continue;
+                }
+                self.load_file(&include_path, block)?;
+                matched += 1;
+            }
+            // Only fall back to the working directory when the including
+            // file's directory produced no match at all.
+            if matched > 0 {
+                break;
+            }
+        }
+        if matched == 0 {
+            self.warn(path, line, format!("include {pattern:?} matched no files"));
+        }
+        Ok(())
+    }
 
+    fn parse_text(
+        &mut self,
+        path: &Path,
+        text: &str,
+        block: &mut Block,
+    ) -> Result<(), ConfigError> {
         for (index, raw_line) in text.lines().enumerate() {
             let line_number = index + 1;
             let line = strip_comment(raw_line).trim();
@@ -132,7 +194,7 @@ impl Parser {
             let value = raw_value.trim();
 
             match key {
-                "include" => {
+                "include" | "include-toplevel" => {
                     let include = parse_scalar(value);
                     if include.is_empty() {
                         return Err(ConfigError::parse(
@@ -140,6 +202,13 @@ impl Parser {
                             line_number,
                             "include path is empty",
                         ));
+                    }
+                    let toplevel = key == "include-toplevel";
+                    if toplevel {
+                        // `include-toplevel` closes the active clause before
+                        // and after the include, so the outer file has to name
+                        // a block again (Unbound documents this explicitly).
+                        *block = Block::None;
                     }
                     if !self.resolve_includes {
                         self.warn(
@@ -149,24 +218,10 @@ impl Parser {
                         );
                         continue;
                     }
-                    if include.contains(['*', '?', '[']) {
-                        self.warn(
-                            path,
-                            line_number,
-                            "include globs are not supported yet; entry ignored",
-                        );
-                        continue;
+                    self.include(path, line_number, &include, block)?;
+                    if toplevel {
+                        *block = Block::None;
                     }
-                    let include_path = resolve_include(path, &include);
-                    self.load_file(&include_path)?;
-                    continue;
-                }
-                "include-toplevel" => {
-                    self.warn(
-                        path,
-                        line_number,
-                        "include-toplevel is not supported yet; entry ignored",
-                    );
                     continue;
                 }
                 _ => {}
@@ -175,35 +230,35 @@ impl Parser {
             if value.is_empty() {
                 match key {
                     "server" => {
-                        block = Block::Server;
+                        *block = Block::Server;
                         continue;
                     }
                     "forward-zone" => {
                         self.config.forward_zones.push(Default::default());
                         let zone_index = self.config.forward_zones.len() - 1;
-                        block = Block::Forward(zone_index);
+                        *block = Block::Forward(zone_index);
                         continue;
                     }
                     "stub-zone" => {
                         self.config.stub_zones.push(Default::default());
                         let zone_index = self.config.stub_zones.len() - 1;
-                        block = Block::Stub(zone_index);
+                        *block = Block::Stub(zone_index);
                         continue;
                     }
                     "auth-zone" => {
                         self.config.auth_zones.push(Default::default());
                         let zone_index = self.config.auth_zones.len() - 1;
-                        block = Block::Auth(zone_index);
+                        *block = Block::Auth(zone_index);
                         continue;
                     }
                     "view" => {
                         self.config.views.push(Default::default());
                         let view_index = self.config.views.len() - 1;
-                        block = Block::View(view_index);
+                        *block = Block::View(view_index);
                         continue;
                     }
                     "remote-control" => {
-                        block = Block::RemoteControl;
+                        *block = Block::RemoteControl;
                         continue;
                     }
                     "python" | "dynlib" | "rpz" => {
@@ -212,23 +267,23 @@ impl Parser {
                             line_number,
                             format!("'{key}' blocks are not supported yet; block ignored"),
                         );
-                        block = Block::Ignored;
+                        *block = Block::Ignored;
                         continue;
                     }
-                    _ if matches!(block, Block::None) => {
+                    _ if matches!(*block, Block::None) => {
                         self.warn(
                             path,
                             line_number,
                             format!("unsupported top-level block '{key}'; block ignored"),
                         );
-                        block = Block::Ignored;
+                        *block = Block::Ignored;
                         continue;
                     }
                     _ => {}
                 }
             }
 
-            match block {
+            match *block {
                 Block::None => {
                     return Err(ConfigError::parse(
                         path,
@@ -333,6 +388,13 @@ impl Parser {
             "access-control" => {
                 let control = AccessControl::from_str(value)
                     .map_err(|message| ConfigError::parse(path, line, message))?;
+                if control.action == AccessAction::AllowCookie {
+                    self.warn(
+                        path,
+                        line,
+                        "access-control action allow_cookie is not enforced yet; treating the network as allow",
+                    );
+                }
                 self.config.server.access_control.push(control);
             }
             "access-control-view" => {
@@ -366,6 +428,44 @@ impl Parser {
                 })?;
                 self.config.server.outgoing_interfaces.push(address);
             }
+            "do-not-query-address" => {
+                let address = parse_scalar(value);
+                if address.is_empty() {
+                    return Err(ConfigError::parse(
+                        path,
+                        line,
+                        "do-not-query-address is empty",
+                    ));
+                }
+                self.config.server.do_not_query_address.push(address);
+            }
+            "do-not-query-localhost" => {
+                self.config.server.do_not_query_localhost = parse_bool(path, line, key, value)?;
+            }
+            "root-hints" => {
+                let path_value = parse_scalar(value);
+                if path_value.is_empty() {
+                    return Err(ConfigError::parse(path, line, "root-hints is empty"));
+                }
+                self.config
+                    .server
+                    .root_hints
+                    .push(PathBuf::from(path_value));
+            }
+            "unblock-lan-zones" => {
+                let enabled = parse_bool(path, line, key, value)?;
+                self.config.server.unblock_lan_zones = Some(enabled);
+                if !enabled {
+                    self.warn(
+                        path,
+                        line,
+                        "unblock-lan-zones: no is not implemented; private reverse zones are always resolved upstream",
+                    );
+                }
+            }
+            "insecure-lan-zones" => {
+                self.config.server.insecure_lan_zones = parse_bool(path, line, key, value)?;
+            }
             "harden-glue" => self.config.server.harden_glue = parse_bool(path, line, key, value)?,
             "harden-dnssec-stripped" => {
                 self.config.server.harden_dnssec_stripped = parse_bool(path, line, key, value)?;
@@ -377,18 +477,34 @@ impl Parser {
             "module-config" => {
                 let modules = parse_scalar(value);
                 let lower = modules.to_ascii_lowercase();
+                // These are the only modules the pipeline can honour. The
+                // others are recognised so a stock config parses, but they
+                // have no effect and must be reported.
+                let mut unsupported = Vec::new();
+                let mut unknown = false;
+                for module in lower.split_whitespace() {
+                    match module {
+                        "validator" | "iterator" => {}
+                        "subnetcache" | "respip" | "dynlib" => unsupported.push(module),
+                        _ => unknown = true,
+                    }
+                }
                 self.config.server.dnssec_validation =
                     lower.split_whitespace().any(|module| module == "validator");
-                if !lower.split_whitespace().all(|module| {
-                    matches!(
-                        module,
-                        "validator" | "iterator" | "subnetcache" | "respip" | "dynlib"
-                    )
-                }) {
+                if unknown {
                     self.warn(
                         path,
                         line,
                         format!("unsupported module-config {modules:?}; using validator iterator"),
+                    );
+                } else if !unsupported.is_empty() {
+                    self.warn(
+                        path,
+                        line,
+                        format!(
+                            "module-config module(s) {} are not implemented yet; ignored",
+                            unsupported.join(", ")
+                        ),
                     );
                 }
             }
@@ -479,6 +595,47 @@ impl Parser {
             "cache-min-ttl" => {
                 self.config.server.cache_min_ttl = parse_u32(path, line, key, value)?;
             }
+            "cache-max-negative-ttl" => {
+                self.config.server.cache_max_negative_ttl = parse_u32(path, line, key, value)?;
+            }
+            "infra-host-ttl" => {
+                self.config.server.infra_host_ttl = parse_u32(path, line, key, value)?;
+            }
+            "infra-cache-min-rtt" => {
+                self.config.server.infra_cache_min_rtt = parse_u32(path, line, key, value)?;
+            }
+            "infra-cache-numhosts" => {
+                let hosts = parse_usize(path, line, key, value)?;
+                if hosts == 0 {
+                    return Err(ConfigError::parse(
+                        path,
+                        line,
+                        "infra-cache-numhosts must be at least 1",
+                    ));
+                }
+                self.config.server.infra_cache_numhosts = hosts;
+            }
+            "so-reuseport" => {
+                if !parse_bool(path, line, key, value)? {
+                    self.warn(
+                        path,
+                        line,
+                        "so-reuseport: no is not implemented; UDP listeners always set SO_REUSEPORT",
+                    );
+                }
+            }
+            "delay-close" => {
+                let millis = parse_u32(path, line, key, value)?;
+                if millis != 0 {
+                    self.warn(
+                        path,
+                        line,
+                        format!(
+                            "delay-close: {millis} is not implemented; TCP connections close immediately"
+                        ),
+                    );
+                }
+            }
             "prefetch" => {
                 self.config.server.prefetch = parse_bool(path, line, key, value)?;
             }
@@ -532,7 +689,14 @@ impl Parser {
                 self.config.server.tls_use_system_ca = parse_bool(path, line, key, value)?;
             }
             "tls-enforce-name-check" => {
+                // Not an Unbound option, and the resolver does not use it.
+                // Keep parsing it so existing configs do not fail, but say so.
                 self.config.server.tls_enforce_name_check = parse_bool(path, line, key, value)?;
+                self.warn(
+                    path,
+                    line,
+                    "tls-enforce-name-check is not an Unbound option and is not enforced; remove it",
+                );
             }
             "udp-recv-buffer-size" => {
                 self.config.server.udp_recv_buffer_size = parse_usize(path, line, key, value)?;
@@ -662,15 +826,34 @@ impl Parser {
         match key {
             "name" => self.config.auth_zones[zone_index].name = parse_scalar(value),
             "zonefile" => self.config.auth_zones[zone_index].zonefile = optional_path(value),
-            "primary" | "master" => self.config.auth_zones[zone_index]
-                .primaries
-                .push(parse_scalar(value)),
-            "url" => self.config.auth_zones[zone_index]
-                .urls
-                .push(parse_scalar(value)),
+            "primary" | "master" => {
+                self.config.auth_zones[zone_index]
+                    .primaries
+                    .push(parse_scalar(value));
+                self.warn(
+                    path,
+                    line,
+                    format!("'{key}' is not supported yet (AXFR/IXFR is not implemented); zone transfers are ignored"),
+                );
+            }
+            "url" => {
+                self.config.auth_zones[zone_index]
+                    .urls
+                    .push(parse_scalar(value));
+                self.warn(
+                    path,
+                    line,
+                    "'url' is not supported yet (zone download is not implemented); ignored",
+                );
+            }
             "fallback-enabled" => {
                 self.config.auth_zones[zone_index].fallback_enabled =
                     parse_bool(path, line, key, value)?;
+                self.warn(
+                    path,
+                    line,
+                    "'fallback-enabled' has no effect because auth zones are never transferred; ignored",
+                );
             }
             "for-downstream" => {
                 self.config.auth_zones[zone_index].for_downstream =
@@ -788,15 +971,29 @@ impl Parser {
     }
 }
 
-fn resolve_include(base: &Path, include: &str) -> PathBuf {
-    let include = Path::new(include);
+/// Candidate absolute paths for an `include` pattern.
+///
+/// Unbound resolves relative includes against its working directory, which is
+/// either the launch directory or the `directory:` option. dns-rs resolves
+/// against the including file first (so a config directory can be copied as a
+/// unit) and only falls back to the process working directory when nothing
+/// matches.
+fn include_candidates(base: &Path, pattern: &str) -> Vec<PathBuf> {
+    let include = Path::new(pattern);
     if include.is_absolute() {
-        include.to_path_buf()
-    } else {
-        base.parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(include)
+        return vec![include.to_path_buf()];
     }
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(directory) = base.parent() {
+        candidates.push(directory.join(include));
+    }
+    if let Ok(directory) = std::env::current_dir() {
+        let fallback = directory.join(include);
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
+    }
+    candidates
 }
 
 fn split_quoted(value: &str) -> Vec<String> {
@@ -841,8 +1038,22 @@ fn parse_local_zone(path: &Path, line: usize, value: &str) -> Result<LocalZoneCo
             .map_err(|message| ConfigError::parse(path, line, message))?,
         None => LocalZoneType::Static,
     };
+    // Unbound resolves relative local-zone names against the root, so
+    // `local-zone: "example.com" redirect` and `example.com.` are equivalent.
+    if name.is_empty() {
+        return Err(ConfigError::parse(
+            path,
+            line,
+            "local-zone is missing a name",
+        ));
+    }
+    let name = if name.ends_with('.') {
+        name.clone()
+    } else {
+        format!("{name}.")
+    };
     Ok(LocalZoneConfig {
-        name: name.clone(),
+        name,
         zone_type,
         data: Vec::new(),
     })

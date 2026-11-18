@@ -84,6 +84,8 @@ fn config(forwarder: SocketAddr) -> Config {
     config.server.use_caps_for_id = false;
     config.server.qname_minimisation = false;
     config.server.dnssec_validation = false;
+    // The forwarder runs on loopback in this test.
+    config.server.do_not_query_localhost = false;
     // The coalescing test sends 1,000 queries from one client address.
     config.server.max_concurrent_queries_per_client = 2_048;
     config.forward_zones = vec![ForwardZoneConfig {

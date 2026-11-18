@@ -548,8 +548,14 @@ fn skip_name(wire: &[u8], mut offset: usize) -> Option<usize> {
 ///
 /// Positive answers use the smallest record TTL. Negative answers follow
 /// RFC 2308 by taking the smaller of the SOA TTL and its MINIMUM field. The
-/// result is clamped to the configured cache TTL bounds.
-pub fn response_ttl(message: &Message, min_ttl: u32, max_ttl: u32) -> Duration {
+/// result is clamped to the configured cache TTL bounds; negative responses
+/// are additionally capped by `max_negative_ttl`.
+pub fn response_ttl(
+    message: &Message,
+    min_ttl: u32,
+    max_ttl: u32,
+    max_negative_ttl: u32,
+) -> Duration {
     let mut ttl: Option<u32> = None;
 
     for record in message
@@ -571,6 +577,9 @@ pub fn response_ttl(message: &Message, min_ttl: u32, max_ttl: u32) -> Duration {
                 ttl = Some(ttl.map_or(negative, |current| current.min(negative)));
             }
         }
+        // `cache-min-ttl` is a floor, so it wins over a smaller negative cap.
+        let cap = max_negative_ttl.max(min_ttl);
+        ttl = ttl.map(|current| current.min(cap));
     }
 
     let seconds = ttl.unwrap_or(min_ttl).clamp(min_ttl, max_ttl.max(min_ttl));
@@ -583,7 +592,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use dns_proto::{Message, MessageType, Name, OpCode, RData, Record, RecordType, encode};
+    use dns_proto::{Message, MessageType, Name, OpCode, RData, Record, RecordType, SOA, encode};
 
     use super::{MessageCache, WireRequest, patch_question, response_ttl, wire_has_opt};
 
@@ -681,8 +690,40 @@ mod tests {
 
     #[test]
     fn clamps_ttl() {
-        assert_eq!(response_ttl(&answer(1), 30, 120), Duration::from_secs(30));
-        assert_eq!(response_ttl(&answer(999), 0, 120), Duration::from_secs(120));
+        assert_eq!(
+            response_ttl(&answer(1), 30, 120, 120),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            response_ttl(&answer(999), 0, 120, 120),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn caps_negative_ttl() {
+        let name = Name::from_ascii("example.com.").expect("name");
+        let mut message = Message::new(1, MessageType::Response, OpCode::Query);
+        message.add_query(dns_proto::Query::query(name.clone(), RecordType::A));
+        message.add_authority(Record::from_rdata(
+            name.clone(),
+            7_200,
+            RData::SOA(SOA::new(name.clone(), name, 1, 3_600, 600, 86_400, 7_200)),
+        ));
+
+        assert_eq!(
+            response_ttl(&message, 0, 86_400, 3_600),
+            Duration::from_secs(3_600)
+        );
+        assert_eq!(
+            response_ttl(&message, 0, 86_400, 60),
+            Duration::from_secs(60)
+        );
+        // cache-min-ttl is a floor even when the negative cap is smaller.
+        assert_eq!(
+            response_ttl(&message, 300, 86_400, 60),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]

@@ -100,8 +100,16 @@ impl Config {
                 "max-concurrent-queries-per-client must be at least 1".to_owned(),
             ));
         }
+        if server.infra_cache_numhosts == 0 {
+            return Err(ConfigError::Validation(
+                "infra-cache-numhosts must be at least 1".to_owned(),
+            ));
+        }
         for address in &server.private_address {
-            parse_private_network(address)?;
+            parse_ip_network("private-address", address)?;
+        }
+        for address in &server.do_not_query_address {
+            parse_ip_network("do-not-query-address", address)?;
         }
         let mut private_domains = BTreeSet::new();
         for domain in &server.private_domain {
@@ -398,6 +406,18 @@ pub struct ServerConfig {
     pub do_tcp: bool,
     /// Source addresses for outgoing queries.
     pub outgoing_interfaces: Vec<IpAddr>,
+    /// Addresses that must never be queried upstream (`do-not-query-address`).
+    ///
+    /// Entries are IP addresses or CIDR netblocks. A referral that points at a
+    /// blocked address is ignored instead of being queried, which also stops
+    /// referral-driven requests to loopback or link-local services.
+    pub do_not_query_address: Vec<String>,
+    /// Add loopback (`127.0.0.0/8`, `::1`) to the outgoing block list.
+    ///
+    /// Mirrors Unbound's `do-not-query-localhost`, which defaults to `yes`.
+    /// Set it to `no` when a forward zone or stub zone targets a resolver on
+    /// the local host.
+    pub do_not_query_localhost: bool,
     /// Client access policy.
     pub access_control: Vec<AccessControl>,
     /// Map client networks to named views (`access-control-view`).
@@ -430,6 +450,11 @@ pub struct ServerConfig {
     pub trust_anchor_file: Option<PathBuf>,
     /// File used for RFC 5011 automatic trust-anchor maintenance.
     pub auto_trust_anchor_file: Option<PathBuf>,
+    /// Zone-file formatted files with root server hints (`root-hints`).
+    ///
+    /// When set, the addresses in these files seed root priming instead of the
+    /// built-in list. Read at startup and validated by `checkconf`.
+    pub root_hints: Vec<PathBuf>,
     /// Minimise QNAMEs sent to authoritative servers (RFC 9156).
     pub qname_minimisation: bool,
     /// Use strict minimisation (no relaxation on NODATA/CNAME).
@@ -444,6 +469,21 @@ pub struct ServerConfig {
     pub cache_max_ttl: u32,
     /// Minimum TTL for cached records.
     pub cache_min_ttl: u32,
+    /// Maximum TTL for negative (NXDOMAIN and NODATA) cache entries.
+    ///
+    /// A negative response is never cached for longer than this value, even
+    /// when the SOA minimum suggests a longer TTL. `cache-min-ttl` still takes
+    /// precedence, so a larger minimum can keep the entry longer.
+    pub cache_max_negative_ttl: u32,
+    /// Lifetime in seconds of per-server infrastructure cache entries.
+    pub infra_host_ttl: u32,
+    /// Minimum round-trip time in milliseconds used for upstream selection.
+    ///
+    /// Measured RTTs below this floor are raised to it, mirroring Unbound's
+    /// `infra-cache-min-rtt`.
+    pub infra_cache_min_rtt: u32,
+    /// Maximum number of upstream servers tracked by the infrastructure cache.
+    pub infra_cache_numhosts: usize,
     /// Refresh cache entries shortly before they expire.
     pub prefetch: bool,
     /// Serve expired cache entries while refreshing them.
@@ -479,6 +519,18 @@ pub struct ServerConfig {
     /// that are not delegated in the public DNS. Local zones, auth zones, and
     /// built-in local data are always allowed to contain private addresses.
     pub private_domain: Vec<String>,
+    /// Whether private reverse zones are answered locally (`unblock-lan-zones`).
+    ///
+    /// Unbound answers reverse lookups for RFC 1918 space locally unless this
+    /// is set. dns-rs never synthesises those zones, so `yes` matches the
+    /// default behaviour and `no` is reported as unsupported. `None` means the
+    /// option was not present in the configuration.
+    pub unblock_lan_zones: Option<bool>,
+    /// Skip DNSSEC validation for private reverse zones (`insecure-lan-zones`).
+    ///
+    /// Adds the RFC 1918, link-local, and unique-local reverse zones to the
+    /// negative trust anchor set.
+    pub insecure_lan_zones: bool,
     /// Maximum concurrent plain-TCP, DoT, and DoH connections per worker thread.
     ///
     /// The server enforces `incoming_num_tcp * num_threads` connections across
@@ -539,6 +591,10 @@ impl Default for ServerConfig {
             do_udp: true,
             do_tcp: true,
             outgoing_interfaces: Vec::new(),
+            do_not_query_address: Vec::new(),
+            // Unbound adds loopback to the block list by default so a referral
+            // can never turn the resolver into a local-host port scanner.
+            do_not_query_localhost: true,
             access_control: default_access_control(),
             access_control_view: Vec::new(),
             harden_glue: true,
@@ -551,6 +607,7 @@ impl Default for ServerConfig {
             trust_anchor: Vec::new(),
             trust_anchor_file: None,
             auto_trust_anchor_file: None,
+            root_hints: Vec::new(),
             qname_minimisation: true,
             qname_minimisation_strict: false,
             use_caps_for_id: true,
@@ -558,6 +615,13 @@ impl Default for ServerConfig {
             max_udp_size: 1232,
             cache_max_ttl: 86_400,
             cache_min_ttl: 0,
+            // Matches Unbound's default; without it a negative response could
+            // be cached for as long as cache-max-ttl.
+            cache_max_negative_ttl: 3_600,
+            // These are Unbound's defaults.
+            infra_host_ttl: 900,
+            infra_cache_min_rtt: 50,
+            infra_cache_numhosts: 10_000,
             prefetch: false,
             serve_expired: false,
             serve_expired_ttl: 0,
@@ -569,6 +633,8 @@ impl Default for ServerConfig {
             max_concurrent_queries_per_client: 64,
             private_address: default_private_address(),
             private_domain: default_private_domains(),
+            unblock_lan_zones: None,
+            insecure_lan_zones: false,
             incoming_num_tcp: 10,
             tls_service_key: None,
             tls_service_pem: None,
@@ -590,13 +656,53 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// Domains excluded from DNSSEC validation, in absolute form.
     ///
+    /// This includes `insecure-lan-zones`, which adds the reverse zones for
+    /// private address space.
+    ///
     /// The values are validated by [`Config::validate`]; invalid entries are
     /// skipped here so the accessor is also safe for hand-built configs.
     pub fn insecure_domains(&self) -> Vec<Name> {
-        self.domain_insecure
+        let mut domains = self
+            .domain_insecure
             .iter()
             .filter_map(|domain| absolute_name(domain).ok())
-            .collect()
+            .collect::<Vec<_>>();
+        if self.insecure_lan_zones {
+            domains.extend(
+                PRIVATE_REVERSE_ZONES
+                    .iter()
+                    .filter_map(|zone| Name::from_ascii(zone).ok()),
+            );
+        }
+        // A configuration may repeat one of the LAN zones in `domain-insecure`.
+        domains.sort_unstable();
+        domains.dedup();
+        domains
+    }
+
+    /// Networks that must never be queried upstream.
+    ///
+    /// Combines `do-not-query-address` with `do-not-query-localhost`, which
+    /// adds `127.0.0.0/8` and `::1/128` like Unbound does. The values are
+    /// validated by [`Config::validate`]; invalid entries are skipped here so
+    /// the accessor is also safe for hand-built configs.
+    pub fn do_not_query_networks(&self) -> Vec<IpNet> {
+        let mut networks = self
+            .do_not_query_address
+            .iter()
+            .filter_map(|address| parse_ip_network("do-not-query-address", address).ok())
+            .collect::<Vec<_>>();
+        if self.do_not_query_localhost {
+            // `IpNet::new` only fails for prefix lengths above the address
+            // width, so these constants cannot fail. The address is zeroed
+            // because `IpNet::new` keeps the host bits as written.
+            networks
+                .push(IpNet::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 0)), 8).expect("valid /8"));
+            networks.push(IpNet::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 128).expect("valid /128"));
+        }
+        networks.sort();
+        networks.dedup();
+        networks
     }
 
     /// Private address ranges for DNS rebinding protection, parsed.
@@ -607,7 +713,7 @@ impl ServerConfig {
         let mut networks = self
             .private_address
             .iter()
-            .filter_map(|address| parse_private_network(address).ok())
+            .filter_map(|address| parse_ip_network("private-address", address).ok())
             .collect::<Vec<_>>();
         networks.sort();
         networks.dedup();
@@ -640,25 +746,56 @@ fn absolute_name(value: &str) -> Result<Name, ConfigError> {
         .map_err(|error| ConfigError::Validation(format!("invalid domain name {value:?}: {error}")))
 }
 
-/// Parse a `private-address` value: either a CIDR prefix or a bare address.
-fn parse_private_network(value: &str) -> Result<IpNet, ConfigError> {
+/// Parse a `private-address` or `do-not-query-address` value: either a CIDR
+/// prefix or a bare address.
+fn parse_ip_network(field: &str, value: &str) -> Result<IpNet, ConfigError> {
     let value = value.trim();
     if value.is_empty() {
-        return Err(ConfigError::Validation(
-            "private-address must not be empty".to_owned(),
-        ));
+        return Err(ConfigError::Validation(format!(
+            "{field} must not be empty"
+        )));
     }
     if let Ok(network) = value.parse::<IpNet>() {
         return Ok(network);
     }
-    let address = value.parse::<IpAddr>().map_err(|error| {
-        ConfigError::Validation(format!("invalid private-address {value:?}: {error}"))
-    })?;
+    let address = value
+        .parse::<IpAddr>()
+        .map_err(|error| ConfigError::Validation(format!("invalid {field} {value:?}: {error}")))?;
     Ok(match address {
         IpAddr::V4(_) => IpNet::new(address, 32).expect("valid IPv4 prefix length"),
         IpAddr::V6(_) => IpNet::new(address, 128).expect("valid IPv6 prefix length"),
     })
 }
+
+/// Reverse zones for private address space, matching Unbound's
+/// `insecure-lan-zones` table.
+const PRIVATE_REVERSE_ZONES: [&str; 25] = [
+    "10.in-addr.arpa.",
+    "16.172.in-addr.arpa.",
+    "17.172.in-addr.arpa.",
+    "18.172.in-addr.arpa.",
+    "19.172.in-addr.arpa.",
+    "20.172.in-addr.arpa.",
+    "21.172.in-addr.arpa.",
+    "22.172.in-addr.arpa.",
+    "23.172.in-addr.arpa.",
+    "24.172.in-addr.arpa.",
+    "25.172.in-addr.arpa.",
+    "26.172.in-addr.arpa.",
+    "27.172.in-addr.arpa.",
+    "28.172.in-addr.arpa.",
+    "29.172.in-addr.arpa.",
+    "30.172.in-addr.arpa.",
+    "31.172.in-addr.arpa.",
+    "168.192.in-addr.arpa.",
+    "254.169.in-addr.arpa.",
+    "d.f.ip6.arpa.",
+    "8.e.f.ip6.arpa.",
+    "9.e.f.ip6.arpa.",
+    "a.e.f.ip6.arpa.",
+    "b.e.f.ip6.arpa.",
+    "8.b.d.0.1.0.0.2.ip6.arpa.",
+];
 
 /// The private ranges blocked by default, matching Unbound's example config.
 fn default_private_address() -> Vec<String> {
@@ -808,6 +945,13 @@ pub enum AccessAction {
     Refuse,
     /// Allow access and permit cache snooping.
     AllowSnoop,
+    /// Allow access and answer every query as if RD was set.
+    AllowSetrd,
+    /// Allow access; cookie enforcement is not implemented yet.
+    ///
+    /// Accepted for configuration compatibility. The network is treated as
+    /// [`Self::Allow`] and the `unbound.conf` front-end reports a warning.
+    AllowCookie,
     /// Allow only queries for locally served data.
     DenyNonLocal,
     /// Respond REFUSED outside locally served data.
@@ -821,6 +965,8 @@ impl fmt::Display for AccessAction {
             Self::Deny => "deny",
             Self::Refuse => "refuse",
             Self::AllowSnoop => "allow_snoop",
+            Self::AllowSetrd => "allow_setrd",
+            Self::AllowCookie => "allow_cookie",
             Self::DenyNonLocal => "deny_non_local",
             Self::RefuseNonLocal => "refuse_non_local",
         };
@@ -838,6 +984,8 @@ impl FromStr for AccessAction {
             "deny" => Ok(Self::Deny),
             "refuse" => Ok(Self::Refuse),
             "allow_snoop" => Ok(Self::AllowSnoop),
+            "allow_setrd" => Ok(Self::AllowSetrd),
+            "allow_cookie" => Ok(Self::AllowCookie),
             "deny_non_local" => Ok(Self::DenyNonLocal),
             "refuse_non_local" => Ok(Self::RefuseNonLocal),
             _ => Err(format!("unknown access-control action {value:?}")),
@@ -1387,8 +1535,26 @@ fn validate_target(kind: &str, zone: &str, target: &ForwardTarget) -> Result<(),
     Ok(())
 }
 
+/// Default TTL Unbound applies to `local-data` records without one.
+pub const LOCAL_DATA_DEFAULT_TTL: u32 = 3600;
+
+/// Parse a `local-data` value, applying Unbound's default TTL.
+///
+/// Unbound accepts records without a TTL, such as
+/// `local-data: "router.lan. IN A 192.168.1.1"`, and uses 3600 seconds. The
+/// underlying zone-file parser requires a TTL unless a `$TTL` default is in
+/// effect, so one is prepended. An explicit TTL in the record still wins.
+///
+/// # Errors
+///
+/// Returns the zone-file parser's message when the text is not a valid record.
+pub fn parse_local_data(text: &str) -> Result<Vec<dns_proto::Record>, String> {
+    let input = format!("$TTL {LOCAL_DATA_DEFAULT_TTL}\n{text}");
+    dns_proto::parse_zone_records(&input, None)
+}
+
 fn validate_local_data(text: &str) -> Result<(), ConfigError> {
-    let records = dns_proto::parse_zone_records(text, None).map_err(|error| {
+    let records = parse_local_data(text).map_err(|error| {
         ConfigError::Validation(format!("invalid local-data {text:?}: {error}"))
     })?;
     if records.is_empty() {
@@ -1762,6 +1928,32 @@ mod tests {
             .expect("valid access control");
         assert_eq!(control.action, AccessAction::Allow);
         assert_eq!(control.network.prefix_len(), 8);
+    }
+
+    #[test]
+    fn local_data_without_a_ttl_uses_the_unbound_default() {
+        let records =
+            super::parse_local_data("router.lan. IN A 192.168.1.1").expect("TTL-less local-data");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ttl, super::LOCAL_DATA_DEFAULT_TTL);
+    }
+
+    #[test]
+    fn local_data_keeps_an_explicit_ttl() {
+        let records =
+            super::parse_local_data("router.lan. 120 IN A 192.168.1.1").expect("local-data");
+        assert_eq!(records[0].ttl, 120);
+    }
+
+    #[test]
+    fn local_data_validation_accepts_a_missing_ttl() {
+        super::validate_local_data("router.lan. IN A 192.168.1.1").expect("valid local-data");
+    }
+
+    #[test]
+    fn local_data_without_a_record_is_rejected() {
+        let error = super::validate_local_data("router.lan.").expect_err("no record");
+        assert!(error.to_string().contains("contains no records"));
     }
 
     #[test]

@@ -52,15 +52,29 @@ pub struct InfraCache {
     // `SocketAddr` is `Hash + Eq`, so keying by it directly avoids the
     // per-lookup `String` allocation that formatting the address caused.
     cache: Cache<SocketAddr, InfraEntry>,
+    min_rtt: Duration,
 }
 
+/// Default lifetime of an infrastructure entry.
+pub const DEFAULT_INFRA_TTL: Duration = Duration::from_secs(3_600);
+
 impl InfraCache {
+    /// Build a cache with the default entry lifetime and no RTT floor.
     pub fn new(max_capacity: u64) -> Self {
+        Self::with_options(max_capacity, DEFAULT_INFRA_TTL, Duration::ZERO)
+    }
+
+    /// Build a cache with explicit capacity, entry lifetime, and RTT floor.
+    ///
+    /// `min_rtt` mirrors Unbound's `infra-cache-min-rtt`: stored RTTs below it
+    /// are raised so server selection does not over-favour a single sample.
+    pub fn with_options(max_capacity: u64, ttl: Duration, min_rtt: Duration) -> Self {
         Self {
             cache: Cache::builder()
                 .max_capacity(max_capacity)
-                .time_to_live(Duration::from_secs(3600))
+                .time_to_live(ttl)
                 .build(),
+            min_rtt,
         }
     }
 
@@ -82,6 +96,9 @@ impl InfraCache {
         // Exponential moving average.
         entry.rtt =
             Duration::from_micros((entry.rtt.as_micros() as u64 * 7 + rtt.as_micros() as u64) / 8);
+        if entry.rtt < self.min_rtt {
+            entry.rtt = self.min_rtt;
+        }
         entry.timeouts = 0;
         entry.failures = 0;
         entry.lame = false;
@@ -167,6 +184,14 @@ mod tests {
         let entry = cache.get(&address()).expect("entry");
         assert!(entry.rtt < Duration::from_millis(376));
         assert_eq!(entry.timeouts, 0);
+    }
+
+    #[test]
+    fn applies_the_configured_rtt_floor() {
+        let cache = InfraCache::with_options(16, Duration::from_secs(60), Duration::from_secs(1));
+        cache.update_rtt(&address(), Duration::from_millis(1));
+        let entry = cache.get(&address()).expect("entry");
+        assert_eq!(entry.rtt, Duration::from_secs(1));
     }
 
     #[test]

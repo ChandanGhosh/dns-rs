@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;
 
-use dns_config::{AuthZoneConfig, Config, LocalZoneConfig, LocalZoneType};
+use dns_config::{AuthZoneConfig, Config, LocalZoneConfig, LocalZoneType, parse_local_data};
 use dns_proto::{
     Message, MessageType, Name, OpCode, Query, RData, Record, RecordType, ResponseCode, SOA,
     parse_zone_records,
@@ -353,7 +353,7 @@ impl LocalPolicy {
 }
 
 fn parse_records(text: &str) -> Vec<Record> {
-    match parse_zone_records(text, None) {
+    match parse_local_data(text) {
         Ok(records) => records,
         Err(error) => {
             warn!(%error, data = %text, "ignoring invalid local-data record");

@@ -190,8 +190,10 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
 - DNS-over-TLS (RFC 7858) and DNS-over-HTTPS (RFC 8484), selected by interface
   port when TLS material is configured.
 - EDNS(0) buffer-size negotiation and cookie handling.
-- Access control with `allow`, `deny`, `refuse`, `allow-snoop`,
-  `deny-non-local`, and `refuse-non-local` actions.
+- Access control with `allow`, `deny`, `refuse`, `allow-setrd`, `allow-snoop`,
+  `deny-non-local`, and `refuse-non-local` actions. The most specific netblock
+  wins regardless of statement order, as in Unbound; `allow-cookie` is accepted
+  with a warning because cookie enforcement is not implemented.
 - Views keyed by client network (`access-control-view`), with `view-first`
   fallback to global local data.
 - Local zones and `local-data` records, plus authoritative zones loaded from
@@ -248,8 +250,10 @@ appending to them. The `unbound.conf` equivalents are `private-address:` and
 - DNS-over-QUIC (the transport is named in `dns-client` but has no implementation).
 - Privilege drop, `chroot`, daemonization, PID files, and syslog. These options
   are parsed for compatibility but not applied.
-- `forward-host`, `interface-view`, `response-ip`, and AXFR/URL fetching for
-  auth zones. These are parsed and reported as warnings.
+- `interface-view` (per-interface views) and `response-ip` filtering. These are
+  parsed and reported as warnings.
+- AXFR/URL fetching for auth zones. Only zonefile loading is implemented, and
+  the transfer-related options are parsed and reported as warnings.
 - Applying listener, TLS, thread-count, socket-buffer, control-socket, or
   verbosity changes through a reload; those require a restart.
 - The Unbound `.rpl` replay harness (`docs/replay-harness.md` is still a design)
@@ -438,15 +442,18 @@ Supported `unbound.conf` blocks:
   daemonize, user/chroot/directory, log file, PID file, syslog, IPv4/IPv6,
   UDP/TCP, outgoing interfaces, access control, access-control-view, local
   zones and data, hardening, DNSSEC validation and per-domain exclusions, trust
-  anchors, QNAME minimisation, 0x20, EDNS sizes, TTL bounds, prefetch,
+  anchors, QNAME minimisation, 0x20, EDNS sizes, TTL bounds (including
+  `cache-max-negative-ttl`), infrastructure-cache limits, prefetch,
   serve-expired, rate limiting, private-address/private-domain rebinding
-  protection, and TCP connection limits.
+  protection, TCP connection limits, `root-hints`, `do-not-query-address`,
+  `do-not-query-localhost`, and the `unblock-lan-zones`/`insecure-lan-zones`
+  pair.
 - `forward-zone:` — name, `forward-addr` (plain, DoT, or DoH targets),
+  `forward-host` (resolved at startup through the system resolver),
   `forward-first`, `forward-fallback`, and `forward-tls-upstream` (Unbound
   alias `forward-ssl-upstream`). A DoT `#auth-name` without `@port` implies
   port 853; without an auth name the certificate chain is verified but any
-  name is accepted, matching Unbound. `forward-host` is parsed but not
-  implemented.
+  name is accepted, matching Unbound.
 - `stub-zone:` — name, `stub-addr`, `stub-host`, `stub-prime`, `stub-first`,
   `stub-no-cache`, and `stub-tls-upstream`.
 - `auth-zone:` — name, zonefile, primaries, URL, fallback, and
@@ -460,10 +467,15 @@ Supported `unbound.conf` blocks:
   `status`, `stats`, `stats-prometheus`, `reload`, and `stop`. The socket is
   mode `0600`, peers are authorized by effective UID, and `reload` re-reads the
   daemon's own configuration file (the request cannot name a path).
-- `include:` and `include-toplevel:` — relative or absolute files, with cycle
-  detection.
+- `include:` and `include-toplevel:` — relative or absolute files, with glob
+  patterns, cycle detection, and Unbound's block semantics: `include:` keeps the
+  active clause, while `include-toplevel:` closes it before and after the
+  file. Relative paths are tried against the including file's directory first
+  and then the process working directory.
 
-Options outside this set are accepted with a warning and ignored.
+Options outside this set are accepted with a warning and ignored. See
+[`docs/unbound-compatibility.md`](docs/unbound-compatibility.md) for the
+per-option matrix and the documented differences from Unbound.
 
 ## Development
 
