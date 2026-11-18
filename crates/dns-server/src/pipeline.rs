@@ -33,7 +33,6 @@ use crate::ratelimit::{ClientConcurrency, RateDecision, RateLimiter};
 
 const MESSAGE_CACHE_ENTRIES: u64 = 8_192;
 const RRSET_CACHE_ENTRIES: u64 = 16_384;
-const INFRA_CACHE_ENTRIES: u64 = 1_024;
 const MAX_GLOBAL_INFLIGHT: usize = 8_192;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOWER_TIMEOUT: Duration = Duration::from_secs(11);
@@ -476,7 +475,17 @@ impl QueryPipeline {
             stale_for,
         ));
         let rrsets = Arc::new(RrsetCache::new(RRSET_CACHE_ENTRIES));
-        let infra = Arc::new(InfraCache::new(INFRA_CACHE_ENTRIES));
+        let infra = Arc::new(InfraCache::with_options(
+            config.server.infra_cache_numhosts as u64,
+            Duration::from_secs(u64::from(config.server.infra_host_ttl)),
+            Duration::from_millis(u64::from(config.server.infra_cache_min_rtt)),
+        ));
+
+        // Addresses that must never be queried. Static upstreams are filtered
+        // at startup so a misconfiguration is visible in the log rather than
+        // failing every query later; the iterator applies the same list to
+        // addresses learned from referrals.
+        let do_not_query = config.server.do_not_query_networks();
 
         let forward_zones = config
             .forward_zones
@@ -493,23 +502,31 @@ impl QueryPipeline {
                         return None;
                     }
                 };
-                if !zone.forward_hosts.is_empty() {
-                    warn!(
-                        zone = %zone.name,
-                        "forward-host is not implemented yet; use forward-addr"
-                    );
-                }
-                let servers = build_servers(
+                let mut servers = build_servers(
                     &zone.name,
                     &zone.forward_addrs,
                     zone.tls_upstream,
                     config.server.do_ip4,
                     config.server.do_ip6,
                 );
+                append_resolved_hosts(
+                    "forward-host",
+                    &zone.name,
+                    &zone.forward_hosts,
+                    zone.tls_upstream,
+                    &mut servers,
+                );
+                retain_allowed_families(
+                    &zone.name,
+                    &mut servers,
+                    config.server.do_ip4,
+                    config.server.do_ip6,
+                );
+                retain_queryable("forward-zone", &zone.name, &mut servers, &do_not_query);
                 if servers.is_empty() {
                     warn!(
                         zone = %zone.name,
-                        "forward-zone has no usable forward-addr; ignoring"
+                        "forward-zone has no usable forward-addr or forward-host; ignoring"
                     );
                     return None;
                 }
@@ -555,43 +572,24 @@ impl QueryPipeline {
                     config.server.do_ip4,
                     config.server.do_ip6,
                 );
-                for host in &zone.stub_hosts {
-                    let port = if zone.tls_upstream { 853 } else { 53 };
-                    match resolve_forward_host(host, port) {
-                        Ok(addresses) => {
-                            for addr in addresses {
-                                servers.push(ForwardServer {
-                                    addr,
-                                    transport: if zone.tls_upstream {
-                                        ForwardTransport::Tls
-                                    } else {
-                                        ForwardTransport::Plain
-                                    },
-                                    tls_name: zone
-                                        .tls_upstream
-                                        .then(|| host.trim_end_matches('.').to_owned()),
-                                    path: None,
-                                });
-                            }
-                        }
-                        Err(error) => warn!(
-                            zone = %zone.name,
-                            %host,
-                            %error,
-                            "failed to resolve stub-host; skipping"
-                        ),
-                    }
-                }
+                append_resolved_hosts(
+                    "stub-host",
+                    &zone.name,
+                    &zone.stub_hosts,
+                    zone.tls_upstream,
+                    &mut servers,
+                );
                 retain_allowed_families(
                     &zone.name,
                     &mut servers,
                     config.server.do_ip4,
                     config.server.do_ip6,
                 );
+                retain_queryable("stub-zone", &zone.name, &mut servers, &do_not_query);
                 if servers.is_empty() {
                     warn!(
                         zone = %zone.name,
-                        "stub-zone has no usable stub-addr; ignoring"
+                        "stub-zone has no usable stub-addr or stub-host; ignoring"
                     );
                     return None;
                 }
@@ -630,6 +628,21 @@ impl QueryPipeline {
             (tracker, path.clone())
         });
 
+        // `root-hints` seeds priming with the operator's file instead of the
+        // built-in list. A broken file must not stop the daemon, so it is
+        // reported and the built-in hints stay in place.
+        let bootstrap_servers = if config.server.root_hints.is_empty() {
+            None
+        } else {
+            match dns_config::load_root_hints(&config.server.root_hints) {
+                Ok(servers) => Some(servers),
+                Err(error) => {
+                    warn!(%error, "failed to load root-hints; using built-in root hints");
+                    None
+                }
+            }
+        };
+
         let iterator_config = IteratorConfig {
             case_randomization: config.server.use_caps_for_id,
             qname_minimization: config.server.qname_minimisation,
@@ -643,6 +656,8 @@ impl QueryPipeline {
             stub_zones,
             allow_ipv4: config.server.do_ip4,
             allow_ipv6: config.server.do_ip6,
+            do_not_query,
+            bootstrap_servers,
             dnssec_validation: config.server.dnssec_validation,
             trust_store: trust_store.clone(),
             domain_insecure: config.server.insecure_domains(),
@@ -809,6 +824,11 @@ impl QueryPipeline {
                 ));
             }
             Decision::Allow => {}
+            Decision::AllowSetrd => {
+                // Unbound's `allow_setrd`: ignore the client's RD bit and
+                // answer as if recursion was requested.
+                request.metadata.recursion_desired = true;
+            }
             Decision::AllowSnoop => {
                 // Snoop mode: cache-only access, no recursion sent upstream
                 // (Unbound-like: RD=0, serve from message cache if available,
@@ -1145,6 +1165,7 @@ impl QueryPipeline {
                                     &message,
                                     self.config.server.cache_min_ttl,
                                     self.config.server.cache_max_ttl,
+                                    self.config.server.cache_max_negative_ttl,
                                 );
                                 if ttl > Duration::ZERO {
                                     self.messages.insert_encoded(
@@ -1519,7 +1540,70 @@ impl QueryPipeline {
     }
 }
 
-/// Resolve a DoH forwarder hostname at startup, preferring IPv4.
+/// Resolve `forward-host`/`stub-host` entries into upstream servers.
+///
+/// Unbound resolves these names once at startup through the system resolver
+/// instead of routing client queries through them. When TLS is enabled the
+/// host name doubles as the certificate name, as it does for `forward-addr`
+/// targets with an `#auth-name`.
+fn append_resolved_hosts(
+    kind: &str,
+    zone: &str,
+    hosts: &[String],
+    tls_upstream: bool,
+    servers: &mut Vec<ForwardServer>,
+) {
+    let port = if tls_upstream { 853 } else { 53 };
+    for host in hosts {
+        match resolve_forward_host(host, port) {
+            Ok(addresses) => {
+                for addr in addresses {
+                    servers.push(ForwardServer {
+                        addr,
+                        transport: if tls_upstream {
+                            ForwardTransport::Tls
+                        } else {
+                            ForwardTransport::Plain
+                        },
+                        tls_name: tls_upstream.then(|| host.trim_end_matches('.').to_owned()),
+                        path: None,
+                    });
+                }
+            }
+            Err(error) => warn!(
+                %zone,
+                %host,
+                %error,
+                "failed to resolve {kind}; skipping"
+            ),
+        }
+    }
+}
+
+/// Drop upstream servers that fall inside the do-not-query list.
+///
+/// Without this, a single `forward-addr` or referral pointing at loopback
+/// would be queried even though `do-not-query-localhost` is on, which is both
+/// surprising and a local-service probe vector.
+fn retain_queryable(kind: &str, zone: &str, servers: &mut Vec<ForwardServer>, blocked: &[IpNet]) {
+    if blocked.is_empty() {
+        return;
+    }
+    servers.retain(|server| {
+        let is_blocked = blocked
+            .iter()
+            .any(|network| network.contains(&server.addr.ip()));
+        if is_blocked {
+            warn!(
+                %zone,
+                addr = %server.addr,
+                "ignoring {kind} address blocked by do-not-query-address/do-not-query-localhost"
+            );
+        }
+        !is_blocked
+    });
+}
+
 /// Convert configured targets into concrete upstream servers.
 ///
 /// Addresses whose family is disabled by `do-ip4`/`do-ip6` are dropped: the
@@ -2581,6 +2665,79 @@ mod tests {
                 .expect("OPT")
                 .option(dns_proto::EDNS_COOKIE)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn retain_queryable_drops_blocked_upstreams() {
+        let mut servers = vec![
+            super::ForwardServer {
+                addr: "127.0.0.1:53".parse().expect("address"),
+                transport: super::ForwardTransport::Plain,
+                tls_name: None,
+                path: None,
+            },
+            super::ForwardServer {
+                addr: "192.0.2.1:53".parse().expect("address"),
+                transport: super::ForwardTransport::Plain,
+                tls_name: None,
+                path: None,
+            },
+        ];
+        super::retain_queryable(
+            "forward-zone",
+            ".",
+            &mut servers,
+            &["127.0.0.0/8".parse().expect("netblock")],
+        );
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].addr, "192.0.2.1:53".parse().expect("address"));
+    }
+
+    #[test]
+    fn forward_hosts_resolve_into_plain_upstreams() {
+        let mut servers = Vec::new();
+        super::append_resolved_hosts(
+            "forward-host",
+            ".",
+            &["localhost".to_owned()],
+            false,
+            &mut servers,
+        );
+
+        assert!(!servers.is_empty(), "localhost must resolve");
+        assert!(
+            servers
+                .iter()
+                .all(|server| server.transport == super::ForwardTransport::Plain)
+        );
+        assert!(servers.iter().all(|server| server.addr.port() == 53));
+        assert!(servers.iter().all(|server| server.tls_name.is_none()));
+        assert!(servers.iter().any(|server| server.addr.ip().is_loopback()));
+    }
+
+    #[test]
+    fn forward_hosts_use_the_tls_port_and_certificate_name() {
+        let mut servers = Vec::new();
+        super::append_resolved_hosts(
+            "forward-host",
+            "example.",
+            &["localhost".to_owned()],
+            true,
+            &mut servers,
+        );
+
+        assert!(!servers.is_empty(), "localhost must resolve");
+        assert!(
+            servers
+                .iter()
+                .all(|server| server.transport == super::ForwardTransport::Tls)
+        );
+        assert!(servers.iter().all(|server| server.addr.port() == 853));
+        assert!(
+            servers
+                .iter()
+                .all(|server| server.tls_name.as_deref() == Some("localhost"))
         );
     }
 }

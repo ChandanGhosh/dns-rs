@@ -16,6 +16,7 @@ use dns_proto::{
     Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType, ResponseCode,
     decode, encode,
 };
+use ipnet::IpNet;
 use rand::Rng;
 use tracing::{debug, info, trace, warn};
 
@@ -148,6 +149,13 @@ pub struct IteratorConfig {
     /// are skipped so an IPv4-only host does not burn its budget on
     /// connections that cannot work.
     pub allow_ipv6: bool,
+    /// Netblocks that are never queried upstream (`do-not-query-address`,
+    /// `do-not-query-localhost`).
+    ///
+    /// Applied to every candidate address, including ones learned from
+    /// referrals, so a malicious delegation cannot point the resolver at a
+    /// loopback or otherwise sensitive service.
+    pub do_not_query: Vec<IpNet>,
     /// Secret used for DNS cookies.
     pub cookie_secret: [u8; 32],
     /// Override the root server set (useful for tests and private roots).
@@ -204,6 +212,7 @@ impl Default for IteratorConfig {
             max_ttl: 86_400,
             allow_ipv4: true,
             allow_ipv6: true,
+            do_not_query: Vec::new(),
             cookie_secret,
             root_servers: None,
             bootstrap_servers: None,
@@ -1831,8 +1840,20 @@ impl IteratorResolver {
         }
     }
 
+    /// Whether outgoing queries may use this address.
+    ///
+    /// `do_ip4`/`do_ip6` disable the transport, not just the listeners, so a
+    /// host without working IPv6 does not spend its budget on unreachable
+    /// upstreams. Addresses in `do_not_query` are skipped for the same reason:
+    /// sending to them would be a configuration or security error.
     fn address_allowed(&self, addr: &SocketAddr) -> bool {
-        self.family_allowed(addr.ip())
+        let ip = addr.ip();
+        self.family_allowed(ip)
+            && !self
+                .config
+                .do_not_query
+                .iter()
+                .any(|network| network.contains(&ip))
     }
 
     /// Address record types that may be used to reach upstream servers.
@@ -2143,6 +2164,24 @@ mod tests {
 
     use super::{IteratorConfig, IteratorResolver, group_rrsets, randomize_case};
     use dns_proto::{RData, Record};
+
+    #[test]
+    fn do_not_query_blocks_matching_candidates() {
+        let config = IteratorConfig {
+            do_not_query: vec![
+                "127.0.0.0/8".parse().expect("netblock"),
+                "::1/128".parse().expect("netblock"),
+            ],
+            ..IteratorConfig::default()
+        };
+        let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+        assert!(!resolver.address_allowed(&"127.0.0.1:53".parse().expect("address")));
+        assert!(!resolver.address_allowed(&"127.1.2.3:53".parse().expect("address")));
+        assert!(!resolver.address_allowed(&"[::1]:53".parse().expect("address")));
+        assert!(resolver.address_allowed(&"192.0.2.1:53".parse().expect("address")));
+        assert!(resolver.address_allowed(&"[2001:db8::1]:53".parse().expect("address")));
+    }
 
     #[test]
     fn randomisation_preserves_name() {

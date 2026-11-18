@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "dns-cache"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dashmap",
  "dns-proto",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dns-client"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dns-proto",
  "http-body-util",
@@ -331,9 +331,10 @@ dependencies = [
 
 [[package]]
 name = "dns-config"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dns-proto",
+ "glob",
  "ipnet",
  "serde",
  "tempfile",
@@ -343,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "dns-control"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -357,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "dns-daemon"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -376,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "dns-dnssec"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "data-encoding",
  "dns-proto",
@@ -389,11 +390,11 @@ dependencies = [
 
 [[package]]
 name = "dns-filter"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "dns-iter"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "data-encoding",
  "dns-cache",
@@ -401,6 +402,7 @@ dependencies = [
  "dns-dnssec",
  "dns-proto",
  "hickory-proto",
+ "ipnet",
  "rand 0.9.5",
  "ring",
  "thiserror",
@@ -410,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "dns-proto"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hickory-proto",
  "thiserror",
@@ -418,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "dns-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -452,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "dns-testutil"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dns-dnssec",
  "dns-proto",
@@ -587,6 +589,12 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "h2"

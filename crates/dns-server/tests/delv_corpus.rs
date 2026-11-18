@@ -410,6 +410,8 @@ impl TestServer {
         config.server.qname_minimisation = false;
         config.server.use_caps_for_id = false;
         config.server.dnssec_validation = validating;
+        // The test forwarder runs on loopback.
+        config.server.do_not_query_localhost = false;
         if let Some(anchor) = anchor {
             config.server.trust_anchor = vec![anchor];
         }

@@ -11,6 +11,7 @@ dns-cache.workspace = true
 dns-client.workspace = true
 dns-dnssec.workspace = true
 dns-proto.workspace = true
+ipnet.workspace = true
 ring.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

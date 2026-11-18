@@ -194,7 +194,16 @@ async fn handle_inner(
 
     let max_age = decode(&response)
         .ok()
-        .map(|message| response_ttl(&message, 0, 86_400).as_secs())
+        .map(|message| {
+            let server = &pipeline.config().server;
+            response_ttl(
+                &message,
+                0,
+                server.cache_max_ttl,
+                server.cache_max_negative_ttl,
+            )
+            .as_secs()
+        })
         .unwrap_or(0);
     Response::builder()
         .status(StatusCode::OK)

@@ -16,6 +16,13 @@ pub(crate) const LOGFILE: &str =
 pub(crate) const PIDFILE: &str =
     "pidfile is parsed but not enforced; track the process through its supervisor";
 pub(crate) const USE_SYSLOG: &str = "use-syslog is parsed but not enforced; logs go to stderr";
+pub(crate) const TLS_ENFORCE_NAME_CHECK: &str =
+    "tls-enforce-name-check is not an Unbound option and is not enforced; remove it";
+pub(crate) const UNBLOCK_LAN_ZONES: &str =
+    "unblock-lan-zones: no is not implemented; private reverse zones are always resolved upstream";
+pub(crate) const AUTH_TRANSFER: &str = "auth-zone primary/url/fallback-enabled are parsed but not enforced; zone transfers and downloads are not implemented";
+pub(crate) const ALLOW_COOKIE: &str =
+    "access-control action allow_cookie is not enforced yet; treating the network as allow";
 
 /// Warnings for every unenforced option that is set in `config`.
 ///
@@ -47,6 +54,29 @@ pub(crate) fn unenforced(config: &Config, path: &Path) -> Vec<ConfigWarning> {
     }
     if config.server.use_syslog {
         push(USE_SYSLOG);
+    }
+    if config.server.tls_enforce_name_check {
+        push(TLS_ENFORCE_NAME_CHECK);
+    }
+    if config.server.unblock_lan_zones == Some(false) {
+        push(UNBLOCK_LAN_ZONES);
+    }
+    let mut reported_transfer = false;
+    for zone in &config.auth_zones {
+        if !reported_transfer
+            && (!zone.primaries.is_empty() || !zone.urls.is_empty() || zone.fallback_enabled)
+        {
+            push(AUTH_TRANSFER);
+            reported_transfer = true;
+        }
+    }
+    if config
+        .server
+        .access_control
+        .iter()
+        .any(|control| control.action == crate::model::AccessAction::AllowCookie)
+    {
+        push(ALLOW_COOKIE);
     }
     warnings
 }
@@ -94,5 +124,35 @@ do_daemonize = true
     fn reports_nothing_for_defaults() {
         let warnings = super::unenforced(&Config::default(), Path::new("dns-rs.toml"));
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn reports_unenforced_compatibility_options() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+tls_enforce_name_check = true
+unblock_lan_zones = false
+access_control = ["192.0.2.0/24 allow_cookie"]
+
+[[auth_zones]]
+name = "example."
+primaries = ["192.0.2.1"]
+"#,
+        )
+        .expect("config");
+
+        let warnings = super::unenforced(&config, Path::new("dns-rs.toml"));
+        for key in [
+            "tls-enforce-name-check",
+            "unblock-lan-zones",
+            "auth-zone",
+            "allow_cookie",
+        ] {
+            assert!(
+                warnings.iter().any(|warning| warning.message.contains(key)),
+                "missing warning for {key}: {warnings:?}"
+            );
+        }
     }
 }
