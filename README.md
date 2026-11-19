@@ -47,7 +47,7 @@ The same steps are available as `make image-smoke`.
 Published images are available for `linux/amd64` and `linux/arm64`:
 
 ```bash
-docker pull chandanghosh/dns-rs:0.4.0
+docker pull chandanghosh/dns-rs:0.6.0
 ```
 
 Each release also publishes immutable `X.Y.Z` and `latest` image tags and a
@@ -64,7 +64,7 @@ docker run -d --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:0.4.0
+  chandanghosh/dns-rs:0.6.0
 
 dig @127.0.0.1 -p 15353 example.com A
 docker stop dns-rs-test
@@ -473,9 +473,11 @@ Supported `unbound.conf` blocks:
   file. Relative paths are tried against the including file's directory first
   and then the process working directory.
 
-Options outside this set are accepted with a warning and ignored. See
-[`docs/unbound-compatibility.md`](docs/unbound-compatibility.md) for the
-per-option matrix and the documented differences from Unbound.
+Options outside this set are accepted with a warning and ignored. For a
+step-by-step migration, a recommended baseline, and a Compose layout, see
+[`docs/unbound-migration.md`](docs/unbound-migration.md). The per-option matrix
+and the documented differences from Unbound are in
+[`docs/unbound-compatibility.md`](docs/unbound-compatibility.md).
 
 ## Development
 
@@ -574,9 +576,10 @@ accept external contributions from forks. Fork pull requests do not receive
 repository secrets.
 
 The Unbound replay harness design is in
-[`docs/replay-harness.md`](docs/replay-harness.md), container deployment is
-covered in [`docs/container.md`](docs/container.md), and benchmarking
-switches and methodology are in
+[`docs/replay-harness.md`](docs/replay-harness.md), migration from Unbound is
+covered in [`docs/unbound-migration.md`](docs/unbound-migration.md), container
+deployment is covered in [`docs/container.md`](docs/container.md), and
+benchmarking switches and methodology are in
 [`docs/benchmarking.md`](docs/benchmarking.md). Report security issues through
 the private process in [`SECURITY.md`](SECURITY.md).
 

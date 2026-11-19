@@ -76,7 +76,7 @@ fi
 
 # Exercise the healthcheck command directly, then query the published socket.
 docker exec "$CONTAINER" \
-    /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.toml healthcheck
+    /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.conf healthcheck
 
 if command -v dig >/dev/null 2>&1; then
     answer="$(dig +time=2 +tries=1 @127.0.0.1 -p "$PORT" localhost. A +short)"

@@ -4,6 +4,10 @@
 # The runtime image is `scratch`, so this uses the built-in `dns-rs control`
 # client through `docker exec` and a tmpfs for the writable socket path.
 #
+# The generated configuration is TOML on purpose: the image default is
+# `dns-rs.conf` in Unbound syntax, so this keeps end-to-end coverage of the
+# non-default `.toml` path (explicit `-c` plus a matching healthcheck).
+#
 #   IMAGE=dns-rs:dev scripts/container-control-smoke.sh
 set -euo pipefail
 
@@ -58,31 +62,31 @@ docker run --detach \
     --cap-drop ALL \
     --cap-add NET_BIND_SERVICE \
     --security-opt no-new-privileges=true \
+    --no-healthcheck \
     --volume "$work/config:/etc/dns-rs:ro" \
-    "$IMAGE" >/dev/null
+    "$IMAGE" -c /etc/dns-rs/dns-rs.toml run >/dev/null
 
+# The image is `scratch`, so `docker run --health-cmd` cannot work: Docker
+# always runs it through `/bin/sh`, which does not exist. Disable the built-in
+# probe and run the same command through `docker exec` instead.
 for _ in $(seq 1 60); do
-    status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo starting)"
-    case "$status" in
-        healthy)
-            break
-            ;;
-        unhealthy)
-            echo "container became unhealthy" >&2
-            docker logs "$CONTAINER" >&2 || true
-            exit 1
-            ;;
-    esac
     if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
-        echo "container exited before becoming healthy" >&2
+        echo "container exited before becoming ready" >&2
         docker logs "$CONTAINER" >&2 || true
         exit 1
+    fi
+    if docker exec "$CONTAINER" \
+        /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.toml healthcheck \
+        >/dev/null 2>&1; then
+        break
     fi
     sleep 1
 done
 
-if [ "$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")" != "healthy" ]; then
-    echo "container did not become healthy in time" >&2
+if ! docker exec "$CONTAINER" \
+    /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.toml healthcheck \
+    >/dev/null 2>&1; then
+    echo "container did not become ready in time" >&2
     docker logs "$CONTAINER" >&2 || true
     exit 1
 fi

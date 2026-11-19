@@ -101,7 +101,7 @@ LABEL org.opencontainers.image.title="dns-rs" \
       org.opencontainers.image.source="${SOURCE_URL}"
 
 COPY --from=builder /out/dns-rs /usr/local/bin/dns-rs
-COPY --chown=65532:65532 packaging/config/dns-rs.toml /etc/dns-rs/dns-rs.toml
+COPY --chown=65532:65532 packaging/config/dns-rs.conf /etc/dns-rs/dns-rs.conf
 COPY --from=builder --chown=65532:65532 /out/var/lib/dns-rs /var/lib/dns-rs
 COPY --from=builder --chown=65532:65532 /out/var/cache/dns-rs /var/cache/dns-rs
 
@@ -117,7 +117,7 @@ STOPSIGNAL SIGTERM
 # listener, and asks for the built-in localhost. record. Override the config
 # path here if you change the container command.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/dns-rs", "-c", "/etc/dns-rs/dns-rs.toml", "healthcheck"]
+    CMD ["/usr/local/bin/dns-rs", "-c", "/etc/dns-rs/dns-rs.conf", "healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/dns-rs"]
-CMD ["-c", "/etc/dns-rs/dns-rs.toml", "run"]
+CMD ["-c", "/etc/dns-rs/dns-rs.conf", "run"]
