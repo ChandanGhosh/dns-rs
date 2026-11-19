@@ -1,5 +1,6 @@
 //! Local zones, authority zones, and built-in local data.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::LazyLock;
@@ -27,7 +28,14 @@ pub enum LocalAction {
 struct Zone {
     name: Name,
     zone_type: LocalZoneType,
-    records: HashMap<Name, Vec<Record>>,
+    /// Allocated only when a record is inserted. Name-independent policies and
+    /// empty zones never touch the heap for records.
+    ///
+    /// The box keeps the field one pointer wide instead of the 48 bytes of
+    /// `HashMap`, which matters when a blocklist holds tens of thousands of
+    /// zones that carry no records.
+    #[allow(clippy::box_collection)]
+    records: Option<Box<HashMap<Name, Vec<Record>>>>,
 }
 
 impl Zone {
@@ -35,19 +43,19 @@ impl Zone {
         Self {
             name,
             zone_type,
-            records: HashMap::new(),
+            records: None,
         }
     }
 
     fn insert(&mut self, record: Record) {
-        self.records
-            .entry(record.name.clone())
-            .or_default()
-            .push(record);
+        let records = self.records.get_or_insert_with(|| Box::new(HashMap::new()));
+        records.entry(record.name.clone()).or_default().push(record);
     }
 
     fn records_for(&self, name: &Name) -> Option<&Vec<Record>> {
-        self.records.get(name)
+        self.records
+            .as_deref()
+            .and_then(|records| records.get(name))
     }
 
     fn soa(&self) -> Option<&Record> {
@@ -60,6 +68,10 @@ impl Zone {
 }
 
 /// A set of local zones evaluated in most-specific-first order.
+///
+/// Zones are sorted by their labels in reverse order, so a query can find each
+/// matching suffix with one binary search per label. The ordering is
+/// case-insensitive, and an ancestor sorts before its descendants.
 #[derive(Clone)]
 pub struct LocalZones {
     zones: Vec<Zone>,
@@ -68,36 +80,124 @@ pub struct LocalZones {
 
 impl LocalZones {
     /// Build the policy from configured zones and global `local-data`.
+    ///
+    /// Name-independent zones whose closest ancestor has the same policy are
+    /// dropped as redundant. This is the normal shape of a generated blocklist,
+    /// where `always_nxdomain` is repeated for a parent and its children; the
+    /// ancestor produces the same response for every name in the child.
     pub fn from_config(zones: &[LocalZoneConfig], data: &[String]) -> Self {
         let mut this = Self {
-            zones: zones
-                .iter()
-                .filter_map(|zone| {
-                    Name::from_ascii(&zone.name)
-                        .ok()
-                        .map(|name| Zone::new(name, zone.zone_type))
-                })
-                .collect(),
+            zones: Vec::with_capacity(zones.len()),
             authoritative: true,
         };
         for zone in zones {
-            let Some(target) = this
-                .zones
-                .iter_mut()
-                .find(|candidate| candidate.name.to_ascii().eq_ignore_ascii_case(&zone.name))
-            else {
+            let Ok(name) = Name::from_ascii(&zone.name) else {
                 continue;
             };
-            for text in &zone.data {
-                for record in parse_records(text) {
-                    target.insert(record);
+            let mut built = Zone::new(name, zone.zone_type);
+            // Name-independent policies never read local data, so parsing it
+            // would only cost startup time and memory.
+            if zone.zone_type.uses_local_data() {
+                for text in &zone.data {
+                    for record in parse_records(text) {
+                        built.insert(record);
+                    }
                 }
             }
+            this.zones.push(built);
         }
-        for text in data {
-            this.insert_data(text);
+        this.sort_zones();
+
+        let suppressed = this.suppress_redundant();
+        this.insert_data(data);
+
+        if suppressed > 0 {
+            info!(suppressed, "suppressed redundant local-zone entries");
         }
         this
+    }
+
+    /// Drop zones that repeat the policy of their closest ancestor or the name
+    /// of an earlier zone, compacting the sorted vector in place.
+    ///
+    /// Sorting puts every ancestor before its descendants, so a stack of kept
+    /// zones on the current path yields the closest ancestor in amortized
+    /// constant time. Returns the number of removed zones.
+    fn suppress_redundant(&mut self) -> usize {
+        // Indices of kept zones that are ancestors of the current position.
+        // A query name has at most 128 labels, so this chain stays short.
+        let mut ancestors: Vec<usize> = Vec::new();
+        let mut kept = 0usize;
+        for read in 0..self.zones.len() {
+            let name = &self.zones[read].name;
+            while let Some(&top) = ancestors.last() {
+                if self.zones[top].name.zone_of(name) {
+                    break;
+                }
+                ancestors.pop();
+            }
+            let duplicate = ancestors.last().is_some_and(|&top| {
+                compare_reversed_labels(&self.zones[top].name, name) == Ordering::Equal
+            });
+            let redundant = !duplicate
+                && self.zones[read].zone_type.is_name_independent()
+                && ancestors
+                    .last()
+                    .is_some_and(|&top| self.zones[top].zone_type == self.zones[read].zone_type);
+            if duplicate || redundant {
+                continue;
+            }
+            if kept != read {
+                self.zones.swap(kept, read);
+            }
+            ancestors.push(kept);
+            kept += 1;
+        }
+        let suppressed = self.zones.len() - kept;
+        self.zones.truncate(kept);
+        if suppressed > 0 {
+            // Release the slots and inline name storage of dropped zones.
+            self.zones.shrink_to_fit();
+        }
+        suppressed
+    }
+
+    /// Attach global `local-data` records to the most specific zone.
+    ///
+    /// A record outside every configured zone creates an implicit transparent
+    /// zone. Implicit zones are appended and merged once, so this stays linear
+    /// in the number of records plus one sort.
+    fn insert_data(&mut self, data: &[String]) {
+        if data.is_empty() {
+            return;
+        }
+        let mut implicit: Vec<Zone> = Vec::new();
+        // Created lazily: a list that only feeds configured zones allocates no
+        // map, and only implicit zone owners are ever inserted.
+        let mut implicit_index: HashMap<Name, usize> = HashMap::new();
+        for text in data {
+            for record in parse_records(text) {
+                if let Some(index) = self.find_zone(&record.name) {
+                    self.zones[index].insert(record);
+                    continue;
+                }
+                let index = match deepest_implicit(&implicit_index, &record.name) {
+                    Some(index) => index,
+                    None => {
+                        let index = implicit.len();
+                        implicit.push(Zone::new(record.name.clone(), LocalZoneType::Transparent));
+                        implicit_index.insert(record.name.clone(), index);
+                        index
+                    }
+                };
+                implicit[index].insert(record);
+            }
+        }
+        if implicit.is_empty() {
+            return;
+        }
+        self.zones.extend(implicit);
+        self.sort_zones();
     }
 
     /// Build an empty policy.
@@ -113,46 +213,42 @@ impl LocalZones {
         self.authoritative = authoritative;
     }
 
-    /// Add records, creating an implicit transparent zone when no configured
-    /// zone contains the owner name.
-    fn insert_data(&mut self, text: &str) {
-        for record in parse_records(text) {
-            let owner = record.name.clone();
-            let index = self
+    /// Restore the ordering that [`Self::find_zone`] relies on.
+    fn sort_zones(&mut self) {
+        self.zones
+            .sort_unstable_by(|left, right| compare_reversed_labels(&left.name, &right.name));
+    }
+
+    /// Index of the most specific zone that covers `name`.
+    fn find_zone(&self, name: &Name) -> Option<usize> {
+        // `Name` keeps short names inline, so the usual query allocates
+        // nothing while walking up to the root.
+        let mut suffix = name.clone();
+        loop {
+            if let Ok(index) = self
                 .zones
-                .iter()
-                .enumerate()
-                .filter(|(_, zone)| zone.name.zone_of(&owner))
-                .max_by_key(|(_, zone)| zone.name.num_labels())
-                .map(|(index, _)| index);
-            let index = match index {
-                Some(index) => index,
-                None => {
-                    self.zones
-                        .push(Zone::new(owner.clone(), LocalZoneType::Transparent));
-                    self.zones.len() - 1
-                }
-            };
-            self.zones[index].insert(record);
+                .binary_search_by(|zone| compare_reversed_labels(&zone.name, &suffix))
+            {
+                return Some(index);
+            }
+            if suffix.is_root() {
+                return None;
+            }
+            suffix = suffix.base_name();
         }
     }
 
     /// Whether a configured zone covers `name`. Used to suppress built-ins.
     pub fn covers(&self, name: &Name) -> bool {
-        self.zones.iter().any(|zone| zone.name.zone_of(name))
+        self.find_zone(name).is_some()
     }
 
     /// Apply the local-zone policy to a query.
     pub fn answer(&self, query: &Query) -> LocalAction {
-        let Some(zone) = self
-            .zones
-            .iter()
-            .filter(|zone| zone.name.zone_of(&query.name))
-            .max_by_key(|zone| zone.name.num_labels())
-        else {
+        let Some(index) = self.find_zone(&query.name) else {
             return LocalAction::NotHandled;
         };
-        self.apply(zone, query)
+        self.apply(&self.zones[index], query)
     }
 
     fn apply(&self, zone: &Zone, query: &Query) -> LocalAction {
@@ -276,6 +372,46 @@ impl LocalZones {
                 }
             }
         }
+    }
+}
+
+/// Compare names by their labels from the root down.
+///
+/// This is the order that lets [`LocalZones::find_zone`] binary-search every
+/// suffix of a query name: an ancestor sorts before its descendants. The
+/// comparison is case-insensitive, matching [`Name::zone_of`].
+fn compare_reversed_labels(left: &Name, right: &Name) -> Ordering {
+    let mut left_labels = left.iter().rev();
+    let mut right_labels = right.iter().rev();
+    loop {
+        match (left_labels.next(), right_labels.next()) {
+            (Some(left_label), Some(right_label)) => {
+                let ordering = left_label
+                    .iter()
+                    .map(u8::to_ascii_lowercase)
+                    .cmp(right_label.iter().map(u8::to_ascii_lowercase));
+                if ordering != Ordering::Equal {
+                    return ordering;
+                }
+            }
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => return Ordering::Equal,
+        }
+    }
+}
+
+/// Index of the most specific implicit zone that covers `name`.
+fn deepest_implicit(index: &HashMap<Name, usize>, name: &Name) -> Option<usize> {
+    let mut suffix = name.clone();
+    loop {
+        if let Some(&found) = index.get(&suffix) {
+            return Some(found);
+        }
+        if suffix.is_root() {
+            return None;
+        }
+        suffix = suffix.base_name();
     }
 }
 
@@ -554,6 +690,7 @@ pub fn auth_zones(zones: &[AuthZoneConfig], downstream: bool) -> LocalZones {
         }
         local.zones.push(auth);
     }
+    local.sort_zones();
     local
 }
 
@@ -656,6 +793,136 @@ mod tests {
             zones.answer(&query("other.test.", RecordType::A)),
             LocalAction::NotHandled
         ));
+    }
+
+    #[test]
+    fn local_data_attaches_to_configured_and_implicit_zones() {
+        let zones = LocalZones::from_config(
+            &[zone_config("example.test.", LocalZoneType::Static)],
+            &[
+                "host.example.test. 60 IN A 198.51.100.1".to_owned(),
+                "other.test. 60 IN A 198.51.100.2".to_owned(),
+                "deep.other.test. 60 IN A 198.51.100.3".to_owned(),
+            ],
+        );
+
+        // Records under the configured zone are answered from it.
+        let host = answer(&zones, "host.example.test.", RecordType::A);
+        assert_eq!(host.answers[0].data.to_string(), "198.51.100.1");
+        // Uncovered owners share one implicit transparent zone.
+        let other = answer(&zones, "other.test.", RecordType::A);
+        assert_eq!(other.answers[0].data.to_string(), "198.51.100.2");
+        let deep = answer(&zones, "deep.other.test.", RecordType::A);
+        assert_eq!(deep.answers[0].data.to_string(), "198.51.100.3");
+        assert_eq!(zones.zones.len(), 2);
+    }
+
+    fn zone_config(name: &str, zone_type: LocalZoneType) -> LocalZoneConfig {
+        LocalZoneConfig {
+            name: name.to_owned(),
+            zone_type,
+            data: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn most_specific_zone_wins() {
+        let zones = LocalZones::from_config(
+            &[
+                LocalZoneConfig {
+                    name: "example.test.".to_owned(),
+                    zone_type: LocalZoneType::Static,
+                    data: vec!["example.test. 60 IN A 192.0.2.1".to_owned()],
+                },
+                LocalZoneConfig {
+                    name: "sub.example.test.".to_owned(),
+                    zone_type: LocalZoneType::Static,
+                    data: vec!["sub.example.test. 60 IN A 192.0.2.2".to_owned()],
+                },
+            ],
+            &[],
+        );
+
+        let apex = answer(&zones, "example.test.", RecordType::A);
+        assert_eq!(apex.answers[0].data.to_string(), "192.0.2.1");
+        let child = answer(&zones, "sub.example.test.", RecordType::A);
+        assert_eq!(child.answers[0].data.to_string(), "192.0.2.2");
+    }
+
+    #[test]
+    fn zone_lookup_is_case_insensitive() {
+        let zones = LocalZones::from_config(
+            &[LocalZoneConfig {
+                name: "Example.Test.".to_owned(),
+                zone_type: LocalZoneType::Static,
+                data: vec!["WWW.Example.Test. 60 IN A 192.0.2.7".to_owned()],
+            }],
+            &[],
+        );
+
+        let message = answer(&zones, "www.example.test.", RecordType::A);
+        assert_eq!(message.answers[0].data.to_string(), "192.0.2.7");
+        assert!(zones.covers(&Name::from_ascii("other.EXAMPLE.test.").expect("name")));
+    }
+
+    #[test]
+    fn redundant_name_independent_zones_are_suppressed() {
+        let zones = LocalZones::from_config(
+            &[
+                zone_config("ads.test.", LocalZoneType::AlwaysNxdomain),
+                zone_config("tracker.ads.test.", LocalZoneType::AlwaysNxdomain),
+                zone_config("deep.tracker.ads.test.", LocalZoneType::AlwaysNxdomain),
+                // A different policy under the same ancestor must be kept.
+                zone_config("keep.ads.test.", LocalZoneType::AlwaysNodata),
+                // A descendant of the different policy must also be kept.
+                zone_config("allowed.keep.ads.test.", LocalZoneType::AlwaysNxdomain),
+            ],
+            &[],
+        );
+
+        assert_eq!(zones.zones.len(), 3);
+        for name in [
+            "tracker.ads.test.",
+            "deep.tracker.ads.test.",
+            "x.deep.tracker.ads.test.",
+        ] {
+            let message = answer(&zones, name, RecordType::A);
+            assert_eq!(message.metadata.response_code, ResponseCode::NXDomain);
+        }
+        let nodata = answer(&zones, "keep.ads.test.", RecordType::A);
+        assert_eq!(nodata.metadata.response_code, ResponseCode::NoError);
+        assert!(nodata.answers.is_empty());
+        let allowed = answer(&zones, "x.allowed.keep.ads.test.", RecordType::A);
+        assert_eq!(allowed.metadata.response_code, ResponseCode::NXDomain);
+
+        // The surviving ancestor still reports the covered name as local.
+        assert!(zones.covers(&Name::from_ascii("x.tracker.ads.test.").expect("name")));
+    }
+
+    #[test]
+    fn a_root_zone_suppresses_matching_descendants() {
+        let zones = LocalZones::from_config(
+            &[
+                zone_config(".", LocalZoneType::AlwaysNxdomain),
+                zone_config("child.test.", LocalZoneType::AlwaysNxdomain),
+            ],
+            &[],
+        );
+        assert_eq!(zones.zones.len(), 1);
+        let message = answer(&zones, "child.test.", RecordType::A);
+        assert_eq!(message.metadata.response_code, ResponseCode::NXDomain);
+    }
+
+    #[test]
+    fn long_names_match_through_base_name_walks() {
+        let zone = "a-very-long-label-that-does-not-fit-inline.example.test.";
+        let zones =
+            LocalZones::from_config(&[zone_config(zone, LocalZoneType::AlwaysNxdomain)], &[]);
+
+        let deep = format!("deep.{zone}");
+        let message = answer(&zones, &deep, RecordType::A);
+        assert_eq!(message.metadata.response_code, ResponseCode::NXDomain);
+        assert!(zones.covers(&Name::from_ascii(&deep).expect("long name")));
     }
 
     #[test]

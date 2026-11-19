@@ -102,7 +102,7 @@ impl Parser {
         if self.include_stack.iter().any(|entry| entry == &canonical) {
             return Err(ConfigError::IncludeCycle(canonical));
         }
-        let text = std::fs::read_to_string(&canonical).map_err(|source| ConfigError::Io {
+        let file = std::fs::File::open(&canonical).map_err(|source| ConfigError::Io {
             path: canonical.clone(),
             source,
         })?;
@@ -110,7 +110,7 @@ impl Parser {
         self.include_stack.push(canonical.clone());
         // A guard would be nicer, but the error path must also pop, and the
         // borrow checker cannot see through the early returns above.
-        let result = self.parse_text(&canonical, &text, block);
+        let result = self.parse_reader(&canonical, std::io::BufReader::new(file), block);
         self.include_stack.pop();
         result
     }
@@ -170,14 +170,56 @@ impl Parser {
         Ok(())
     }
 
+    /// Parse an include incrementally.
+    ///
+    /// Reading one line at a time keeps a large blocklist from being held as a
+    /// single string while it is parsed. Line numbers stay continuous because
+    /// each call is told which line of the file it received.
+    fn parse_reader<R: std::io::BufRead>(
+        &mut self,
+        path: &Path,
+        mut reader: R,
+        block: &mut Block,
+    ) -> Result<(), ConfigError> {
+        // Reuse one buffer: a large blocklist can have hundreds of thousands of
+        // lines, and `BufRead::lines` would allocate once per line.
+        let mut line = String::new();
+        let mut line_number = 0usize;
+        loop {
+            line.clear();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|source| ConfigError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if read == 0 {
+                return Ok(());
+            }
+            line_number += 1;
+            let line = line.trim_end_matches(['\n', '\r']);
+            self.parse_text_at(path, line, line_number, block)?;
+        }
+    }
+
     fn parse_text(
         &mut self,
         path: &Path,
         text: &str,
         block: &mut Block,
     ) -> Result<(), ConfigError> {
+        self.parse_text_at(path, text, 1, block)
+    }
+
+    fn parse_text_at(
+        &mut self,
+        path: &Path,
+        text: &str,
+        first_line: usize,
+        block: &mut Block,
+    ) -> Result<(), ConfigError> {
         for (index, raw_line) in text.lines().enumerate() {
-            let line_number = index + 1;
+            let line_number = first_line + index;
             let line = strip_comment(raw_line).trim();
             if line.is_empty() {
                 continue;
@@ -1262,6 +1304,7 @@ mod tests {
 
     use tempfile::tempdir;
 
+    use crate::error::ConfigError;
     use crate::model::{LocalZoneType, ThreadCount};
 
     use super::parse_unbound_file;
@@ -1781,5 +1824,48 @@ remote-control:
             let loaded = parse_unbound_file(&path).expect("parse config");
             assert_eq!(loaded.config.server.num_threads, expected);
         }
+    }
+
+    #[test]
+    fn included_file_reports_its_own_line_numbers() {
+        let directory = tempdir().expect("tempdir");
+        let fragment = directory.path().join("blocklist.conf");
+        fs::write(
+            &fragment,
+            "local-zone: \"a.test\" always_nxdomain\n\nlocal-zone: \"b.test\" nonsense\n",
+        )
+        .expect("write fragment");
+        let path = directory.path().join("unbound.conf");
+        fs::write(&path, "server:\n    include: \"blocklist.conf\"\n").expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("invalid zone type");
+        match error {
+            ConfigError::Parse { line, .. } => assert_eq!(line, 3),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn streams_a_large_include_without_losing_the_block() {
+        let directory = tempdir().expect("tempdir");
+        let mut fragment = String::with_capacity(120_000);
+        for index in 0..2_000 {
+            fragment.push_str(&format!(
+                "local-zone: \"n{index}.ads.test\" always_nxdomain\n"
+            ));
+        }
+        fs::write(directory.path().join("blocklist.conf"), fragment).expect("write fragment");
+        let path = directory.path().join("unbound.conf");
+        fs::write(
+            &path,
+            "server:\n    interface: 127.0.0.1@5353\n    include: \"blocklist.conf\"\n",
+        )
+        .expect("write config");
+
+        let loaded = parse_unbound_file(&path).expect("parse config");
+        assert_eq!(loaded.config.local_zones.len(), 2_000);
+        assert!(loaded.config.local_zones.iter().all(|zone| {
+            zone.zone_type == LocalZoneType::AlwaysNxdomain && zone.name.ends_with(".ads.test.")
+        }));
     }
 }

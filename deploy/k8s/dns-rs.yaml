@@ -13,32 +13,31 @@ metadata:
     labels:
         app.kubernetes.io/name: dns-rs
 data:
-    dns-rs.toml: |
-        [server]
-        interfaces = ["0.0.0.0"]
-        port = 53
-        verbosity = 1
-        num_threads = 2
-        do_daemonize = false
-        do_ip4 = true
-        do_ip6 = false
-        do_udp = true
-        do_tcp = true
-        access_control = [
-            "127.0.0.0/8 allow",
-            "10.0.0.0/8 allow",
-            "172.16.0.0/12 allow",
-            "192.168.0.0/16 allow",
-            "0.0.0.0/0 refuse",
-        ]
-        harden_glue = true
-        dnssec_validation = true
-        qname_minimisation = true
-        use_caps_for_id = true
-        # auto_trust_anchor_file = "/var/lib/dns-rs/root.key"
+    dns-rs.conf: |
+        # Unbound-compatible syntax; the `.conf` name selects this parser.
+        server:
+            interface: 0.0.0.0
+            port: 53
+            verbosity: 1
+            num-threads: 2
+            do-daemonize: no
+            do-ip4: yes
+            do-ip6: no
+            do-udp: yes
+            do-tcp: yes
+            access-control: 127.0.0.0/8 allow
+            access-control: 10.0.0.0/8 allow
+            access-control: 172.16.0.0/12 allow
+            access-control: 192.168.0.0/16 allow
+            access-control: 0.0.0.0/0 refuse
+            harden-glue: yes
+            module-config: "validator iterator"
+            qname-minimisation: yes
+            use-caps-for-id: yes
+            # auto-trust-anchor-file: "/var/lib/dns-rs/root.key"
 
-        [remote_control]
-        enabled = false
+        remote-control:
+            control-enable: no
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -67,7 +66,7 @@ spec:
                 - name: dns-rs
                   image: docker.io/your-dockerhub-user/dns-rs:dev
                   imagePullPolicy: IfNotPresent
-                  args: ["-c", "/etc/dns-rs/dns-rs.toml", "run"]
+                  args: ["-c", "/etc/dns-rs/dns-rs.conf", "run"]
                   securityContext:
                       allowPrivilegeEscalation: false
                       readOnlyRootFilesystem: true
@@ -86,7 +85,7 @@ spec:
                           command:
                               - /usr/local/bin/dns-rs
                               - -c
-                              - /etc/dns-rs/dns-rs.toml
+                              - /etc/dns-rs/dns-rs.conf
                               - healthcheck
                       initialDelaySeconds: 5
                       periodSeconds: 30
@@ -97,7 +96,7 @@ spec:
                           command:
                               - /usr/local/bin/dns-rs
                               - -c
-                              - /etc/dns-rs/dns-rs.toml
+                              - /etc/dns-rs/dns-rs.conf
                               - healthcheck
                       initialDelaySeconds: 2
                       periodSeconds: 10

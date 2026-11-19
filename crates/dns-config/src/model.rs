@@ -1313,6 +1313,26 @@ impl LocalZoneType {
                 | Self::Nodefault
         )
     }
+
+    /// Whether the policy answers identically for every name in the zone
+    /// without consulting local data.
+    ///
+    /// A descendant zone with the same name-independent policy cannot change
+    /// the response, so the query path can drop it as redundant. This is the
+    /// common shape of a generated blocklist, which repeats `always_nxdomain`
+    /// for a parent and many of its children.
+    pub const fn is_name_independent(self) -> bool {
+        matches!(
+            self,
+            Self::AlwaysTransparent
+                | Self::AlwaysNxdomain
+                | Self::AlwaysNodata
+                | Self::AlwaysNull
+                | Self::BlockA
+                | Self::BlockAaaa
+                | Self::Nodefault
+        )
+    }
 }
 
 impl fmt::Display for LocalZoneType {
@@ -1814,7 +1834,41 @@ fn parse_port(value: &str) -> Result<u16, String> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::{AccessAction, AccessControl, Config, ForwardTarget, ListenAddress, ThreadCount};
+    use super::{
+        AccessAction, AccessControl, Config, ForwardTarget, ListenAddress, LocalZoneType,
+        ThreadCount,
+    };
+
+    #[test]
+    fn name_independent_policies_ignore_data_and_names() {
+        for zone_type in [
+            LocalZoneType::AlwaysTransparent,
+            LocalZoneType::AlwaysNxdomain,
+            LocalZoneType::AlwaysNodata,
+            LocalZoneType::AlwaysNull,
+            LocalZoneType::BlockA,
+            LocalZoneType::BlockAaaa,
+            LocalZoneType::Nodefault,
+        ] {
+            assert!(
+                zone_type.is_name_independent(),
+                "{zone_type} must be name independent"
+            );
+        }
+        for zone_type in [
+            LocalZoneType::AlwaysRefuse,
+            LocalZoneType::AlwaysDeny,
+            LocalZoneType::Static,
+            LocalZoneType::Redirect,
+            LocalZoneType::Transparent,
+            LocalZoneType::BlockAWdata,
+        ] {
+            assert!(
+                !zone_type.is_name_independent(),
+                "{zone_type} must consult names or local data"
+            );
+        }
+    }
 
     #[test]
     fn thread_count_accepts_auto_and_zero() {

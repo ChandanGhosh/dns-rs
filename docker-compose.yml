@@ -2,7 +2,7 @@ name: dns-rs
 
 services:
     resolver:
-        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:0.4.0}
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:0.6.0}
         container_name: dns-rs
         restart: unless-stopped
 
@@ -42,7 +42,7 @@ services:
                 - CMD
                 - /usr/local/bin/dns-rs
                 - -c
-                - /etc/dns-rs/dns-rs.toml
+                - /etc/dns-rs/dns-rs.conf
                 - healthcheck
             interval: 30s
             timeout: 5s
