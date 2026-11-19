@@ -5,6 +5,10 @@ is that a stock distribution configuration loads without errors and that every
 option either takes effect or produces an explicit warning. Options are never
 silently ignored.
 
+For a practical migration path, a recommended baseline, and container
+deployment guidance, see [Migrating from Unbound](unbound-migration.md). This
+page is the option-by-option reference.
+
 The implementation lives in `crates/dns-config`; the end-to-end fixtures in
 `crates/dns-config/tests/unbound_compat.rs` pin the behavior described here.
 
@@ -77,9 +81,11 @@ enforced.
 ### Serving and limits
 
 Interfaces, ports, IPv4/IPv6 transport switches, UDP/TCP limits, TLS/HTTPS
-listener material, socket buffer sizes, TTL bounds, negative-TTL bounds
-(`cache-max-negative-ttl`), prefetch, serve-expired, rate limiting, and
-per-client concurrency limits are enforced. The infrastructure cache honours
+listener material, socket buffer sizes (`udp-recv-buffer-size`,
+`udp-send-buffer-size`, `tcp-recv-buffer-size`, `tcp-send-buffer-size`), TTL
+bounds, negative-TTL bounds (`cache-max-negative-ttl`), prefetch, serve-expired,
+rate limiting, and per-client concurrency limits are enforced. The
+infrastructure cache honours
 `infra-host-ttl`, `infra-cache-min-rtt`, and `infra-cache-numhosts`.
 `so-reuseport: yes` and `delay-close: 0` describe the resolver's existing
 behaviour. Options that describe process management (`username`, `chroot`,
@@ -115,6 +121,9 @@ alternative.
   `num-queries-per-thread`, and `jostle-timeout`. `so-reuseport: no` and a
   non-zero `delay-close` also warn; the UDP listeners always set
   `SO_REUSEPORT`, and TCP connections close immediately.
+- Unbound socket buffer options `so-rcvbuf` and `so-sndbuf`. Use
+  `udp-recv-buffer-size`, `udp-send-buffer-size`, `tcp-recv-buffer-size`, and
+  `tcp-send-buffer-size` instead.
 - DNSSEC tuning beyond the enforced options: `prefetch-key`, `val-bogus-ttl`,
   `val-log-level`, `val-sig-skew-min`, and `val-sig-skew-max`.
 - Hardening switches: `harden-short-bufsize`, `harden-large-queries`,
@@ -132,8 +141,11 @@ feature that is out of scope.
 1. **Rebinding protection is on by default.** Unbound ships with empty
    `private-address` and `private-domain` lists. dns-rs blocks RFC 1918,
    link-local, and IPv6 unique-local answers by default and allows common local
-   namespaces (`.lan`, `.home.arpa`, `.internal`, and similar). Set both options
-   to empty to reproduce Unbound's behavior.
+   namespaces (`.lan`, `.home.arpa`, `.internal`, and similar). An explicit
+   `private-address:` or `private-domain:` list replaces the built-in defaults;
+   empty values are rejected in `unbound.conf` syntax. Use the TOML front-end
+   with `private_address = []` and `private_domain = []` if you need Unbound's
+   empty-list behavior exactly.
 2. **`use-caps-for-id` defaults to `yes`.** Unbound defaults to `no`. The option
    only affects upstream traffic; set `use-caps-for-id: no` for byte-for-byte
    matching behavior.

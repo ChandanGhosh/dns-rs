@@ -216,8 +216,8 @@ forward_fallback = false
 # forward_first = false
 # tls_upstream = false
 
-# Remote control is parsed for compatibility but not served yet.
+# Opt-in control socket: JSON commands over a Unix socket, mode 0600.
 [remote_control]
 enabled = false
-interfaces = ["127.0.0.1"]
+interfaces = ["/run/dns-rs.sock"]
 port = 8953
