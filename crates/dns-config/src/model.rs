@@ -453,7 +453,9 @@ pub struct ServerConfig {
     /// Zone-file formatted files with root server hints (`root-hints`).
     ///
     /// When set, the addresses in these files seed root priming instead of the
-    /// built-in list. Read at startup and validated by `checkconf`.
+    /// built-in list. Loaded when the query pipeline is built; a read failure
+    /// warns and falls back to the built-in hints. `checkconf` validates only
+    /// the main configuration file.
     pub root_hints: Vec<PathBuf>,
     /// Minimise QNAMEs sent to authoritative servers (RFC 9156).
     pub qname_minimisation: bool,
@@ -550,11 +552,10 @@ pub struct ServerConfig {
     pub tls_cert_bundle: Option<PathBuf>,
     /// Trust the system (webpki) roots for upstream encrypted transports.
     pub tls_use_system_ca: bool,
-    /// When true, enforce TLS server name check even when the forwarder has no
-    /// `#auth-name` / `tls_name`. Defaults to false (match Unbound behavior:
-    /// any name is accepted as long as the certificate chains to a configured CA).
-    /// Set to true to reject certificates whose name does not match the expected
-    /// server name, providing defense-in-depth against misissued or spoofed certs.
+    /// Parsed for compatibility but not enforced. The Unbound front-end warns
+    /// when this is set; name checking is controlled by the `forward-addr`
+    /// auth name (`#auth-name`). Use a specific auth name when certificate
+    /// name verification is required.
     pub tls_enforce_name_check: bool,
     /// UDP receive socket buffer size in bytes. Zero uses the OS default.
     /// Defaults to 4 MiB to absorb bursts under load.

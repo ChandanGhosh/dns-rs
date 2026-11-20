@@ -1,9 +1,10 @@
 # Unbound configuration compatibility
 
 dns-rs reads a practical subset of Unbound's `unbound.conf` directly. The goal
-is that a stock distribution configuration loads without errors and that every
-option either takes effect or produces an explicit warning. Options are never
-silently ignored.
+is that a typical distribution configuration can be loaded after a short audit,
+and that recognized options either take effect or produce an explicit warning.
+Invalid values and duplicate zones are fatal; recognized compatibility options
+are not silently ignored.
 
 For a practical migration path, a recommended baseline, and container
 deployment guidance, see [Migrating from Unbound](unbound-migration.md). This
@@ -14,11 +15,13 @@ The implementation lives in `crates/dns-config`; the end-to-end fixtures in
 
 ## Loading rules
 
-- Any file whose extension is not `.toml` is parsed as `unbound.conf` syntax.
+- Any file whose extension is not `.toml` (case-insensitively) is parsed as
+  `unbound.conf` syntax.
 - Unknown options are accepted with a warning naming the option. Options with
   a dedicated compatibility arm explain what is missing and how to get the
-  behaviour another way. The list below groups the remaining options that stock
-  configurations commonly set.
+  behaviour another way. The lists below group the options that stock
+  configurations commonly set; they are not an exhaustive field list. See
+  [Configuration](configuration.md) for the complete model.
 - `include:` and `include-toplevel:` accept files, absolute paths, and `glob(7)`
   wildcards. Matches are processed in sorted order so includes are
   deterministic; directories matched by a wildcard are skipped.
@@ -56,6 +59,8 @@ cookie enforcement for clients is not implemented.
 | `do-not-query-address` | Netblocks are never queried. Applied to configured upstreams at startup and to addresses learned from referrals. |
 | `do-not-query-localhost` | Default `yes`. Adds `127.0.0.0/8` and `::1/128`, matching Unbound. Set `no` to allow loopback forwarders. |
 | `root-hints` | Loads NS/glue addresses from the named file and seeds root priming. If the file cannot be read the built-in hints are used with a warning. |
+| `tls-cert-bundle` | PEM bundle of CA certificates for upstream DoT/DoH. Combine with `tls-use-system-ca: no` for a private CA; both sources can also be enabled together. |
+| `tls-use-system-ca` | Default `yes`. Adds the compiled-in `webpki-roots` set; it does not read the host's CA store. Set `no` and configure `tls-cert-bundle` when using only a private CA. |
 
 ### Local data
 
@@ -104,7 +109,9 @@ feature is not implemented. The warning names the option and, where useful, the
 alternative.
 
 - `module-config` with `subnetcache`, `respip`, or `dynlib`.
-- `tls-enforce-name-check`.
+- `tls-enforce-name-check`. Certificate name checking is controlled by the
+  forwarder's `forward-addr` auth name (`#auth-name`); add a specific auth name
+  when verification is required.
 - `unblock-lan-zones: no` (see the divergences below).
 - `allow_cookie`.
 - `response-ip` and `response-ip-data`.
@@ -140,8 +147,10 @@ feature that is out of scope.
 
 1. **Rebinding protection is on by default.** Unbound ships with empty
    `private-address` and `private-domain` lists. dns-rs blocks RFC 1918,
-   link-local, and IPv6 unique-local answers by default and allows common local
-   namespaces (`.lan`, `.home.arpa`, `.internal`, and similar). An explicit
+   link-local, IPv6 unique-local, and IPv4-mapped answers by default and allows
+   common local namespaces (`.lan`, `.home.arpa`, `.internal`, and similar). The
+   exact defaults are listed in
+   [Configuration](configuration.md#rebinding-protection). An explicit
    `private-address:` or `private-domain:` list replaces the built-in defaults;
    empty values are rejected in `unbound.conf` syntax. Use the TOML front-end
    with `private_address = []` and `private_domain = []` if you need Unbound's

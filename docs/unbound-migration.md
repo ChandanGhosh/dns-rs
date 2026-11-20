@@ -1,15 +1,18 @@
 # Migrating from Unbound to dns-rs
 
-dns-rs reads a practical subset of `unbound.conf` directly. For many
-deployments the migration is a copy, a validation pass, and a change of process
-supervision. This guide covers that path, a recommended baseline, host and
-container deployment, and the settings that need an operator decision.
+dns-rs reads a practical subset of `unbound.conf` directly. A stock
+configuration often becomes a working starting point after a validation pass,
+but it is not a drop-in replacement: expect operator decisions about listeners,
+ACLs, rebinding defaults, DNSSEC anchors, the upstream model, and the control
+channel. This guide covers that path, a recommended baseline, host and container
+deployment, and the settings that need a decision.
 
 The option-by-option reference is
 [Unbound configuration compatibility](unbound-compatibility.md). Annotated
-examples covering every supported option are in
+examples covering the main options are in
 [`examples/full.conf`](../examples/full.conf) and
-[`examples/full.toml`](../examples/full.toml).
+[`examples/full.toml`](../examples/full.toml); the complete field list is in
+[Configuration](configuration.md).
 
 ## Scope
 
@@ -36,9 +39,10 @@ dns-rs -c /etc/dns-rs/unbound.conf run
 dig @127.0.0.1 example.com A
 ```
 
-Any filename whose extension is not `.toml` is parsed as `unbound.conf` syntax.
-Calling the file `dns-rs.conf`, `unbound.conf`, or `resolver.conf` makes no
-difference. Only `.toml` selects the native TOML front-end.
+Any filename whose extension is not `.toml` (case-insensitively) is parsed as
+`unbound.conf` syntax. Calling the file `dns-rs.conf`, `unbound.conf`, or
+`resolver.conf` makes no difference. Only a `.toml` extension selects the native
+TOML front-end.
 
 `checkconf` prints the interfaces, thread count, and forward-zone count it
 parsed. A missing include, an unsupported option, or a cache sizing option
@@ -89,7 +93,8 @@ and restart behavior.
 
 ### 3. Make listeners explicit
 
-An `unbound.conf` with no `interface:` starts no listeners in dns-rs. Specify at
+An `unbound.conf` with no `interface:` fails validation with `at least one
+interface must be configured`. It does not start with zero listeners. Specify at
 least one listener:
 
 ```conf
@@ -172,7 +177,8 @@ server:
 Do not point it into the read-only configuration directory. `trust-anchor` and
 `trust-anchor-file` are read-only inputs and can live with the configuration.
 
-`val-permissive-mode: yes` disables validation failures. Keep it off unless you
+`val-permissive-mode: yes` does not turn validation off: dns-rs still validates,
+but returns bogus data with `AD=0` instead of `SERVFAIL`. Keep it off unless you
 are debugging a specific domain. Prefer `domain-insecure` for a known-broken
 subtree.
 
@@ -294,8 +300,10 @@ behavior or reproduce your old Unbound behavior.
 ### Rebinding protection
 
 Unbound ships with empty `private-address` and `private-domain` lists. dns-rs
-blocks RFC 1918, link-local, and IPv6 unique-local answers by default and allows
-common local namespaces (`.lan`, `.home.arpa`, `.internal`, and similar).
+blocks RFC 1918, link-local, IPv6 unique-local, and IPv4-mapped answers by
+default and allows common local namespaces (`.lan`, `.home.arpa`, `.internal`,
+and similar). The exact default ranges and namespaces are listed in
+[Configuration](configuration.md#rebinding-protection).
 
 An explicit `private-address:` or `private-domain:` line replaces the entire
 built-in list. If you set either option, include every network or namespace you
@@ -339,7 +347,7 @@ name: dns-rs
 
 services:
     resolver:
-        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:latest}
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:0.6.0}
         container_name: dns-rs
         restart: unless-stopped
         command: ["-c", "/etc/dns-rs/unbound.conf", "run"]
@@ -627,9 +635,10 @@ model.
 | --- | --- | --- |
 | Container exits with code 137 | `SIGKILL`: OOM killer, host memory pressure, or an external watchdog | Check `docker inspect dns-rs --format '{{.State.OOMKilled}} {{.State.ExitCode}} {{.HostConfig.Memory}}'` and raise the memory limit or remove it. |
 | Container restarts but logs look normal | Healthcheck points at a different or hidden config path | Set the healthcheck `-c` to the same path as `command`. |
-| `REFUSED` for clients | No matching `access-control` rule | Add the client network before the final `refuse` rule. |
+| `REFUSED` for clients | No matching `access-control` rule | Add a matching `allow` rule for the client network. A more specific allow wins over a broad `refuse`; statement order only breaks equal-prefix ties. |
 | `SERVFAIL` for one domain with an EDE about DNSSEC | Upstream or zone is bogus | Use `domain-insecure` for that subtree, not global permissive mode. |
-| No listener after startup | No `interface:` in the config, or only loopback in a container | Add `interface: 0.0.0.0` and publish the port. |
+| Service exits before startup | No `interface:` in the config | Add at least one `interface:`; this is a fatal validation error. |
+| No externally reachable listener | Only loopback configured in a container | Add `interface: 0.0.0.0` and publish the port. |
 | `address already in use` at startup | Another resolver owns port 53 | Stop or move `systemd-resolved`, `dnsmasq`, or the old Unbound instance. |
 | `include ... matched no files` | Path not mounted or rewritten for the container | Mount the include tree or change the path. |
 | `Permission denied` reading config or TLS key | File not readable by UID `65532` | Fix mode and ownership. |
@@ -639,8 +648,8 @@ model.
 
 ## See also
 
-- [Unbound configuration compatibility](unbound-compatibility.md): the full
-  option matrix and warning list.
+- [Unbound configuration compatibility](unbound-compatibility.md): the
+  compatibility matrix and warning groups.
 - [Container deployment](container.md): image details, hardening, Kubernetes,
   and operational commands.
 - [`examples/full.conf`](../examples/full.conf) and

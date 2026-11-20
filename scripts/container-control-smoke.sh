@@ -21,7 +21,9 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/dns-rs-control-container.XXXXXX")"
-chmod 700 "$work"
+# The container runs as UID 65532 and must be able to traverse this directory.
+# The config file itself stays readable only by the owner.
+chmod 755 "$work"
 mkdir -p "$work/config"
 
 cleanup() {

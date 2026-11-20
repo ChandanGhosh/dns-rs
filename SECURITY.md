@@ -41,12 +41,16 @@ Out of scope unless it leads to a concrete exploit in dns-rs:
   is affected);
 - benchmark and test utilities, including `dns-testutil` and `scripts/`;
 - documentation errors and missing hardening features that are already listed
-  as not implemented in the README.
+  in [Limitations](docs/limitations.md).
 
 ## Supported versions
 
-dns-rs is pre-1.0. Fixes are applied to the latest release and `main`; older
-releases are not maintained separately.
+dns-rs is pre-1.0. Security fixes are applied to the newest release and `main`.
+As of 2026-11-20 that means `0.6.x` and `main`; older `X.Y.Z` releases are not
+maintained separately. Upgrade to the newest release before reporting a problem
+in an older one. Release and image tags are listed on
+[GitHub Releases](https://github.com/ChandanGhosh/dns-rs/releases) and
+[Docker Hub](https://hub.docker.com/r/chandanghosh/dns-rs/tags).
 
 ## Disclosure
 
