@@ -4,11 +4,13 @@ The repository ships a multi-stage container image for local testing and for
 long-running deployment (including a Raspberry Pi test node). The builder
 cross-compiles a statically linked musl binary, and the runtime image is
 `scratch`: it contains only the `dns-rs` binary, its default configuration, and
-two empty state directories. There is no shell, libc, package manager, or
-system CA bundle in the runtime image.
+empty `/var/lib/dns-rs` and `/var/cache/dns-rs` directories. There is no shell,
+libc, package manager, or system CA bundle in the runtime image.
 
 The image has been smoke-tested on `linux/amd64` natively and on `linux/arm64`
 under QEMU. Raspberry Pi hardware validation is still pending.
+
+## Published images
 
 Published images live on Docker Hub at
 [`chandanghosh/dns-rs`](https://hub.docker.com/r/chandanghosh/dns-rs):
@@ -17,6 +19,17 @@ Published images live on Docker Hub at
 docker pull chandanghosh/dns-rs:0.6.0
 docker run --rm chandanghosh/dns-rs:0.6.0 --version
 ```
+
+| Tag | Stable? | Meaning |
+|---|---|---|
+| `X.Y.Z` | Immutable | Release image, for example `0.6.0` |
+| `latest` | Mutable | Repointed to the newest release |
+| `DDMMYYYY` (UTC) | Mutable | Edge build from `main`; rebuilt when `main` changes |
+| Digest | Immutable | `chandanghosh/dns-rs@sha256:...`, the strongest pin |
+
+Production deployments should pin a release tag or digest. The maintainer build
+and publish workflow is documented in
+[Container publishing](container-publishing.md).
 
 ## Image layout
 
@@ -27,11 +40,12 @@ docker run --rm chandanghosh/dns-rs:0.6.0 --version
 | Binary | `/usr/local/bin/dns-rs`, statically linked against musl |
 | User | numeric UID/GID `65532:65532` (no `/etc/passwd`) |
 | Default config | `/etc/dns-rs/dns-rs.conf` |
-| State directory | `/var/lib/dns-rs` |
+| State directory | `/var/lib/dns-rs` (RFC 5011 anchor file when enabled) |
+| Reserved directory | `/var/cache/dns-rs` (currently unused by the daemon) |
 | Plain DNS | port 53 UDP/TCP |
 | DoT / DoH | ports 853 / 443 when TLS material is configured |
 | Healthcheck | `dns-rs healthcheck` (no shell or `dig` needed) |
-| Size | about 9.4 MB (9.0 MiB) on disk on `amd64` and 8.0 MB (7.6 MiB) on `arm64`; compressed transfer is about 3.0 MB and 2.8 MB respectively. CI enforces a 10 MiB limit on the uncompressed image size |
+| Size | measured 2026-11-20 with `docker image inspect`: about 9.4 MB (9.0 MiB) on disk for `amd64` and 8.0 MB (7.6 MiB) for `arm64`; compressed transfer was about 3.0 MB and 2.8 MB. CI enforces a 10 MiB uncompressed limit; measure your own image rather than treating these figures as fixed. |
 
 The `-c` file name selects the configuration parser: names ending in `.toml`
 use native TOML, and every other name uses the Unbound-compatible syntax. Both
@@ -39,13 +53,15 @@ formats can express zones and blocklists; see
 [Configuration files, zones, and blocklists](#configuration-files-zones-and-blocklists)
 before deploying a custom file.
 
-The image runs with no writable filesystem paths by default. If you enable
-features that write state (for example the RFC 5011
-`auto-trust-anchor-file`), mount a volume at `/var/lib/dns-rs`. If a feature
-needs a scratch directory, mount a small tmpfs at `/tmp`.
+The compose and smoke-test examples below use a read-only root filesystem. The
+image itself contains writable `/var/lib/dns-rs` and `/var/cache/dns-rs`
+directories, but only mount persistent storage for state you need. For RFC 5011
+`auto-trust-anchor-file`, mount a volume at `/var/lib/dns-rs`; for a scratch
+directory, mount a small tmpfs at `/tmp`.
 
-The optional control socket also needs a writable directory. Mount a tmpfs and
-point `control-interface` at it, for example
+The optional control socket needs both configuration and a writable directory:
+enable `remote-control` and mount a tmpfs that contains its path. Neither change
+alone is enough. For example, mount a tmpfs and point `control-interface` at it:
 `--tmpfs /run:rw,noexec,nosuid,size=16m` with
 `control-interface: /run/dns-rs.sock`. The socket is mode `0600` and is owned
 by the container user (`65532`), so use `docker exec` (which runs as that same
@@ -96,9 +112,9 @@ it before exposing the resolver to a wider network.
 ## Access control
 
 `access-control` (`access_control` in TOML) decides which client addresses may
-query the resolver. Rules are evaluated in order and the first match wins; a
-client that matches no rule is refused. A refused client receives `REFUSED`,
-not a resolution failure.
+query the resolver. The most specific matching netblock wins regardless of
+statement order; later rules win equal-prefix ties. A client that matches no
+rule is refused. A refused client receives `REFUSED`, not a resolution failure.
 
 The default configuration allows loopback, RFC 1918, and Docker bridge clients
 only:
@@ -133,15 +149,15 @@ IPv6 entries have no effect while `do-ip6: no`, which is the container
 default. `do-ip4`/`do-ip6` apply to outgoing queries as well: with IPv6
 disabled the resolver also skips IPv6 root hints, glue, and forwarder addresses
 instead of timing out on them. To serve IPv6 clients, set `do-ip6: yes`, add an
-IPv6 listener (for example `interface: ::`), and include the IPv6 allow rules
-before `::/0 refuse`. In TOML the equivalents are `do_ip6 = true` and
-`interfaces = ["0.0.0.0", "::"]`.
+IPv6 listener (for example `interface: ::`), and include the IPv6 allow rules.
+A broad `::/0 refuse` does not override a more specific allow. In TOML the
+equivalents are `do_ip6 = true` and `interfaces = ["0.0.0.0", "::"]`.
 
 ### Troubleshooting
 
 - A client gets `REFUSED`: its source address does not match an `allow` rule.
-  Check whether the client is using IPv4 or IPv6 and whether an earlier rule
-  matches it first.
+  Check whether the client is using IPv4 or IPv6 and whether a more specific
+  rule matches it. Statement order only breaks equal-prefix ties.
 - `localhost.` resolves and cached names work, but fresh external names return
   `SERVFAIL`: access control is not the cause. The upstream/iterative path is
   failing, for example because the network intercepts port 53. Fix the network
@@ -439,11 +455,10 @@ If your Unbound-style file has another name, either mount it as
 `dns-rs.conf` or override both the command and the healthcheck as shown below.
 
 For TOML, mount a `.toml` file and pass its path after the image name (it is
-appended to the entrypoint). The image has no shell, so
-`docker run --health-cmd` cannot be used: Docker always runs that value through
-`/bin/sh -c`, which does not exist in the `scratch` runtime. Use
-`--no-healthcheck` for a plain `docker run`, or use Compose/Kubernetes, whose
-exec-form probes work:
+appended to the entrypoint). The image's built-in exec-form healthcheck keeps
+probing `/etc/dns-rs/dns-rs.conf`, so it is wrong for this command. Disable it
+with `--no-healthcheck` (Docker cannot replace it with an exec-form probe from
+the CLI), or use Compose/Kubernetes, whose exec-form probes work:
 
 ```bash
 docker run -d --name dns-rs \
@@ -527,10 +542,18 @@ The smoke script runs the image with:
 - no writable paths except a small `/tmp` tmpfs,
 - a Docker healthcheck.
 
-If `docker build` is slow while iterating, set `SKIP_BUILD=1` after building.
-Set `KEEP=1` to leave the container running for manual queries. To smoke-test a
-foreign architecture through QEMU, set `PLATFORM`, for example
-`PLATFORM=linux/arm64 IMAGE=chandanghosh/dns-rs:0.6.0 scripts/container-smoke.sh`.
+If `docker build` is slow while iterating, build once for the target platform
+and set `SKIP_BUILD=1` so the smoke script reuses that image. Set `KEEP=1` to
+leave the container running for manual queries:
+
+```bash
+docker build --platform linux/arm64 -t dns-rs:arm64 .
+PLATFORM=linux/arm64 SKIP_BUILD=1 IMAGE=dns-rs:arm64 scripts/container-smoke.sh
+```
+
+`PLATFORM` selects the runtime platform; QEMU is needed only to run a foreign
+image for the smoke test. Cross-compilation itself uses the native build
+platform.
 
 ## Run manually with `docker run`
 
@@ -741,8 +764,10 @@ Docker reports the container unhealthy because the probe cannot find
 and the same `-c` path. In Kubernetes, change the exec probe arguments.
 
 `docker run --health-cmd` is not a workaround: Docker wraps that string in
-`/bin/sh -c`, and the `scratch` runtime has no shell. Use `--no-healthcheck`
-with `docker run`, or define the probe in Compose/Kubernetes. See
+`/bin/sh -c`, and the `scratch` runtime has no shell. Leave the built-in probe
+enabled when the default config path is correct. For a custom config path,
+disable it with `--no-healthcheck` on the CLI, or define an exec-form probe in
+Compose/Kubernetes. See
 [Selecting a format in the container](#selecting-a-format-in-the-container).
 
 `dns-rs healthcheck` loads the configuration, picks the first plain-DNS
@@ -847,7 +872,7 @@ Two patterns work:
 - Run an exec-based exporter that calls `control stats-prometheus` and serves
   the text over HTTP. This needs access to `docker exec` or the Docker socket.
 - Bind-mount a host directory at `/run`, then point a host-side collector at the
-  same socket path with `dns-rs --socket <path> control stats-prometheus` or
+  same socket path with `dns-rs control stats-prometheus --socket <path>` or
   `socat`. Keep the directory owned by UID `65532` with mode `0755`; a
   world-writable directory without the sticky bit is rejected.
 
@@ -961,140 +986,7 @@ under a systemd unit and apply the equivalent `NoNewPrivileges`,
 `ProtectSystem=strict`, `PrivateTmp`, and `AmbientCapabilities=CAP_NET_BIND_SERVICE`
 settings.
 
-## Publishing to Docker Hub and GitHub
+## Publishing and CI
 
-Image tags fall into two families under `chandanghosh/dns-rs`:
-
-| Tag | Moves? | Published |
-| --- | --- | --- |
-| `DDMMYYYY` (UTC) | yes | every successful `main` build |
-| `X.Y.Z` | no | when the workspace version is bumped |
-| `latest` | no | alongside each `X.Y.Z` release |
-
-All of them carry `linux/amd64` and `linux/arm64` manifests plus BuildKit SBOM
-and provenance attestations. The current edge tag is `15112026` (15 November
-2026).
-
-### Versioning
-
-`[workspace.package] version` in `Cargo.toml` is the single source of truth.
-Bump it in the pull request that warrants a release:
-
-- **major** — incompatible configuration or behavioral change;
-- **minor** — new features that keep existing configurations working;
-- **patch** — fixes and internal changes.
-
-While the project is `0.x`, a minor bump may still break configuration.
-
-The `Release version` CI job rejects a version that is not strictly newer than
-the latest `v*` tag, a version already tagged on another commit, or a crate that
-declares its own `version` instead of `version.workspace = true`. Keep one
-release bump in flight at a time: two PRs that bump to the same version can both
-pass before the first tag exists, and only the first merge releases.
-
-The `publish` job in `.github/workflows/ci.yml` reads that version and compares
-it with the existing `v*` tags. When the version is newer, it also pushes the
-`X.Y.Z` and `latest` image tags, creates the annotated `vX.Y.Z` Git tag, and
-opens a GitHub Release titled `dns-rs X.Y.Z`. Merging several changes on the same
-day produces one release: only the `DDMMYYYY` tag moves for the later commits.
-
-Each release body starts with a "What's changed" section listing every commit
-since the previous release, bulleted and linked, followed by a Full Changelog
-compare link and the container image details. The same-day date-tag pushes
-accrue silently and all appear in the list when the next release is cut.
-
-Releases are immutable. The `vX.Y.Z` tag is never moved, and re-running the same
-commit republishes the version tags without creating a second release. If the
-version is already tagged on another commit, the job fails instead of reusing the
-tag.
-
-The version is compiled into the binary, so a CI image and its `--version` output
-always agree:
-
-```bash
-docker run --rm chandanghosh/dns-rs:0.1.6 --version
-# dns-rs 0.1.6
-```
-
-### Gate order
-
-The `publish` job runs only after formatting, Clippy, tests, the container build
-and smoke test, dependency policy, audit, and fuzz checks pass. It skips the push
-when a newer commit has landed on `main` while the run was in progress.
-Publishing uses the `DOCKER_USERNAME` and `DOCKER_TOKEN` repository secrets, with
-the legacy `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` names accepted as a
-fallback; the token should be a Docker Hub access token with write scope, not
-your password.
-
-### Pulling a specific build
-
-`DDMMYYYY` is rebuilt and pushed in place when `main` changes, so `docker pull`
-picks up the latest build for that date. Use a release tag or the manifest digest
-when you need a stable reference:
-
-```bash
-docker buildx imagetools inspect "chandanghosh/dns-rs:0.1.6" \
-  --format '{{json .Manifest}}'
-docker pull "chandanghosh/dns-rs@sha256:<digest>"
-```
-
-To publish from a workstation, log in and use the guarded Make target (it
-requires both `TAG` and `CONFIRM=1`):
-
-```bash
-docker login
-make image-publish TAG=0.1.6 CONFIRM=1
-```
-
-The equivalent raw command is:
-
-```bash
-TAG=0.1.6
-VERSION="$(make -s version)"
-docker login
-docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  --tag "chandanghosh/dns-rs:$TAG" \
-  --build-arg VERSION="$VERSION" \
-  --build-arg VCS_REF="$(git rev-parse HEAD)" \
-  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --build-arg SOURCE_URL="$(git remote get-url origin)" \
-  --provenance=mode=max --sbom=true \
-  --push .
-```
-
-To publish a development or hotfix build through GitHub Actions, run the manual
-`Container` workflow:
-
-1. Set the `tag` input (for example `dev` or a date) and enable `push`.
-2. The publish job builds `linux/amd64` and `linux/arm64`, pushes
-   `docker.io/chandanghosh/dns-rs:<tag>`, and attaches an SBOM and provenance
-   attestation via BuildKit.
-3. Verify the result:
-
-   ```bash
-   docker buildx imagetools inspect docker.io/chandanghosh/dns-rs:<tag>
-   docker run --rm --platform linux/arm64 \
-     docker.io/chandanghosh/dns-rs:<tag> --version
-   ```
-
-The manual workflow is for explicit dev or hotfix tags; versioned releases and
-date-tagged edge builds come from CI on `main`. Neither workflow runs on Git tag
-pushes, so pushing a tag by hand will not publish an image.
-Cross-compilation happens on the native build platform; QEMU is only needed to
-run the foreign `arm64` image for smoke testing.
-
-## CI gates
-
-`.github/workflows/ci.yml` builds the image on every push and pull request,
-runs the smoke test, enforces a 10 MiB image-size budget, and scans the image
-with Trivy for `CRITICAL` and `HIGH` vulnerabilities (ignoring unfixed
-findings). The container job also runs the loopback benchmark against the built
-image for one and two resolver workers and writes the QPS, latency, and RSS
-numbers to the workflow summary. The load step is informational: a result below
-50,000 QPS or a p99 above 1 ms does not fail the build, although an actual
-benchmark or server error does. The manual `Container` workflow does not
-publish unless `push` is enabled.
-
-The same container checks are available locally as `make ci-container`;
-`make bench-ci` reproduces just the one- and two-worker load stats.
+Maintainer publishing steps, tag rules, release automation, secrets, and CI gates
+are documented in [Container publishing](container-publishing.md).

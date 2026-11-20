@@ -1,11 +1,14 @@
 # Benchmarking dns-rs
 
 Single reference for every benchmarking switch, runner, and methodology rule.
-The performance numbers live in the [README](../README.md#performance); this
-document explains how to produce and compare numbers yourself.
+The headline numbers live in the [README](../README.md#performance); the exact
+host, toolchain, commands, and repeated runs behind the 0.6.0 figures are in
+[`docs/benchmark-results/0.6.0-loopback.md`](benchmark-results/0.6.0-loopback.md).
+This document explains how to produce and compare numbers yourself.
 
-Last validated against `77efd1e` (DNSSEC workload) and re-run on the `0.1.13`
-validation-path changes and the `0.1.14` allocation removals.
+Methodology last reviewed for dns-rs 0.6.0 on 2026-11-20 with Rust 1.100.0.
+Hardware-specific figures below are examples from the development host, not
+portable expectations.
 
 ## Quick start
 
@@ -16,7 +19,7 @@ make bench
 # Interleaved A/B: working tree vs. a baseline ref (recommended for any
 # performance claim; builds the baseline once, caches it under target/ab/).
 make bench-compare
-make bench-compare BASE_REF=e4176ff THREADS="1 2 4"
+make bench-compare BASE_REF=origin/main THREADS="1 2 4"
 
 # Cache-miss and DNSSEC-validation runs (see the sections below).
 make bench-miss THREADS="1 2 4"
@@ -194,8 +197,10 @@ BENCH_SCENARIO=miss BENCH_NAMES=4000 scripts/bench-loopback.sh
 the answer and every query is a genuine miss - no cache thrashing involved.
 The RESULT line then reports `upstream=` (mock queries during the load
 window) and `saved=` (queries sent that did not reach the mock, i.e.
-coalesced away). Measured on this host: `BENCH_NAMES=1` at concurrency 8
-coalesces ~87% of queries, while `BENCH_NAMES=4000` saves ~0.
+coalesced away). As an illustration from the development host, `BENCH_NAMES=1`
+at concurrency 8 coalesced ~87% of queries, while `BENCH_NAMES=4000` saved ~0.
+Those percentages are workload-specific and will change with host and client
+timing; re-run them before quoting them elsewhere.
 
 The older `BENCH_NAMES=20000` cache-thrash proxy still works in hit mode
 (the runner warns that it exceeds the 8192-entry cache), but prefer the miss
@@ -343,11 +348,12 @@ container image.
 - **Mind your own builds.** Compilation spikes the load average for about a
   minute; `bench-compare.sh` settles after building. If you build between
   hand runs, wait for the load to decay first.
-- **Expect noise.** Repeated runs on a shared host have varied by up to 15%
-  (README). The interleaved median-of-pairs method measured a ~2% noise floor
-  on identical binaries (18 runs, deltas -1.6% / +1.0% / -1.2% at 1/2/4
-  workers), so treat deltas below ~2% as noise and re-run before believing
-  anything under ~5%. Deltas at 4 workers are the least stable.
+- **Expect noise.** Consecutive single runs on the shared development host
+  varied by up to about 15% in QPS and much more in p99. An earlier
+  interleaved median-of-pairs experiment on identical binaries measured a
+  ~2% noise floor (18 runs, deltas -1.6% / +1.0% / -1.2% at 1/2/4 workers).
+  Treat deltas below ~2% as noise and re-run before believing anything under
+  ~5%. Deltas at 4 workers are the least stable.
 - **Never run benchmarks in parallel.** Concurrent runs compete for the same
   cores and invalidate each other.
 - **Never set `RUSTFLAGS` or `target-cpu=native`** for benchmarks; compare
@@ -371,6 +377,8 @@ threads=2 idle_rss_kib=18332 peak_rss_kib=26580 RESULT concurrency=8 \
 
 | Field | Meaning |
 |---|---|
+| `concurrency` | Queries in flight from the load generator (from `BENCH_CONCURRENCY`) |
+| `samples` | Responses received during the measured window; the denominator for the reported RTT percentiles |
 | `qps` | Queries per second over the measured window |
 | `sent` | Total queries sent by the load generator (warm-up plus measured) |
 | `p50_us` .. `p99_us`, `max_us` | Client-side send-to-response RTT percentiles, microseconds |
@@ -386,6 +394,26 @@ lines, and a final summary table of median qps/p50 per variant with `%`
 deltas (plus median allocs/query when `BENCH_ALLOCS=1` and a per-phase table
 when `BENCH_PHASES=1`). Warnings are printed if a variant reported query
 errors.
+
+## Publishing a result
+
+Any number quoted outside this file should have a result page under
+[`benchmark-results/`](benchmark-results/) using this template. Copy it, fill in
+every field, and link it from the claim that uses the number.
+
+| Field | Required content |
+|---|---|
+| Title | Workload and version, for example `0.6.0 loopback cache-hit baseline` |
+| Build | Version, commit, date, Rust compiler, build profile, and any feature flags |
+| Host | OS/kernel, CPU model and core count, memory, and whether the host was shared |
+| Command | Exact `make`/script invocation and all environment variables |
+| Scenario | Workload, name count, concurrency, warm-up, measured duration, CPU pinning |
+| Runs | Raw `RESULT` lines for every run, with no edits |
+| Summary | Throughput and latency ranges across runs, not only the best run |
+| Limitations | Which paths were not exercised and what could make the number unrepresentative |
+
+The 0.6.0 baseline page is the reference example. Note that a single run is not
+a result; record repeated runs or an interleaved A/B comparison.
 
 ## Known limitations
 
@@ -403,7 +431,8 @@ errors.
 ## Cleanup
 
 Baseline worktrees and their build caches live under `target/ab/` (git
-ignored, ~426 MB per ref). To reclaim the space:
+ignored; the 0.6.0 development host used roughly 426 MB per ref, but this
+varies with target and dependency set). To reclaim the space:
 
 ```bash
 git worktree prune

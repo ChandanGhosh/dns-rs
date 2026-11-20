@@ -1,7 +1,9 @@
 # dns-rs full reference configuration (native TOML)
 #
 # This mirrors examples/full.conf. TOML is the native format; use it when you
-# want typed values or tooling-friendly configuration. Every field below is
+# want typed values or tooling-friendly configuration. It is an annotated
+# reference, not an exhaustive field list; see docs/configuration.md and
+# crates/dns-config/src/model.rs for the complete set. Every field below is
 # optional unless noted, and omitted fields use the defaults shown.
 #
 # Validate with:   dns-rs -c examples/full.toml checkconf
@@ -61,8 +63,10 @@ do_tcp = true
 # Source addresses for outgoing queries (kernel choice when empty).
 outgoing_interfaces = []
 
-# First matching network wins. Actions: allow, deny (drop), refuse (REFUSED),
-# allow-snoop, deny-non-local, refuse-non-local.
+# The most specific matching network wins regardless of statement order; later
+# rules win equal-prefix ties, and a client with no match is refused.
+# Actions: allow, deny (drop), refuse (REFUSED), allow-snoop, deny-non-local,
+# refuse-non-local.
 access_control = [
     "127.0.0.0/8 allow",
     "::1/128 allow",

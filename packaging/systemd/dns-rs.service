@@ -1,0 +1,39 @@
+[Unit]
+Description=dns-rs validating recursive DNS resolver
+Documentation=https://github.com/ChandanGhosh/dns-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dns-rs
+Group=dns-rs
+ExecStart=/usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.conf run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+RuntimeDirectory=dns-rs
+RuntimeDirectoryMode=0755
+StateDirectory=dns-rs
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/dns-rs /run/dns-rs
+
+# Allow binding port 53 without a setuid binary. Remove these two lines and
+# use a high port in the configuration if the capability is not wanted.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

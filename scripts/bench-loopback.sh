@@ -38,8 +38,8 @@
 #   BENCH_SERVER_IMAGE run the resolver from this image instead of the host
 #                      binary (Linux host networking; see README)
 #   BENCH_BINARY       host-mode resolver binary to run (skips the build;
-#                      defaults to target/release/dns-rs; ignored when
-#                      BENCH_SERVER_IMAGE is set)
+#                      defaults to target/release/dns-rs; cannot be combined
+#                      with BENCH_SERVER_IMAGE)
 #   BENCH_ALLOCS       1 reports allocation counts: builds with --features
 #                      alloc-stats and appends allocs=/allocs_per_query= to
 #                      RESULT (host mode only; the counter adds an atomic to
