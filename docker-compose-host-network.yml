@@ -1,0 +1,51 @@
+name: dns-rs
+
+services:
+    resolver:
+        image: ${DNS_RS_IMAGE:-chandanghosh/dns-rs:0.6.0}
+        container_name: dns-rs
+        restart: unless-stopped
+
+        # Linux-only: bind directly to the listener port in the mounted config
+        # (53 by default). Avoids Docker's user-space proxy and bridge path.
+        network_mode: host
+
+        volumes:
+            # Mount the configuration directory, not a single file. Reload
+            # (SIGHUP or `control reload`) re-reads this path, and a directory
+            # mount keeps working when an editor saves by renaming the file.
+            - ./packaging/config:/etc/dns-rs:ro
+            # Persist the RFC 5011 auto-trust-anchor file when enabled.
+            - dns-rs-data:/var/lib/dns-rs
+            # Mount TLS material for DoT/DoH and enable the interfaces in the
+            # mounted configuration.
+            # - ./tls:/etc/dns-rs/tls:ro
+
+        # Runtime hardening: no writable root filesystem, no capabilities
+        # except the one needed to bind port 53, and the runtime's default
+        # seccomp profile (do not pass seccomp=unconfined).
+        read_only: true
+        tmpfs:
+            - /tmp:rw,noexec,nosuid,size=16m
+        cap_drop:
+            - ALL
+        cap_add:
+            - NET_BIND_SERVICE
+        security_opt:
+            - no-new-privileges:true
+        pids_limit: 256
+
+        healthcheck:
+            test:
+                - CMD
+                - /usr/local/bin/dns-rs
+                - -c
+                - /etc/dns-rs/dns-rs.conf
+                - healthcheck
+            interval: 30s
+            timeout: 5s
+            start_period: 5s
+            retries: 3
+
+volumes:
+    dns-rs-data:
