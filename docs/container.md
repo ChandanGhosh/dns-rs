@@ -665,7 +665,8 @@ The compose file (`docker-compose.yml`) pulls the published image from Docker
 Hub, mounts `packaging/config` (the directory containing `dns-rs.conf`),
 persists `/var/lib/dns-rs` in the `dns-rs-data` volume, and applies the same
 hardening as the manual `docker run` examples. It does not build the image
-locally.
+locally. For Linux host networking, use `docker-compose-host-network.yml`
+instead, as described below.
 
 ### Start with the published image
 
@@ -691,6 +692,55 @@ DNS_RS_BIND_ADDR=127.0.0.1 DNS_RS_HOST_PORT=15353 \
 
 dig @127.0.0.1 -p 15353 example.com A
 ```
+
+### Host-network mode for maximum throughput (Linux only)
+
+The default compose file publishes container ports through the Docker bridge.
+That is portable but adds a user-space proxy and bridge/NAT hop to every packet.
+On Linux, `docker-compose-host-network.yml` uses `network_mode: host` and binds
+directly to the listener port in the mounted configuration (`53` by default).
+
+Local J4125 LXC validation used 4 vCPUs, a 384 MiB container limit, wired 1 GbE,
+a 2,000-name mixed query set, and `dnsperf -c 256 -T 24 -q 320` for 300 seconds:
+
+| Metric | Bridge | Host network |
+| --- | ---: | ---: |
+| Sustained qps | 55,147 | 74,508 |
+| Queries sent | 16,544,349 | 22,353,148 |
+| Lost/timeouts | 0 | 441 (0.002%) |
+| Average latency | 5.736 ms | 4.154 ms |
+| Max latency | 124.016 ms | 98.878 ms |
+| Response codes | 100% NOERROR | 100% NOERROR |
+| Peak memory | 290 MiB | 340 MiB |
+| Health | healthy, no OOM | healthy, no OOM |
+
+Use the default bridge compose file on non-Linux hosts, when you need
+`DNS_RS_BIND_ADDR` or `DNS_RS_HOST_PORT`, or when another service already owns
+the host listener port. Use the host-network file on a dedicated Linux resolver
+when maximum UDP throughput matters and the configured listener port is free.
+These figures are a local reference point, not a guarantee for other hardware.
+
+Stop the default resolver before switching, then use the alternate compose file:
+
+```bash
+docker compose down
+docker compose -f docker-compose-host-network.yml up -d
+dig @127.0.0.1 example.com A
+```
+
+`DNS_RS_BIND_ADDR` and `DNS_RS_HOST_PORT` do not apply to this file. Change
+`port:` in the mounted configuration if you need a different listener port, and
+make sure that port is free on the Docker host. Include the file in management
+commands while this mode is active:
+
+```bash
+docker compose -f docker-compose-host-network.yml logs -f resolver
+docker compose -f docker-compose-host-network.yml exec resolver \
+  /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.conf healthcheck
+docker compose -f docker-compose-host-network.yml down
+```
+
+To return to bridged networking, run `docker compose up -d` again.
 
 ### Common operations
 
