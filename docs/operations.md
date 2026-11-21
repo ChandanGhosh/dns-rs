@@ -85,12 +85,34 @@ two-second protocol timeout.
 | `coalesce_leaders` | `dns_rs_coalesce_leaders_total` | Queries that started an upstream resolution |
 | `coalesce_followers` | `dns_rs_coalesce_followers_total` | Queries that joined an in-flight resolution |
 | `coalesce_abandoned` | `dns_rs_coalesce_abandoned_total` | Leaders dropped before publishing a result |
+| `queries_total` | `dns_rs_queries_total` | Queries presented to the pipeline |
+| `queries_by_transport` | `dns_rs_queries_by_transport_total{transport=...}` | Queries by UDP, TCP, TLS, or HTTPS |
+| `responses_total` | `dns_rs_responses_total` | Encoded client replies |
+| `responses_by_rcode` | `dns_rs_responses_by_rcode_total{rcode=...}` | Replies by 4-bit response code |
+| `responses_truncated` | `dns_rs_responses_truncated_total` | Replies with the TC bit set |
+| `responses_ede` | `dns_rs_responses_ede_total` | Replies carrying an Extended DNS Error |
+| `responses_ad` | `dns_rs_responses_ad_total` | Replies with the AD bit set |
+| `dnssec_secure` / `dnssec_insecure` / `dnssec_bogus` | `dns_rs_dnssec_validations_total{result=...}` | DNSSEC validation outcomes |
+| `upstreams` | `dns_rs_upstream_rtt_seconds{server=...}` and related gauges | Per-upstream RTT, timeouts, failures, lameness, backoff, and DNS 0x20 state |
+| `upstreams_omitted` | `dns_rs_upstreams_omitted` | Upstreams left out of the bounded report |
 
-These are pipeline counters only. There is no HTTP metrics listener, no metrics
-on the DNS port, and no per-client, per-upstream, or RTT breakdown. Counters are
-attached to the current query pipeline, so they reset on reload as well as on a
-process restart; in-flight queries finish on the old pipeline. A flat or reset
-`uptime_secs` from `status` is the quickest way to confirm a restart loop.
+`queries_total` counts every query handed to the pipeline, including malformed
+or denied ones; `responses_total` counts only replies that were encoded.
+Response codes use the 4-bit wire value, so extended rcodes are reported by
+their low nibble. DNSSEC outcomes count completed validations by the current
+pipeline, including cache misses that were coalesced into an in-flight lookup.
+
+The upstream section reports the 64 most recently used servers from the
+infrastructure cache. Its RTT is the same smoothed value used for server
+selection; `timeouts` and `failures` are consecutive counters reset by a
+successful query. `upstreams_omitted` is nonzero when more servers are tracked
+than the report can hold.
+
+These are pipeline counters only. There is no HTTP metrics listener and no
+metrics on the DNS port. Counters are attached to the current query pipeline, so
+they reset on reload as well as on a process restart; in-flight queries finish
+on the old pipeline. A flat or reset `uptime_secs` from `status` is the quickest
+way to confirm a restart loop.
 
 Prometheus cannot scrape the control socket directly. Use an exec-based
 exporter, or bind-mount the socket's parent directory and run a host-side

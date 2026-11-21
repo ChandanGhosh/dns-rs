@@ -382,8 +382,10 @@ pub struct ServerConfig {
     /// Detach from the terminal. Parsed for Unbound compatibility but not
     /// enforced; run the resolver under a process supervisor.
     pub do_daemonize: bool,
-    /// User to drop privileges to. Parsed but not enforced yet; the server
-    /// logs a warning when it is set.
+    /// User to drop privileges to after listeners and the control socket are
+    /// bound. The account must exist in the system user database. Requires
+    /// root unless the process already runs as that user. Non-Unix targets
+    /// ignore the setting with a warning.
     pub username: Option<String>,
     /// Directory to chroot into. Parsed but not enforced.
     pub chroot: Option<PathBuf>,

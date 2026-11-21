@@ -1,169 +1,121 @@
-# Unbound replay harness design
+# Unbound replay harness
 
-**Status:** Design only; the harness is not implemented yet. RFC 5011 autotrust
-itself exists in `dns-dnssec`, but none of the replay events are wired up.
+**Status:** First-pass conformance suite implemented. The harness runs a small
+set of bundled `.rpl` scenarios, but it is not yet a full Unbound `testbound`
+replacement. Unsupported features are listed below and in
+[`UNSUPPORTED.md`](../crates/dns-replay/tests/scenarios/UNSUPPORTED.md).
 
 ## Purpose
 
-Unbound ships 492 `.rpl` replay scenarios under `testdata/`, driven by
-`testcode/testbound` and `testcode/replay.{c,h}`. They encode years of resolver
-edge cases: referrals, lame servers, truncation, retries, cache expiry, CNAME and
-DNAME chasing, QNAME minimisation, and DNSSEC validation.
+Unbound ships hundreds of `.rpl` replay scenarios under `testdata/`, driven by
+`testcode/testbound` and `testcode/replay.{c,h}`. They encode resolver edge cases
+such as referrals, truncation, retries, cache expiry, CNAME and DNAME chains,
+QNAME minimisation, and DNSSEC validation.
 
-The harness lets `dns-rs` run those scenarios deterministically against a virtual
-clock and fake network. It is the primary behavioral conformance suite, complementing
-RFC-derived unit tests, live interop tests, and fuzzing.
+The `dns-replay` crate lets `dns-rs` run a growing, explicitly curated subset of
+that style of scenario against the real iterative resolver. It complements
+RFC-derived unit tests, live interop tests, and fuzzing. It is a dev-only crate;
+production crates do not depend on it.
 
-## Replay file format (summary)
+## Running the suite
 
-A `.rpl` file has three parts:
-
-1. **Configuration** (optional, before `CONFIG_END`)
-   - `COMMANDLINE <args>`
-   - `AUTOTRUST_FILE <id>` ... `AUTOTRUST_END`
-   - `TEMPFILE_NAME` / `TEMPFILE_CONTENTS` / `$INCLUDE_TEMPFILE` / `TEMPFILE_END`
-   - `CONFIG_END`
-2. **Scenarios**
-   - `SCENARIO_BEGIN <name>` ... `SCENARIO_END`
-3. **Event ranges and steps**
-   - `RANGE_BEGIN <start> <end>` ... `RANGE_END` describes fake server responses
-     for a simulated time window, optionally with `ADDRESS <ip>`.
-   - `STEP <time> <event> [ADDRESS <ip>]` advances the virtual clock and injects or
-     checks an event.
-   - `ENTRY_BEGIN` ... `ENTRY_END` contains a DNS message in a textual packet form
-     (header fields, question, answer, authority, additional sections).
-
-Event types that matter for `dns-rs`:
-
-| Event | Meaning |
-|---|---|
-| `QUERY` | Inject a client query |
-| `CHECK_ANSWER` | Assert the client response |
-| `CHECK_OUT_QUERY` | Assert an upstream query (and optionally auto-reply) |
-| `REPLY` | Deliver a response from a fake server |
-| `TIMEOUT` | Advance to the next timeout |
-| `TIME_PASSES ELAPSE <s>` | Advance the virtual clock |
-| `TIME_PASSES EVAL <macro>` | Advance using a computed value |
-| `TRAFFIC` | Run until traffic stops, then check |
-| `CHECK_AUTOTRUST` | Compare autotrust state file |
-| `CHECK_TEMPFILE` | Compare a temporary file |
-| `INFRA_RTT` | Seed the infrastructure cache |
-| `FLUSH_MESSAGE` / `EXPIRE_MESSAGE` | Manipulate the message cache |
-| `ERROR` | Expect an error event |
-
-Macros use `${...}` with `+ - * /`, `$var`, `${time}`, `${ctime v}`,
-`${timeout}`, and `${range lo v hi}`. The implementation should support the
-arithmetic and time macros first; file-comparison macros can follow.
-
-## Required test seams
-
-The resolver must not call `tokio::time`, `Instant::now`, `getrandom`, or real
-sockets directly. Define narrow traits and inject them through a runtime context.
-The current resolver does use Tokio time and real sockets directly, so these
-seams must be introduced before the harness can drive it.
-
-```rust
-pub trait Clock: Send + Sync {
-    fn now(&self) -> Instant;
-    fn sleep_until(&self, deadline: Instant) -> BoxFuture<'_, ()>;
-}
-
-pub trait Random: Send + Sync {
-    fn fill(&self, buffer: &mut [u8]);
-    fn u16(&self) -> u16;
-}
-
-#[async_trait]
-pub trait UpstreamTransport: Send + Sync {
-    async fn exchange(
-        &self,
-        server: SocketAddr,
-        query: &[u8],
-        timeout: Duration,
-    ) -> Result<Vec<u8>, TransportError>;
-}
+```bash
+cargo test -p dns-replay
 ```
 
-Production implementations use Tokio, `getrandom`, and real sockets. The replay
-implementation uses a deterministic clock, a seeded RNG, and a fake network backed
-by the scenario's `RANGE`/`REPLY` entries.
+The integration test in `crates/dns-replay/tests/replay.rs` reads the frozen
+`MANIFEST` in `tests/scenarios/`, runs every listed file, and asserts that every
+listed `.rpl` file on disk is present in the manifest. An unsupported step fails
+the run instead of being silently skipped.
 
-The clock must distinguish the simulated wall clock from monotonic timers. Unbound
-replay scenarios manipulate absolute times as well as elapsed durations.
+The bundled first-pass scenarios are:
 
-## Fake network model
+| Scenario | Coverage |
+| --- | --- |
+| `basic_referral.rpl` | Pinned root referral through `com.` to an authoritative `A` answer. |
+| `cname_chain.rpl` | CNAME chase from `com.` to `net.`. |
+| `nxdomain.rpl` | Authoritative NXDOMAIN with an SOA in the authority section. |
+| `truncation.rpl` | UDP truncation followed by a TCP retry. |
 
-- A `FakeNetwork` holds a time-indexed set of server responses keyed by
-  `(time range, server address, query name/type/class, maybe flags)`.
-- On an upstream query, the fake transport records the outgoing message, then:
-  - returns the matching response immediately, or
-  - schedules it for delivery, or
-  - returns a timeout when the scenario says so.
-- `CHECK_OUT_QUERY` and `CHECK_ANSWER` compare semantic message fields, not raw
-  bytes, so harmless compression or ordering differences do not fail tests.
-- Truncated UDP responses trigger the real TCP fallback path, still through the
-  fake transport.
+These are self-authored cases in Unbound's replay syntax. The upstream Unbound
+corpus is not vendored yet; adding it is a later phase.
 
-## Harness architecture
+## Supported replay syntax
 
-```text
-tests/replay/
-├── mod.rs              # test entry point; discovers and runs .rpl files
-├── parser.rs           # .rpl lexer/parser and macro expansion
-├── scenario.rs         # ranges, steps, events, entries
-├── fake_clock.rs       # virtual time and timer queue
-├── fake_network.rs     # recorded queries and scripted responses
-├── compare.rs          # semantic DNS message comparison
-└── runner.rs           # drives the resolver and emits results
-```
+The parser accepts Unbound-style configuration and scenario blocks:
 
-The harness is a dev-only crate/test target. The resolver itself must remain
-independent of it.
+- `CONFIG_END`
+- `SCENARIO_BEGIN <name>` ... `SCENARIO_END`
+- `RANGE_BEGIN <start> <end>` ... `RANGE_END`, including `ADDRESS <ip>`
+- `ENTRY_BEGIN` ... `ENTRY_END`
+- `MATCH`, `ADJUST`, `REPLY`, and `EXTRA_PACKET`
+- `SECTION QUESTION|ANSWER|AUTHORITY|ADDITIONAL`
+- `STEP <time> QUERY|CHECK_ANSWER|TIME_PASSES ...`
+- `TIME_PASSES ELAPSE <expression>` and computed `${...}` arithmetic with
+  `+`, `-`, `*`, and `/`
 
-## Scope for the first pass
+Record lines may include or omit TTLs; omitted TTLs use 3600 seconds. Comments
+start with `;`. Configuration lines before `CONFIG_END`, `AUTOTRUST_FILE`
+blocks, and tempfile blocks are parsed but not applied.
 
-Start with scenarios that exercise:
+`REPLY` tokens map QR, AA, TC, RD, RA, AD, and CD flags plus NOERROR, FORMERR,
+SERVFAIL, NXDOMAIN, NOTIMPL/NOTIMP, REFUSED, and extended rcodes. `ADJUST
+copy_query` makes a fake server echo the incoming question, which is what the
+referral fixtures use.
 
-1. Basic recursion from root hints through referrals to an answer.
-2. CNAME and DNAME chains.
-3. NXDOMAIN and NODATA negative caching.
-4. UDP truncation and TCP fallback.
-5. Timeout, retry, and lame-server handling.
-6. Cache TTL expiry and prefetch.
-7. DNSSEC secure, insecure, and bogus outcomes.
+## How the harness runs a scenario
 
-Defer scenarios that depend on:
+1. `parser.rs` turns the file into scenarios, ranges, entries, and steps.
+2. `fake.rs` binds one UDP socket and one TCP listener per replay server address,
+   using aliases in `127.0.0.0/8` and a shared port. Each address serves only
+   the ranges whose `ADDRESS` matches it.
+3. `resolver_config` pins `IteratorConfig::root_servers` to the alias for the
+   replay root server and disables case randomisation, QNAME minimisation,
+   cookies, IPv6, and forwarders. The harness runs `IteratorResolver`, not a
+   mock resolver.
+4. `QUERY` steps call `IteratorResolver::resolve`. `time` selects the active
+   `RANGE` entries; `TIME_PASSES` advances that simulated value.
+5. `CHECK_ANSWER` compares the resolver response with the expected entry using
+   `compare.rs`. Comparison is semantic: record order, TTLs, DNS compression,
+   and the loopback address aliases do not affect the result. Header flags are
+   checked only when the entry asserts them as true.
 
-- `unbound-control`, `unbound-host`, or `unbound-anchor` CLI behavior
-- Python/dynlib modules, DNSCrypt, dnstap, IPsec, or IPSet
-- Full `unbound.conf` coverage outside the supported subset
-- Autotrust and tempfile comparisons, until the harness implements
-  `CHECK_AUTOTRUST` and `CHECK_TEMPFILE`
+A truncated UDP reply is served first; the TCP listener serves the first
+non-truncated `EXTRA_PACKET`, so the resolver's real TCP fallback path is
+exercised.
 
-Maintain `tests/replay/UNSUPPORTED.md` with a scenario path and reason for every
-excluded file. No silent skips.
+## Current limits
 
-## Pass-rate gates
+The first pass deliberately does not provide full virtual time or a fully
+deterministic socket/RNG seam:
 
-- First phase: at least 10 iterator scenarios pass.
-- Second phase: at least 30 cache/retry scenarios pass.
-- Third phase: at least 60 scenarios including DNSSEC pass.
-- Final: the agreed subset passes, with no regressions.
+- `TIME_PASSES` advances range selection and macro values only. It does not age
+  cached records or advance retry timers.
+- `CHECK_OUT_QUERY`, `REPLY`, `TIMEOUT`, `TRAFFIC`, `CHECK_AUTOTRUST`,
+  `CHECK_TEMPFILE`, `INFRA_RTT`, `FLUSH_MESSAGE`, `EXPIRE_MESSAGE`, and `ERROR`
+  steps are recognized but rejected as unsupported.
+- Real file comparisons, DNSSEC trust anchors, cache seeding, and Unbound CLI
+  behavior are not implemented.
+- IPv6 replay addresses and non-IN query classes are not supported.
 
-The exact list is frozen when the harness first runs, so progress is measurable.
+See `UNSUPPORTED.md` for the complete list. Unsupported scenarios must not be
+added to `MANIFEST`.
 
-## Implementation order
+## Roadmap
 
-1. Parser for config, scenario, range, step, and entry blocks.
-2. Semantic message comparison and scenario discovery.
-3. Virtual clock and fake network.
-4. Runner that starts the resolver against the fake context.
-5. Macro expansion.
-6. Autotrust and tempfile comparisons.
-7. CI job with a stable scenario manifest.
+1. Add virtual clock and timer seams so TTL expiry, retries, and
+   `TIME_PASSES` affect resolver behavior as they do in `testbound`.
+2. Implement outbound-query assertions and scheduled replies.
+3. Import upstream Unbound scenarios in small batches with reasons for exclusions.
+4. Add cache manipulation and file comparison steps.
+5. Add DNSSEC validation scenarios and raise the manifest gate with each batch.
+
+The manifest is frozen at each expansion so progress is measurable and
+regressions are visible.
 
 ## Attribution
 
-The `.rpl` format and test scenarios are from NLnet Labs' Unbound, BSD-3-Clause.
-Reused scenario files retain their copyright notices and are referenced from the
-repository rather than copied where practical.
+The `.rpl` format is from NLnet Labs' Unbound, BSD-3-Clause. The bundled
+fixtures are self-authored for this repository. If upstream scenarios are
+imported later, retain their copyright notices and reference them from the
+manifest with their source revision.

@@ -34,7 +34,8 @@ the map of the full documentation set.
   `unbound.conf` deployment.
 - [Unbound compatibility](unbound-compatibility.md) — compatibility matrix and
   differences.
-- [Replay harness design](replay-harness.md) — design only; not implemented.
+- [Replay harness](replay-harness.md) — first-pass Unbound-style conformance
+  suite, supported syntax, and gaps.
 - [Container publishing](container-publishing.md) — tags, releases, and CI
   gates for maintainers.
 

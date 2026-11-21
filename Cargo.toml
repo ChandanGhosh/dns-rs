@@ -12,6 +12,7 @@ members = [
     "crates/dns-control",
     "crates/dns-daemon",
     "crates/dns-testutil",
+    "crates/dns-replay",
 ]
 default-members = ["crates/dns-daemon"]
 
@@ -36,6 +37,7 @@ ipnet = "2.12"
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }
 moka = { version = "0.12", features = ["sync"] }
+nix = { version = "0.31", features = ["fs", "user"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

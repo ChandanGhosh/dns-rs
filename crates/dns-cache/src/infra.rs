@@ -32,6 +32,25 @@ impl Default for InfraEntry {
     }
 }
 
+/// Point-in-time state of one tracked upstream, for reporting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InfraSnapshot {
+    /// Upstream address.
+    pub address: SocketAddr,
+    /// Smoothed round-trip time.
+    pub rtt: Duration,
+    /// Consecutive timeouts.
+    pub timeouts: u32,
+    /// Consecutive non-timeout failures.
+    pub failures: u32,
+    /// Whether the upstream is considered lame.
+    pub lame: bool,
+    /// Whether the upstream is inside its retry backoff window.
+    pub backed_off: bool,
+    /// Whether the upstream preserves QNAME case (DNS 0x20).
+    pub caps_ok: bool,
+}
+
 /// Base delay before retrying a failing server. Each consecutive failure
 /// doubles the delay, capped at [`BACKOFF_MAX`].
 const BACKOFF_BASE: Duration = Duration::from_millis(250);
@@ -151,6 +170,47 @@ impl InfraCache {
         (!remaining.is_zero()).then_some(remaining)
     }
 
+    /// Report the most recently used upstreams, newest first.
+    ///
+    /// `limit` bounds the result so a large cache cannot overflow the control
+    /// socket's response. The second value counts entries left out.
+    pub fn snapshot(&self, limit: usize) -> (Vec<InfraSnapshot>, usize) {
+        let now = Instant::now();
+        let mut entries = self
+            .cache
+            .iter()
+            .map(|(address, entry)| {
+                (
+                    entry.last_update,
+                    *address,
+                    InfraSnapshot {
+                        address: *address,
+                        rtt: entry.rtt,
+                        timeouts: entry.timeouts,
+                        failures: entry.failures,
+                        lame: entry.lame,
+                        backed_off: entry.retry_at.is_some_and(|retry| retry > now),
+                        caps_ok: entry.caps_ok,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let omitted = entries.len().saturating_sub(limit);
+        entries.sort_by(|(left_time, left_addr, _), (right_time, right_addr, _)| {
+            right_time
+                .cmp(left_time)
+                .then_with(|| left_addr.cmp(right_addr))
+        });
+        (
+            entries
+                .into_iter()
+                .take(limit)
+                .map(|(_, _, snapshot)| snapshot)
+                .collect(),
+            omitted,
+        )
+    }
+
     pub fn caps_supported(&self, addr: &SocketAddr) -> bool {
         self.get(addr).is_none_or(|entry| entry.caps_ok)
     }
@@ -235,5 +295,23 @@ mod tests {
             cache.record_timeout(&address());
         }
         assert!(cache.is_lame(&address()));
+    }
+
+    #[test]
+    fn snapshot_reports_state_and_respects_the_limit() {
+        let cache = InfraCache::new(16);
+        let second = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)), 53);
+        cache.update_rtt(&address(), Duration::from_millis(40));
+        cache.record_timeout(&second);
+
+        let (entries, omitted) = cache.snapshot(1);
+        assert_eq!(omitted, 1);
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.address, second);
+        assert_eq!(entry.timeouts, 1);
+        assert!(entry.backed_off);
+        assert!(!entry.lame);
+        assert!(entry.caps_ok);
     }
 }

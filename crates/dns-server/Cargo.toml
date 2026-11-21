@@ -42,6 +42,12 @@ phase-stats = []
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 
+# Privilege dropping after privileged sockets are bound. `user` provides the
+# passwd lookup and setuid/setgid wrappers; `fs` provides `chown` for handing
+# the control socket and RFC 5011 state file to the target user.
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
+
 [dev-dependencies]
 dns-testutil.workspace = true
 tempfile = "3"

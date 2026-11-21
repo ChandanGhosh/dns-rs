@@ -28,6 +28,7 @@ make clippy          # cargo clippy --workspace --all-targets --all-features -- 
 make test            # nextest when installed, otherwise cargo test
 make test-doc        # doctests
 make check           # fmt-check + clippy + tests + deny + checkconf-examples
+cargo test -p dns-replay  # Unbound-style replay conformance manifest
 make ci              # check + audit + fuzz smoke
 make ci-container    # container smoke, load stats, size gate, Trivy scan
 ```

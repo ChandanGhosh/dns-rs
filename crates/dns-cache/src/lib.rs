@@ -5,7 +5,7 @@ mod message;
 mod registry;
 mod rrset;
 
-pub use infra::InfraCache;
+pub use infra::{InfraCache, InfraSnapshot};
 pub use message::{
     CacheHit, CacheHitMeta, CacheStats, DEFAULT_STALE_TTL, MessageCache, WireRequest,
     patch_question, patch_wire, response_ttl, wire_has_opt,

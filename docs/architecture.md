@@ -49,8 +49,9 @@ them without failing on compatibility options.
 
 `dns-control` owns the Unix socket, peer-credential check, JSON framing, and
 closed command set. `dns-daemon` assembles the configuration, logging, runtime,
-and control server. The daemon never daemonizes or changes user; the supervisor
-does that.
+and control server. The daemon never daemonizes; when started as root it can
+drop to the configured `username` after binding its sockets. Otherwise the
+supervisor owns process identity.
 
 ## Where to make a change
 

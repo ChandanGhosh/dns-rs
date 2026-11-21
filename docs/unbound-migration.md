@@ -72,14 +72,16 @@ anchors.
 ### 2. Decide how the process is supervised
 
 Unbound normally daemonizes, writes a PID file, changes user and chroot, and
-owns its own log file. dns-rs does none of those things. It stays in the
-foreground, logs to standard output, and lets systemd, Docker, or another
-supervisor manage the process.
+owns its own log file. dns-rs stays in the foreground and logs to standard
+output, but it does implement `username` privilege drop on Unix: listeners and
+the control socket are created first, then the process permanently switches to
+the configured account. Make sure that account can read the configuration, TLS,
+trust-anchor, zone, and CA files for reload, and can write the directory that
+holds `auto-trust-anchor-file`.
 
 These options are parsed for compatibility but have no effect:
 
 - `do-daemonize`
-- `username`
 - `chroot`
 - `directory`
 - `logfile`
