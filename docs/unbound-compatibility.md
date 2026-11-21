@@ -75,6 +75,20 @@ explicit TTL in the record is preserved. Relative names in `local-zone` and
 `local-data` are resolved against the root, so `local-zone: "example.com"` and
 `local-zone: "example.com."` are the same zone.
 
+### Process management
+
+`username` drops privileges after the DNS listeners and control socket are
+bound. The daemon resolves the account, creates the privileged resources, hands
+the control socket and an existing `auto-trust-anchor-file` to the target
+account, then replaces supplementary groups and sets the primary group and user
+ID. Effective IDs are verified and a mismatch is fatal. The target account must
+be able to read configuration, TLS, trust-anchor, zone, and CA files for reload,
+and to write the directory containing the auto-trust-anchor file.
+
+`chroot`, `directory`, `logfile`, `pidfile`, `use-syslog`, and `do-daemonize`
+are still accepted with a warning but have no effect; run the daemon under a
+supervisor that owns those concerns.
+
 ### DNSSEC and hardening
 
 `validator`, `domain-insecure`, `trust-anchor`, `trust-anchor-file`,
@@ -93,10 +107,10 @@ rate limiting, and per-client concurrency limits are enforced. The
 infrastructure cache honours
 `infra-host-ttl`, `infra-cache-min-rtt`, and `infra-cache-numhosts`.
 `so-reuseport: yes` and `delay-close: 0` describe the resolver's existing
-behaviour. Options that describe process management (`username`, `chroot`,
-`directory`, `logfile`, `pidfile`, `use-syslog`, `do-daemonize`) are parsed for
-compatibility but are not applied; the container and service manager own those
-concerns.
+behaviour. `username` is enforced on Unix (see below). The remaining process
+options (`chroot`, `directory`, `logfile`, `pidfile`, `use-syslog`,
+`do-daemonize`) are parsed for compatibility but are not applied; the container
+and service manager own those concerns.
 
 `insecure-lan-zones: yes` marks the private reverse zones (`10.in-addr.arpa`,
 `168.192.in-addr.arpa`, the RFC 1918 and IPv6 equivalents) as insecure so local
@@ -173,5 +187,6 @@ feature that is out of scope.
 ## Not implemented
 
 RPZ, DNS64, response-IP filtering, per-interface views, auth-zone AXFR/URL
-fetching, and DNS-over-QUIC. Configurations that use these options load with
-warnings.
+fetching, and DNS-over-QUIC. `chroot`, daemonization, PID files, log files, and
+syslog are also unimplemented; `username` privilege drop is implemented.
+Configurations that use these options load with warnings.

@@ -44,6 +44,11 @@ and publish workflow is documented in
 | Reserved directory | `/var/cache/dns-rs` (currently unused by the daemon) |
 | Plain DNS | port 53 UDP/TCP |
 | DoT / DoH | ports 853 / 443 when TLS material is configured |
+
+The image has no `/etc/passwd` or `/etc/group`, so the `username` privilege-drop
+option cannot resolve an account inside the container. Run the image as its
+numeric `USER` (`65532`) instead; `username` is intended for host installs that
+start the daemon as root.
 | Healthcheck | `dns-rs healthcheck` (no shell or `dig` needed) |
 | Size | measured 2026-11-20 with `docker image inspect`: about 9.4 MB (9.0 MiB) on disk for `amd64` and 8.0 MB (7.6 MiB) for `arm64`; compressed transfer was about 3.0 MB and 2.8 MB. CI enforces a 10 MiB uncompressed limit; measure your own image rather than treating these figures as fixed. |
 

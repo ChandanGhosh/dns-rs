@@ -101,8 +101,8 @@ The most important gaps are:
 - No RPZ, DNS64, response-IP filtering, or DoQ.
 - No `unbound-control` protocol; the control socket uses a small JSON protocol.
 - Auth zones load zonefiles only; there is no AXFR or URL fetch.
-- No privilege drop, `chroot`, daemonization, PID file, or syslog. A supervisor
-  owns those responsibilities.
+- No `chroot`, daemonization, PID file, log file, or syslog. `username`
+  privilege drop is supported on Unix; a supervisor owns the rest.
 - No HTTP metrics endpoint. Counters are available through the control socket.
 - No Unbound `.rpl` replay harness; its design is documented but not implemented.
 - Configuration reload cannot change listeners, TLS files, thread count,

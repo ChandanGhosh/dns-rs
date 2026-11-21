@@ -9,6 +9,8 @@ mod edns;
 mod local;
 mod phase;
 mod pipeline;
+#[cfg(unix)]
+mod privilege;
 mod ratelimit;
 #[cfg(target_os = "linux")]
 mod recv_batch;
@@ -53,6 +55,17 @@ pub enum ServerError {
     #[cfg(unix)]
     #[error("control socket error: {0}")]
     Control(#[from] dns_control::ControlError),
+    /// The configured `username` could not be resolved or applied.
+    #[cfg(unix)]
+    #[error("privilege drop failed: {0}")]
+    Privilege(String),
+}
+
+#[cfg(unix)]
+impl From<privilege::PrivilegeError> for ServerError {
+    fn from(error: privilege::PrivilegeError) -> Self {
+        Self::Privilege(error.to_string())
+    }
 }
 
 /// Run the server until the shutdown token is cancelled.
@@ -94,6 +107,21 @@ async fn serve_inner(
     config_path: Option<PathBuf>,
     shutdown: CancellationToken,
 ) -> Result<(), ServerError> {
+    // Resolve the target account before any socket is bound so a typo in
+    // `username` fails startup while the process is still privileged. The
+    // switch itself happens after listeners and the control socket exist.
+    #[cfg(unix)]
+    let target_user = config
+        .server
+        .username
+        .as_deref()
+        .map(privilege::TargetUser::resolve)
+        .transpose()?;
+    #[cfg(not(unix))]
+    if config.server.username.is_some() {
+        warn!("server.username is only supported on Unix; privileges will not be dropped");
+    }
+
     let pipeline = PipelineHandle::new(Arc::clone(&config));
     #[cfg(unix)]
     let reloader = config_path.map(|path| reload::Reloader::new(path, pipeline.clone()));
@@ -381,19 +409,20 @@ async fn serve_inner(
         }
     }
 
-    // Bind after the DNS listeners so a bad control path fails startup. When
-    // TODO(#5) implements privilege drop, move this bind after the drop (or
-    // chown the socket to the target user), otherwise the 0600 root-owned path
-    // is unusable by the unprivileged daemon.
+    // Bind after the DNS listeners so a bad control path fails startup. The
+    // socket is created as root and handed to the target user below; creating
+    // it after the drop would fail for the usual root-owned `/run` directory.
     #[cfg(unix)]
-    if config.remote_control.enabled {
+    let control_paths = if config.remote_control.enabled {
         control::start(
             &config.remote_control,
             pipeline.clone(),
             reloader.clone(),
             shutdown.clone(),
-        )?;
-    }
+        )?
+    } else {
+        Vec::new()
+    };
     #[cfg(not(unix))]
     if config.remote_control.enabled {
         warn!("remote-control is only supported on Unix; control socket not started");
@@ -404,16 +433,26 @@ async fn serve_inner(
         spawn_hangup_handler(reloader, hangup, shutdown.clone());
     }
 
-    // TODO(#5): Drop privileges to the configured user.
-    // The `username` config field is parsed in dns-config but the setuid/
-    // setgid implementation is pending (requires root + nix user feature).
-    // For now, log a warning so operators know the setting is active but
-    // not effective. Unbound-like behavior: full privilege-drop is a future
-    // improvement.
-    if config.server.username.is_some() {
-        warn!(
-            "server.username is configured but privilege-drop is not yet implemented;
-             run as root and configure appropriate setuid hooks for Unbound-like behavior"
+    #[cfg(unix)]
+    if let Some(target) = &target_user {
+        if target.is_root() {
+            warn!("server.username resolves to root; privileges will not be reduced");
+        }
+        // The control socket was created with the daemon's original euid. Hand
+        // it, and the RFC 5011 state file that the background probe rewrites,
+        // to the target account before the switch.
+        for path in &control_paths {
+            target.ensure_owner(path)?;
+        }
+        if let Some(path) = &config.server.auto_trust_anchor_file
+            && path.exists()
+        {
+            target.ensure_owner(path)?;
+        }
+        target.drop_privileges()?;
+        info!(
+            user = target.display_name(),
+            "dropped privileges; listeners and control socket keep their bound resources"
         );
     }
     if listeners.is_empty() {
@@ -479,8 +518,23 @@ fn tcp_capacity(config: &Config) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::tcp_capacity;
+    use std::sync::Arc;
+
     use dns_config::{Config, ThreadCount};
+    use tokio_util::sync::CancellationToken;
+
+    use super::{ServerError, serve, tcp_capacity};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unknown_username_fails_before_binding() {
+        let mut config = Config::default();
+        config.server.username = Some(format!("dns-rs-no-such-user-{}", std::process::id()));
+        let error = serve(Arc::new(config), CancellationToken::new())
+            .await
+            .expect_err("an unknown user must fail startup");
+        assert!(matches!(error, ServerError::Privilege(_)), "{error:?}");
+    }
 
     #[test]
     fn tcp_capacity_is_per_thread_and_can_be_disabled() {

@@ -5,6 +5,7 @@
 //! executes code and no command that takes a filesystem path: a reload can only
 //! read the file the daemon was started with.
 
+use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 use std::time::Instant;
@@ -85,17 +86,23 @@ fn snapshot(stats: PipelineStats) -> StatsSnapshot {
 /// Bind every configured control socket and serve it until shutdown.
 ///
 /// All paths are bound before any server task starts, so one bad path fails
-/// startup without leaving a partially active control channel.
+/// startup without leaving a partially active control channel. The bound paths
+/// are returned so the caller can hand them to the target user before dropping
+/// privileges.
 pub(crate) fn start(
     config: &RemoteControlConfig,
     pipeline: PipelineHandle,
     reloader: Option<Reloader>,
     shutdown: CancellationToken,
-) -> Result<(), ControlError> {
+) -> Result<Vec<PathBuf>, ControlError> {
     let mut servers = Vec::with_capacity(config.interfaces.len());
     for path in &config.interfaces {
         servers.push((path.clone(), Server::bind(path)?));
     }
+    let paths = servers
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
 
     let service = Arc::new(Service {
         pipeline,
@@ -113,7 +120,7 @@ pub(crate) fn start(
             }
         });
     }
-    Ok(())
+    Ok(paths)
 }
 
 #[cfg(test)]

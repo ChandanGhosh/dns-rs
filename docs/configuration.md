@@ -153,8 +153,26 @@ Differences that need an operator decision are collected in
 [Unbound compatibility](unbound-compatibility.md), and a migration walkthrough
 is in [Unbound migration](unbound-migration.md). The compatibility guide also
 lists the process-management options that are parsed but not applied:
-`username`, `chroot`, `directory`, `logfile`, `pidfile`, `use-syslog`, and
+`chroot`, `directory`, `logfile`, `pidfile`, `use-syslog`, and
 `do-daemonize`.
+
+### Privilege drop
+
+`username` is enforced on Unix. The daemon resolves the account before binding,
+creates the listeners and control socket with its original privileges, hands the
+control socket and an existing RFC 5011 state file to the target account, then
+drops supplementary groups, the primary group, and finally the user ID. The
+effective IDs are verified before startup continues, so a failed switch is
+fatal rather than a silent downgrade.
+
+This lets a root-started daemon bind port 53 and read root-owned TLS keys and
+trust anchors while serving queries unprivileged. The target account must still
+be able to read the configuration, TLS material, trust anchors, zonefiles, and
+any CA bundle for a later reload, and must be able to write the directory that
+holds `auto_trust_anchor_file`. The `scratch` container has no user database, so
+`username` cannot be resolved there; run the container as a non-root user
+through the container runtime instead. `chroot`, `directory`, `logfile`,
+`pidfile`, `use-syslog`, and `do-daemonize` remain parsed but unapplied.
 
 ## Choosing an upstream model
 

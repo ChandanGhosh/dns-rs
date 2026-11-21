@@ -61,10 +61,11 @@ See [Container publishing](container-publishing.md) for the full tag policy.
 
 ## Host service (systemd)
 
-The daemon stays in the foreground, logs to standard output, and never
-daemonizes or changes user by itself. A service manager should own those
-concerns. An example
-unit is provided at
+The daemon stays in the foreground and logs to standard output. It does not
+daemonize; if started as root it can drop to the configured `username` after
+binding its sockets, but the recommended unit runs it as an unprivileged user
+from the start. A service manager should own the remaining process concerns. An
+example unit is provided at
 [`packaging/systemd/dns-rs.service`](../packaging/systemd/dns-rs.service).
 
 ```bash
