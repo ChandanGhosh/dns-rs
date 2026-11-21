@@ -35,7 +35,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-pub use pipeline::{PipelineHandle, PipelineStats, QueryPipeline, Transport};
+pub use pipeline::{PipelineHandle, PipelineStats, QueryPipeline, QueryStats, Transport};
 
 /// Start the `stats phases ...` reporter used by the benchmark runner.
 /// Only exists in `phase-stats` builds.

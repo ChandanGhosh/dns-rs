@@ -12,6 +12,7 @@ use dns_cache::{
     response_ttl, wire_has_opt,
 };
 use dns_config::{Config, ForwardTarget};
+use dns_control::{TransportCounts, UpstreamStats};
 use dns_dnssec::{AutoTrustAnchor, AutoTrustError, TrustStore, root_trust_anchor, unix_now};
 use dns_iter::{
     BogusReason, CookieJar, ForwardServer, ForwardTransport, ForwardZone, IteratorConfig,
@@ -36,6 +37,17 @@ const RRSET_CACHE_ENTRIES: u64 = 16_384;
 const MAX_GLOBAL_INFLIGHT: usize = 8_192;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOWER_TIMEOUT: Duration = Duration::from_secs(11);
+/// Bounds the per-upstream section of a stats response so it fits the control
+/// socket's response limit even with a large infrastructure cache.
+const MAX_REPORTED_UPSTREAMS: usize = 64;
+
+/// Labels matching [`Transport::index`], used in Prometheus output.
+const TRANSPORT_LABELS: [&str; 4] = ["udp", "tcp", "tls", "https"];
+/// Labels for the 4-bit wire response codes.
+const RCODE_LABELS: [&str; 16] = [
+    "noerror", "formerr", "servfail", "nxdomain", "notimp", "refused", "yxdomain", "yxrrset",
+    "nxrrset", "notauth", "notzone", "badvers", "badsig", "badkey", "badtime", "badmode",
+];
 
 /// Client transport, which controls truncation behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +56,17 @@ pub enum Transport {
     Tcp,
     Tls,
     Https,
+}
+
+impl Transport {
+    fn index(self) -> usize {
+        match self {
+            Self::Udp => 0,
+            Self::Tcp => 1,
+            Self::Tls => 2,
+            Self::Https => 3,
+        }
+    }
 }
 
 /// A resolved response plus an optional Extended DNS Error.
@@ -141,8 +164,130 @@ impl ResolutionJob {
     }
 }
 
-/// A point-in-time snapshot of pipeline counters.
+/// Point-in-time counts of client queries, replies, and validation outcomes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryStats {
+    /// All queries presented to the pipeline.
+    pub queries_total: u64,
+    /// Queries grouped by client transport.
+    pub by_transport: TransportCounts,
+    /// Encoded client replies produced by the pipeline.
+    pub responses_total: u64,
+    /// Replies by 4-bit wire response code.
+    pub by_rcode: [u64; 16],
+    /// Replies with the TC bit set.
+    pub truncated: u64,
+    /// Replies carrying an Extended DNS Error option.
+    pub ede: u64,
+    /// Replies with the AD bit set.
+    pub ad: u64,
+    /// Resolutions validated as secure.
+    pub dnssec_secure: u64,
+    /// Resolutions validated as insecure.
+    pub dnssec_insecure: u64,
+    /// Resolutions validated as bogus.
+    pub dnssec_bogus: u64,
+}
+
+/// Lock-free counters incremented on the query path.
+///
+/// Relaxed ordering is sufficient because no query-path decision reads these
+/// values; they are only sampled for reporting.
+#[derive(Debug)]
+pub(crate) struct QueryCounters {
+    queries_total: AtomicU64,
+    by_transport: [AtomicU64; 4],
+    responses_total: AtomicU64,
+    by_rcode: [AtomicU64; 16],
+    truncated: AtomicU64,
+    ede: AtomicU64,
+    ad: AtomicU64,
+    dnssec_secure: AtomicU64,
+    dnssec_insecure: AtomicU64,
+    dnssec_bogus: AtomicU64,
+}
+
+impl Default for QueryCounters {
+    fn default() -> Self {
+        Self {
+            queries_total: AtomicU64::new(0),
+            by_transport: std::array::from_fn(|_| AtomicU64::new(0)),
+            responses_total: AtomicU64::new(0),
+            by_rcode: std::array::from_fn(|_| AtomicU64::new(0)),
+            truncated: AtomicU64::new(0),
+            ede: AtomicU64::new(0),
+            ad: AtomicU64::new(0),
+            dnssec_secure: AtomicU64::new(0),
+            dnssec_insecure: AtomicU64::new(0),
+            dnssec_bogus: AtomicU64::new(0),
+        }
+    }
+}
+
+impl QueryCounters {
+    /// Count one query arriving on `transport`.
+    fn query(&self, transport: Transport) {
+        self.queries_total.fetch_add(1, Ordering::Relaxed);
+        self.by_transport[transport.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one encoded reply from its wire header.
+    ///
+    /// Reading the header avoids decoding a message on the hot path. `ede` is
+    /// supplied by the caller because the option lives in the OPT record.
+    fn reply(&self, wire: &[u8], ede: bool) {
+        self.responses_total.fetch_add(1, Ordering::Relaxed);
+        if wire.len() < 4 {
+            return;
+        }
+        if wire[2] & 0x02 != 0 {
+            self.truncated.fetch_add(1, Ordering::Relaxed);
+        }
+        if wire[3] & 0x20 != 0 {
+            self.ad.fetch_add(1, Ordering::Relaxed);
+        }
+        self.by_rcode[usize::from(wire[3] & 0x0f)].fetch_add(1, Ordering::Relaxed);
+        if ede {
+            self.ede.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Count one DNSSEC validation outcome.
+    fn dnssec(&self, security: &Security) {
+        let counter = match security {
+            Security::Secure => &self.dnssec_secure,
+            Security::Insecure => &self.dnssec_insecure,
+            Security::Bogus(_) => &self.dnssec_bogus,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> QueryStats {
+        QueryStats {
+            queries_total: self.queries_total.load(Ordering::Relaxed),
+            by_transport: TransportCounts {
+                udp: self.by_transport[0].load(Ordering::Relaxed),
+                tcp: self.by_transport[1].load(Ordering::Relaxed),
+                tls: self.by_transport[2].load(Ordering::Relaxed),
+                https: self.by_transport[3].load(Ordering::Relaxed),
+            },
+            responses_total: self.responses_total.load(Ordering::Relaxed),
+            by_rcode: self
+                .by_rcode
+                .each_ref()
+                .map(|counter| counter.load(Ordering::Relaxed)),
+            truncated: self.truncated.load(Ordering::Relaxed),
+            ede: self.ede.load(Ordering::Relaxed),
+            ad: self.ad.load(Ordering::Relaxed),
+            dnssec_secure: self.dnssec_secure.load(Ordering::Relaxed),
+            dnssec_insecure: self.dnssec_insecure.load(Ordering::Relaxed),
+            dnssec_bogus: self.dnssec_bogus.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A point-in-time snapshot of pipeline counters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineStats {
     /// Message-cache hit, miss, and stale-hit counters.
     pub cache: CacheStats,
@@ -152,6 +297,12 @@ pub struct PipelineStats {
     pub prefetches: u64,
     /// Single-flight coalescing counters (leaders, followers, abandoned).
     pub coalesce: CoalesceStats,
+    /// Query, reply, and validation counters.
+    pub queries: QueryStats,
+    /// Most recently used upstream servers.
+    pub upstreams: Vec<UpstreamStats>,
+    /// Upstream servers omitted because the report is bounded.
+    pub upstreams_omitted: usize,
 }
 
 impl PipelineStats {
@@ -215,6 +366,168 @@ impl PipelineStats {
              # TYPE dns_rs_coalesce_abandoned_total counter\n\
              dns_rs_coalesce_abandoned_total {}",
             self.coalesce.abandoned
+        );
+
+        let queries = &self.queries;
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_queries_total Client queries presented to the pipeline.\n\
+             # TYPE dns_rs_queries_total counter\n\
+             dns_rs_queries_total {}",
+            queries.queries_total
+        );
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_queries_by_transport_total Client queries by transport.\n\
+             # TYPE dns_rs_queries_by_transport_total counter"
+        );
+        let by_transport = [
+            queries.by_transport.udp,
+            queries.by_transport.tcp,
+            queries.by_transport.tls,
+            queries.by_transport.https,
+        ];
+        for (label, count) in TRANSPORT_LABELS.iter().zip(by_transport) {
+            let _ = writeln!(
+                output,
+                "dns_rs_queries_by_transport_total{{transport=\"{label}\"}} {count}"
+            );
+        }
+
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_responses_total Encoded client replies.\n\
+             # TYPE dns_rs_responses_total counter\n\
+             dns_rs_responses_total {}",
+            queries.responses_total
+        );
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_responses_by_rcode_total Client replies by response code.\n\
+             # TYPE dns_rs_responses_by_rcode_total counter"
+        );
+        for (label, count) in RCODE_LABELS.iter().zip(queries.by_rcode) {
+            let _ = writeln!(
+                output,
+                "dns_rs_responses_by_rcode_total{{rcode=\"{label}\"}} {count}"
+            );
+        }
+        for (name, help, value) in [
+            (
+                "dns_rs_responses_truncated_total",
+                "Replies with the TC bit set.",
+                queries.truncated,
+            ),
+            (
+                "dns_rs_responses_ede_total",
+                "Replies carrying an Extended DNS Error option.",
+                queries.ede,
+            ),
+            (
+                "dns_rs_responses_ad_total",
+                "Replies with the AD bit set.",
+                queries.ad,
+            ),
+        ] {
+            let _ = writeln!(
+                output,
+                "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}"
+            );
+        }
+
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_dnssec_validations_total DNSSEC validation outcomes.\n\
+             # TYPE dns_rs_dnssec_validations_total counter"
+        );
+        for (label, count) in [
+            ("secure", queries.dnssec_secure),
+            ("insecure", queries.dnssec_insecure),
+            ("bogus", queries.dnssec_bogus),
+        ] {
+            let _ = writeln!(
+                output,
+                "dns_rs_dnssec_validations_total{{result=\"{label}\"}} {count}"
+            );
+        }
+
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_upstream_rtt_seconds Smoothed upstream round-trip time.\n\
+             # TYPE dns_rs_upstream_rtt_seconds gauge"
+        );
+        for upstream in &self.upstreams {
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_rtt_seconds{{server=\"{}\"}} {:.6}",
+                upstream.address,
+                upstream.rtt_ms as f64 / 1_000.0
+            );
+        }
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_upstream_timeouts_total Consecutive timeouts per upstream.\n\
+             # TYPE dns_rs_upstream_timeouts_total counter"
+        );
+        for upstream in &self.upstreams {
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_timeouts_total{{server=\"{}\"}} {}",
+                upstream.address, upstream.timeouts
+            );
+        }
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_upstream_failures_total Consecutive non-timeout failures per upstream.\n\
+             # TYPE dns_rs_upstream_failures_total counter"
+        );
+        for upstream in &self.upstreams {
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_failures_total{{server=\"{}\"}} {}",
+                upstream.address, upstream.failures
+            );
+        }
+        for (name, help) in [
+            (
+                "dns_rs_upstream_lame",
+                "Whether an upstream is marked lame.",
+            ),
+            (
+                "dns_rs_upstream_backed_off",
+                "Whether an upstream is inside its retry backoff window.",
+            ),
+            (
+                "dns_rs_upstream_caps_ok",
+                "Whether an upstream preserves QNAME case.",
+            ),
+        ] {
+            let _ = writeln!(output, "# HELP {name} {help}\n# TYPE {name} gauge");
+        }
+        for upstream in &self.upstreams {
+            let server = &upstream.address;
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_lame{{server=\"{server}\"}} {}",
+                u8::from(upstream.lame)
+            );
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_backed_off{{server=\"{server}\"}} {}",
+                u8::from(upstream.backed_off)
+            );
+            let _ = writeln!(
+                output,
+                "dns_rs_upstream_caps_ok{{server=\"{server}\"}} {}",
+                u8::from(upstream.caps_ok)
+            );
+        }
+        let _ = writeln!(
+            output,
+            "# HELP dns_rs_upstreams_omitted Upstream servers not reported.\n\
+             # TYPE dns_rs_upstreams_omitted gauge\n\
+             dns_rs_upstreams_omitted {}",
+            self.upstreams_omitted
         );
         output
     }
@@ -364,6 +677,8 @@ pub struct QueryPipeline {
     cookies: CookieJar,
     rate_limiter: RateLimiter,
     concurrency: ClientConcurrency,
+    counters: Arc<QueryCounters>,
+    infra: Arc<InfraCache>,
     prefetch: bool,
     serve_expired: bool,
     stale_reply_ttl: u32,
@@ -705,6 +1020,8 @@ impl QueryPipeline {
                 config.server.max_concurrent_queries_per_client,
                 MAX_GLOBAL_INFLIGHT,
             ),
+            counters: Arc::new(QueryCounters::default()),
+            infra,
             prefetch: config.server.prefetch,
             serve_expired: config.server.serve_expired,
             stale_reply_ttl: config.server.serve_expired_reply_ttl,
@@ -723,13 +1040,28 @@ impl QueryPipeline {
         }
     }
 
-    /// Return a snapshot of cache, refresh, and coalescing counters.
+    /// Return a snapshot of cache, query, and upstream counters.
     pub fn stats(&self) -> PipelineStats {
+        let (upstreams, upstreams_omitted) = self.infra.snapshot(MAX_REPORTED_UPSTREAMS);
         PipelineStats {
             cache: self.messages.stats(),
             cache_entries: self.messages.entry_count(),
             prefetches: self.prefetches.load(Ordering::Relaxed),
             coalesce: self.registry.stats(),
+            queries: self.counters.snapshot(),
+            upstreams: upstreams
+                .into_iter()
+                .map(|entry| UpstreamStats {
+                    address: entry.address.to_string(),
+                    rtt_ms: u64::try_from(entry.rtt.as_millis()).unwrap_or(u64::MAX),
+                    timeouts: u64::from(entry.timeouts),
+                    failures: u64::from(entry.failures),
+                    lame: entry.lame,
+                    backed_off: entry.backed_off,
+                    caps_ok: entry.caps_ok,
+                })
+                .collect(),
+            upstreams_omitted,
         }
     }
 
@@ -796,6 +1128,7 @@ impl QueryPipeline {
         reply_pool: &mut Vec<Vec<u8>>,
     ) -> Prepared {
         let started = Instant::now();
+        self.counters.query(transport);
         let decode_timer = PhaseTimer::start(Phase::Decode);
         let mut request = match decode(bytes) {
             Ok(message) => message,
@@ -1040,6 +1373,7 @@ impl QueryPipeline {
         };
 
         if request.edns.is_none() && wire.len() <= limit {
+            self.counters.reply(&wire, false);
             return Some(wire);
         }
 
@@ -1059,6 +1393,7 @@ impl QueryPipeline {
                 self.config.server.max_udp_size.max(512),
                 edns::dnssec_ok(request),
             ) {
+                self.counters.reply(&wire, false);
                 return Some(wire);
             }
             let message = Message::from_vec(&wire).ok()?;
@@ -1147,6 +1482,7 @@ impl QueryPipeline {
                         let cacheable =
                             !checking_disabled && !matches!(resolved.security, Security::Bogus(_));
                         let security = resolved.security.clone();
+                        self.counters.dnssec(&security);
                         let (mut message, ede) =
                             self.prepare_response(resolved, &query.name, checking_disabled);
                         // Answer with the client's exact question bytes:
@@ -1360,6 +1696,7 @@ impl QueryPipeline {
         if patchable
             && let Some(reply) = self.finalize_canonical(&wire, has_opt, request, transport)
         {
+            self.counters.reply(&reply, false);
             return Some(reply);
         }
 
@@ -1463,6 +1800,8 @@ impl QueryPipeline {
         }
         message.queries = request.queries.clone();
         message.edns = None;
+        // An EDE is only visible to the client when it sent EDNS(0).
+        let has_ede = request.edns.is_some() && ede.is_some();
 
         if request.edns.is_some() {
             let mut response_edns = Edns::new();
@@ -1489,7 +1828,7 @@ impl QueryPipeline {
         }
 
         let wire = encode(&message).ok()?;
-        match transport {
+        let reply = match transport {
             Transport::Tcp | Transport::Tls | Transport::Https => Some(wire),
             Transport::Udp => {
                 let advertised = self.config.server.max_udp_size.max(512);
@@ -1500,7 +1839,11 @@ impl QueryPipeline {
                     truncate(message, limit)
                 }
             }
+        };
+        if let Some(reply) = &reply {
+            self.counters.reply(reply, has_ede);
         }
+        reply
     }
 
     fn error(
@@ -1856,13 +2199,15 @@ mod tests {
     use std::time::Duration;
 
     use dns_config::{Config, ServerConfig};
+    use dns_control::UpstreamStats;
+    use dns_dnssec::{BogusReason, Security};
     use dns_proto::{
         CNAME, Edns, Message, MessageType, Name, OpCode, Query, RData, Record, RecordType,
         ResponseCode,
     };
     use dns_testutil::query_bytes;
 
-    use super::{QueryPipeline, Resolution, Transport};
+    use super::{PipelineStats, QueryCounters, QueryPipeline, Resolution, Transport};
 
     fn pipeline() -> QueryPipeline {
         QueryPipeline::new(Arc::new(Config::default()))
@@ -1886,6 +2231,90 @@ mod tests {
         // Dropping the last clone (a reload) releases the background work.
         drop(pipeline);
         assert!(lifetime.is_cancelled());
+    }
+
+    #[test]
+    fn counters_record_transport_rcode_flags_and_validation() {
+        let counters = QueryCounters::default();
+        counters.query(Transport::Udp);
+        counters.query(Transport::Udp);
+        counters.query(Transport::Tls);
+
+        let mut wire = [0_u8; 12];
+        wire[2] = 0x02;
+        wire[3] = 0x23;
+        counters.reply(&wire, true);
+        counters.dnssec(&Security::Secure);
+        counters.dnssec(&Security::Insecure);
+        counters.dnssec(&Security::Bogus(BogusReason::Signature));
+
+        let stats = counters.snapshot();
+        assert_eq!(stats.queries_total, 3);
+        assert_eq!(stats.by_transport.udp, 2);
+        assert_eq!(stats.by_transport.tls, 1);
+        assert_eq!(stats.responses_total, 1);
+        assert_eq!(stats.by_rcode[3], 1);
+        assert_eq!(stats.truncated, 1);
+        assert_eq!(stats.ad, 1);
+        assert_eq!(stats.ede, 1);
+        assert_eq!(stats.dnssec_secure, 1);
+        assert_eq!(stats.dnssec_insecure, 1);
+        assert_eq!(stats.dnssec_bogus, 1);
+    }
+
+    #[test]
+    fn prometheus_exposes_queries_and_upstreams() {
+        let mut stats = PipelineStats::default();
+        stats.queries.queries_total = 3;
+        stats.queries.by_transport.udp = 2;
+        stats.queries.by_rcode[3] = 1;
+        stats.upstreams.push(UpstreamStats {
+            address: "192.0.2.1:53".to_owned(),
+            rtt_ms: 12,
+            timeouts: 1,
+            failures: 2,
+            lame: false,
+            backed_off: true,
+            caps_ok: true,
+        });
+        stats.upstreams_omitted = 4;
+
+        let text = stats.render_prometheus();
+        assert!(text.contains("dns_rs_queries_total 3"), "{text}");
+        assert!(
+            text.contains("dns_rs_queries_by_transport_total{transport=\"udp\"} 2"),
+            "{text}"
+        );
+        assert!(
+            text.contains("dns_rs_responses_by_rcode_total{rcode=\"nxdomain\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("dns_rs_upstream_rtt_seconds{server=\"192.0.2.1:53\"} 0.012000"),
+            "{text}"
+        );
+        assert!(text.contains("dns_rs_upstream_backed_off{server=\"192.0.2.1:53\"} 1"));
+        assert!(text.contains("dns_rs_upstreams_omitted 4"));
+    }
+
+    #[tokio::test]
+    async fn handling_a_query_updates_the_pipeline_counters() {
+        let pipeline = pipeline();
+        let bytes = query_bytes("localhost.", RecordType::A);
+        let response = pipeline
+            .handle(&bytes, client(), Transport::Udp)
+            .await
+            .expect("response");
+        assert!(response.len() >= 4);
+
+        let stats = pipeline.stats();
+        assert_eq!(stats.queries.queries_total, 1);
+        assert_eq!(stats.queries.by_transport.udp, 1);
+        assert_eq!(stats.queries.responses_total, 1);
+        assert_eq!(
+            stats.queries.by_rcode[usize::from(ResponseCode::NoError.low())],
+            1
+        );
     }
 
     #[tokio::test]

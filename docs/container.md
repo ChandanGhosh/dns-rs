@@ -862,12 +862,23 @@ configuration entirely.
 | `coalesce_leaders` | `dns_rs_coalesce_leaders_total` | Queries that started an upstream resolution |
 | `coalesce_followers` | `dns_rs_coalesce_followers_total` | Queries that joined an in-flight resolution |
 | `coalesce_abandoned` | `dns_rs_coalesce_abandoned_total` | Leaders dropped before publishing a result |
+| `queries_total` | `dns_rs_queries_total` | Queries presented to the pipeline |
+| `queries_by_transport` | `dns_rs_queries_by_transport_total{transport=...}` | Queries by UDP, TCP, TLS, or HTTPS |
+| `responses_total` | `dns_rs_responses_total` | Encoded client replies |
+| `responses_by_rcode` | `dns_rs_responses_by_rcode_total{rcode=...}` | Replies by 4-bit response code |
+| `responses_truncated` | `dns_rs_responses_truncated_total` | Replies with the TC bit set |
+| `responses_ede` | `dns_rs_responses_ede_total` | Replies carrying an Extended DNS Error |
+| `responses_ad` | `dns_rs_responses_ad_total` | Replies with the AD bit set |
+| `dnssec_secure` / `dnssec_insecure` / `dnssec_bogus` | `dns_rs_dnssec_validations_total{result=...}` | DNSSEC validation outcomes |
+| `upstreams` | `dns_rs_upstream_rtt_seconds{server=...}` and related gauges | Per-upstream RTT, timeouts, failures, lameness, backoff, and DNS 0x20 state |
+| `upstreams_omitted` | `dns_rs_upstreams_omitted` | Upstreams left out of the bounded report |
 
-Every field is a process-lifetime counter except `cache_entries`, and all reset
-when the process restarts. `status` reports control uptime, so a value that
-stays flat or resets is the quickest confirmation of a restart loop. These are
-pipeline counters only: there are no per-client, per-upstream, or RTT
-breakdowns, and cache capacity is measured in entries rather than bytes.
+Every counter field resets when the process restarts or the pipeline is
+replaced on reload. `status` reports control uptime, so a value that stays flat
+or resets is the quickest confirmation of a restart loop. The upstream section
+covers the 64 most recently used servers; `upstreams_omitted` reports any that
+did not fit. Cache capacity is measured in entries rather than bytes, and there
+is no per-client breakdown.
 
 ### Prometheus
 

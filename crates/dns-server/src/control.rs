@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use dns_config::RemoteControlConfig;
 use dns_control::{
-    ControlError, ControlService, PROTOCOL_VERSION, ReloadFuture, Server, StatsSnapshot, StatusInfo,
+    ControlError, ControlService, PROTOCOL_VERSION, ReloadFuture, Server, StatsSnapshot,
+    StatusInfo, TransportCounts,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -80,6 +81,23 @@ fn snapshot(stats: PipelineStats) -> StatsSnapshot {
         coalesce_leaders: stats.coalesce.leaders,
         coalesce_followers: stats.coalesce.followers,
         coalesce_abandoned: stats.coalesce.abandoned,
+        queries_total: stats.queries.queries_total,
+        queries_by_transport: TransportCounts {
+            udp: stats.queries.by_transport.udp,
+            tcp: stats.queries.by_transport.tcp,
+            tls: stats.queries.by_transport.tls,
+            https: stats.queries.by_transport.https,
+        },
+        responses_total: stats.queries.responses_total,
+        responses_by_rcode: stats.queries.by_rcode,
+        responses_truncated: stats.queries.truncated,
+        responses_ede: stats.queries.ede,
+        responses_ad: stats.queries.ad,
+        dnssec_secure: stats.queries.dnssec_secure,
+        dnssec_insecure: stats.queries.dnssec_insecure,
+        dnssec_bogus: stats.queries.dnssec_bogus,
+        upstreams: stats.upstreams,
+        upstreams_omitted: stats.upstreams_omitted,
     }
 }
 
@@ -126,8 +144,10 @@ pub(crate) fn start(
 #[cfg(test)]
 mod tests {
     use dns_cache::{CacheStats, CoalesceStats};
+    use dns_control::{TransportCounts, UpstreamStats};
 
-    use super::{PipelineStats, StatsSnapshot, snapshot};
+    use super::{PipelineStats, snapshot};
+    use crate::pipeline::QueryStats;
 
     #[test]
     fn maps_pipeline_counters_without_losing_fields() {
@@ -144,19 +164,57 @@ mod tests {
                 followers: 7,
                 abandoned: 8,
             },
+            queries: QueryStats {
+                queries_total: 9,
+                by_transport: TransportCounts {
+                    udp: 10,
+                    tcp: 11,
+                    tls: 12,
+                    https: 13,
+                },
+                responses_total: 14,
+                by_rcode: [15; 16],
+                truncated: 16,
+                ede: 17,
+                ad: 18,
+                dnssec_secure: 19,
+                dnssec_insecure: 20,
+                dnssec_bogus: 21,
+            },
+            upstreams: vec![UpstreamStats {
+                address: "192.0.2.1:53".to_owned(),
+                rtt_ms: 22,
+                timeouts: 23,
+                failures: 24,
+                lame: false,
+                backed_off: true,
+                caps_ok: true,
+            }],
+            upstreams_omitted: 25,
         };
+        let mapped = snapshot(stats);
+        assert_eq!(mapped.queries_total, 9);
         assert_eq!(
-            snapshot(stats),
-            StatsSnapshot {
-                cache_hits: 1,
-                cache_misses: 2,
-                cache_stale_hits: 3,
-                cache_entries: 4,
-                prefetches: 5,
-                coalesce_leaders: 6,
-                coalesce_followers: 7,
-                coalesce_abandoned: 8,
+            mapped.queries_by_transport,
+            TransportCounts {
+                udp: 10,
+                tcp: 11,
+                tls: 12,
+                https: 13,
             }
         );
+        assert_eq!(mapped.responses_total, 14);
+        assert_eq!(mapped.responses_by_rcode, [15; 16]);
+        assert_eq!(mapped.responses_truncated, 16);
+        assert_eq!(mapped.responses_ede, 17);
+        assert_eq!(mapped.responses_ad, 18);
+        assert_eq!(mapped.dnssec_secure, 19);
+        assert_eq!(mapped.dnssec_insecure, 20);
+        assert_eq!(mapped.dnssec_bogus, 21);
+        assert_eq!(mapped.upstreams.len(), 1);
+        assert_eq!(mapped.upstreams[0].rtt_ms, 22);
+        assert_eq!(mapped.upstreams_omitted, 25);
+        assert_eq!(mapped.cache_hits, 1);
+        assert_eq!(mapped.coalesce_abandoned, 8);
     }
 }

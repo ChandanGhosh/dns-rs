@@ -323,7 +323,7 @@ async fn serve_connection(
 async fn dispatch(service: &dyn ControlService, command: ControlCommand) -> ControlResponse {
     match command {
         ControlCommand::Status => ControlResponse::Status(service.status()),
-        ControlCommand::Stats => ControlResponse::Stats(service.stats()),
+        ControlCommand::Stats => ControlResponse::Stats(Box::new(service.stats())),
         ControlCommand::StatsPrometheus => ControlResponse::Prometheus {
             text: service.prometheus(),
         },
@@ -566,10 +566,10 @@ mod tests {
         let response = exchange(&path, b"{\"command\":\"stats\"}\n").await;
         assert_eq!(
             response,
-            ControlResponse::Stats(StatsSnapshot {
+            ControlResponse::Stats(Box::new(StatsSnapshot {
                 cache_hits: 11,
                 ..StatsSnapshot::default()
-            })
+            }))
         );
 
         shutdown.cancel();

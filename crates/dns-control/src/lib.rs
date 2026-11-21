@@ -71,8 +71,40 @@ pub struct StatusInfo {
     pub protocol: u32,
 }
 
-/// Point-in-time pipeline counters returned by [`ControlCommand::Stats`].
+/// Client queries grouped by the transport they arrived on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportCounts {
+    /// Plain DNS over UDP.
+    pub udp: u64,
+    /// Plain DNS over TCP.
+    pub tcp: u64,
+    /// DNS over TLS.
+    pub tls: u64,
+    /// DNS over HTTPS.
+    pub https: u64,
+}
+
+/// Point-in-time state of one upstream server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamStats {
+    /// Address the resolver sends queries to.
+    pub address: String,
+    /// Smoothed round-trip time in milliseconds.
+    pub rtt_ms: u64,
+    /// Consecutive timeouts recorded for this server.
+    pub timeouts: u64,
+    /// Consecutive non-timeout failures recorded for this server.
+    pub failures: u64,
+    /// Whether the server is currently marked lame.
+    pub lame: bool,
+    /// Whether the server is inside its retry backoff window.
+    pub backed_off: bool,
+    /// Whether the server preserves QNAME case (DNS 0x20).
+    pub caps_ok: bool,
+}
+
+/// Point-in-time pipeline counters returned by [`ControlCommand::Stats`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsSnapshot {
     /// Message-cache hits.
     pub cache_hits: u64,
@@ -90,6 +122,30 @@ pub struct StatsSnapshot {
     pub coalesce_followers: u64,
     /// Leaders dropped without publishing.
     pub coalesce_abandoned: u64,
+    /// All queries presented to the pipeline.
+    pub queries_total: u64,
+    /// Queries grouped by client transport.
+    pub queries_by_transport: TransportCounts,
+    /// Encoded client replies produced by the pipeline.
+    pub responses_total: u64,
+    /// Replies by response code, indexed by the 4-bit wire rcode.
+    pub responses_by_rcode: [u64; 16],
+    /// Replies with the TC bit set.
+    pub responses_truncated: u64,
+    /// Replies carrying an Extended DNS Error option.
+    pub responses_ede: u64,
+    /// Replies with the AD bit set.
+    pub responses_ad: u64,
+    /// Resolutions validated as secure.
+    pub dnssec_secure: u64,
+    /// Resolutions validated as insecure.
+    pub dnssec_insecure: u64,
+    /// Resolutions validated as bogus.
+    pub dnssec_bogus: u64,
+    /// Most recently used upstream servers.
+    pub upstreams: Vec<UpstreamStats>,
+    /// Upstream servers omitted because the report is bounded.
+    pub upstreams_omitted: usize,
 }
 
 /// One response line.
@@ -99,7 +155,10 @@ pub enum ControlResponse {
     /// Reply to [`ControlCommand::Status`].
     Status(StatusInfo),
     /// Reply to [`ControlCommand::Stats`].
-    Stats(StatsSnapshot),
+    ///
+    /// Boxed to keep the response enum small; the snapshot is only built when
+    /// a client asks for statistics.
+    Stats(Box<StatsSnapshot>),
     /// Reply to [`ControlCommand::StatsPrometheus`].
     Prometheus {
         /// Prometheus text exposition.
@@ -157,15 +216,13 @@ mod tests {
 
     #[test]
     fn responses_round_trip_as_one_line() {
-        let response = ControlResponse::Stats(StatsSnapshot {
+        let response = ControlResponse::Stats(Box::new(StatsSnapshot {
             cache_hits: 7,
             ..StatsSnapshot::default()
-        });
+        }));
         let encoded = serde_json::to_string(&response).expect("encode");
-        assert_eq!(
-            encoded,
-            r#"{"result":"stats","cache_hits":7,"cache_misses":0,"cache_stale_hits":0,"cache_entries":0,"prefetches":0,"coalesce_leaders":0,"coalesce_followers":0,"coalesce_abandoned":0}"#
-        );
+        assert!(encoded.starts_with(r#"{"result":"stats","cache_hits":7,"#));
+        assert!(encoded.contains(r#""responses_by_rcode":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]"#));
         let decoded: ControlResponse = serde_json::from_str(&encoded).expect("decode");
         assert_eq!(decoded, response);
     }

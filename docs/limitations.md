@@ -16,7 +16,7 @@ Last reviewed: 2026-11-20.
 | Process model | `username` privilege drop is implemented on Unix. No daemonization, `chroot`, PID file, log file, or syslog; those options are parsed for compatibility but not applied. | The supervisor owns the remaining process concerns. | Start as root with `username` set, or run unprivileged under systemd, Docker, or Kubernetes. |
 | Configuration | TOML has no `include:`. The Unbound parser supports a practical subset, not every option. | Large blocklists need either one generated TOML file or `.conf` with includes. | Prefer `.conf` for split generated files. |
 | Metrics | No HTTP metrics listener and no `/metrics` on the DNS port. Counters are available only through the control socket. | Prometheus needs an exec exporter or socket-side collector. | See [Operations](operations.md#statistics). |
-| Metrics detail | Counters are pipeline-wide. No per-client, per-upstream, or RTT breakdown, and caches are bounded by entry count rather than bytes. | Capacity planning relies on observation and reload testing. | Use `control stats`, logs, and host memory counters. |
+| Metrics detail | Counters cover transports, rcodes, truncation, EDE, DNSSEC outcomes, and the 64 most recently used upstreams with RTT and health state. No per-client breakdown; caches are bounded by entry count. | Long-tail upstreams beyond the report limit are not visible individually. | Use `control stats`, logs, and host memory counters. |
 | Replay | [`docs/replay-harness.md`](replay-harness.md) is a design document only. | No Unbound `.rpl` interop harness. | Use `dig`/`drill` and the local test suites. |
 
 ## DNSSEC details
