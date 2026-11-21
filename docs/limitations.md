@@ -17,7 +17,7 @@ Last reviewed: 2026-11-20.
 | Configuration | TOML has no `include:`. The Unbound parser supports a practical subset, not every option. | Large blocklists need either one generated TOML file or `.conf` with includes. | Prefer `.conf` for split generated files. |
 | Metrics | No HTTP metrics listener and no `/metrics` on the DNS port. Counters are available only through the control socket. | Prometheus needs an exec exporter or socket-side collector. | See [Operations](operations.md#statistics). |
 | Metrics detail | Counters cover transports, rcodes, truncation, EDE, DNSSEC outcomes, and the 64 most recently used upstreams with RTT and health state. No per-client breakdown; caches are bounded by entry count. | Long-tail upstreams beyond the report limit are not visible individually. | Use `control stats`, logs, and host memory counters. |
-| Replay | [`docs/replay-harness.md`](replay-harness.md) is a design document only. | No Unbound `.rpl` interop harness. | Use `dig`/`drill` and the local test suites. |
+| Replay | First-pass Unbound-style `.rpl` harness runs four bundled iterator scenarios. No upstream corpus, virtual time, cache manipulation, or DNSSEC replay. | Behavioral conformance coverage is limited to referrals, CNAMEs, NXDOMAIN, and UDP/TCP truncation. | Use `cargo test -p dns-replay`, `dig`/`drill`, and the local test suites. |
 
 ## DNSSEC details
 

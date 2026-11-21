@@ -1,0 +1,105 @@
+; CNAME chasing across two authoritative servers.
+
+CONFIG_END
+SCENARIO_BEGIN CNAME chain
+
+RANGE_BEGIN 0 100
+    ADDRESS 193.0.14.129
+    ENTRY_BEGIN
+        MATCH opcode subdomain
+        ADJUST copy_id copy_query
+        REPLY QR NOERROR
+        SECTION QUESTION
+        com. IN NS
+        SECTION AUTHORITY
+        com. IN NS ns.com.
+        SECTION ADDITIONAL
+        ns.com. IN A 192.5.6.30
+    ENTRY_END
+    ENTRY_BEGIN
+        MATCH opcode subdomain
+        ADJUST copy_id copy_query
+        REPLY QR NOERROR
+        SECTION QUESTION
+        net. IN NS
+        SECTION AUTHORITY
+        net. IN NS ns.net.
+        SECTION ADDITIONAL
+        ns.net. IN A 192.5.6.31
+    ENTRY_END
+RANGE_END
+
+RANGE_BEGIN 0 100
+    ADDRESS 192.5.6.30
+    ENTRY_BEGIN
+        MATCH opcode subdomain
+        ADJUST copy_id copy_query
+        REPLY QR NOERROR
+        SECTION QUESTION
+        example.com. IN NS
+        SECTION AUTHORITY
+        example.com. IN NS ns.example.com.
+        SECTION ADDITIONAL
+        ns.example.com. IN A 192.0.2.53
+    ENTRY_END
+RANGE_END
+
+RANGE_BEGIN 0 100
+    ADDRESS 192.0.2.53
+    ENTRY_BEGIN
+        MATCH opcode qtype qname
+        ADJUST copy_id copy_query
+        REPLY QR AA NOERROR
+        SECTION QUESTION
+        www.example.com. IN A
+        SECTION ANSWER
+        www.example.com. 60 IN CNAME target.example.net.
+    ENTRY_END
+RANGE_END
+
+RANGE_BEGIN 0 100
+    ADDRESS 192.5.6.31
+    ENTRY_BEGIN
+        MATCH opcode subdomain
+        ADJUST copy_id copy_query
+        REPLY QR NOERROR
+        SECTION QUESTION
+        example.net. IN NS
+        SECTION AUTHORITY
+        example.net. IN NS ns.example.net.
+        SECTION ADDITIONAL
+        ns.example.net. IN A 192.0.2.54
+    ENTRY_END
+RANGE_END
+
+RANGE_BEGIN 0 100
+    ADDRESS 192.0.2.54
+    ENTRY_BEGIN
+        MATCH opcode qtype qname
+        ADJUST copy_id copy_query
+        REPLY QR AA NOERROR
+        SECTION QUESTION
+        target.example.net. IN A
+        SECTION ANSWER
+        target.example.net. 60 IN A 192.0.2.11
+    ENTRY_END
+RANGE_END
+
+STEP 1 QUERY
+ENTRY_BEGIN
+SECTION QUESTION
+www.example.com. IN A
+ENTRY_END
+
+STEP 2 CHECK_ANSWER
+ENTRY_BEGIN
+MATCH all
+REPLY QR NOERROR
+SECTION QUESTION
+www.example.com. IN A
+SECTION ANSWER
+www.example.com. 60 IN CNAME target.example.net.
+target.example.net. 60 IN A 192.0.2.11
+ENTRY_END
+
+SCENARIO_END

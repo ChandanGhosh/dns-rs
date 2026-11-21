@@ -425,6 +425,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-replay"
+version = "0.6.0"
+dependencies = [
+ "dns-iter",
+ "dns-proto",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "dns-server"
 version = "0.6.0"
 dependencies = [

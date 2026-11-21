@@ -1,0 +1,39 @@
+; UDP truncation followed by a TCP retry against the same fake server.
+
+CONFIG_END
+SCENARIO_BEGIN UDP truncation and TCP retry
+
+RANGE_BEGIN 0 100
+    ADDRESS 193.0.14.129
+    ENTRY_BEGIN
+        MATCH opcode qtype qname
+        ADJUST copy_id copy_query
+        REPLY QR TC NOERROR
+        SECTION QUESTION
+        big.example.com. IN A
+        EXTRA_PACKET
+        REPLY QR AA NOERROR
+        SECTION QUESTION
+        big.example.com. IN A
+        SECTION ANSWER
+        big.example.com. 60 IN A 192.0.2.12
+    ENTRY_END
+RANGE_END
+
+STEP 1 QUERY
+ENTRY_BEGIN
+SECTION QUESTION
+big.example.com. IN A
+ENTRY_END
+
+STEP 2 CHECK_ANSWER
+ENTRY_BEGIN
+MATCH all
+REPLY QR NOERROR
+SECTION QUESTION
+big.example.com. IN A
+SECTION ANSWER
+big.example.com. 60 IN A 192.0.2.12
+ENTRY_END
+
+SCENARIO_END

@@ -12,6 +12,7 @@ members = [
     "crates/dns-control",
     "crates/dns-daemon",
     "crates/dns-testutil",
+    "crates/dns-replay",
 ]
 default-members = ["crates/dns-daemon"]
 

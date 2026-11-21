@@ -104,7 +104,9 @@ The most important gaps are:
 - No `chroot`, daemonization, PID file, log file, or syslog. `username`
   privilege drop is supported on Unix; a supervisor owns the rest.
 - No HTTP metrics endpoint. Counters are available through the control socket.
-- No Unbound `.rpl` replay harness; its design is documented but not implemented.
+- The Unbound-style `.rpl` replay harness is first-pass only: `cargo test` runs
+  four bundled iterator scenarios. The upstream corpus, virtual time, cache
+  manipulation, and DNSSEC replay are not implemented.
 - Configuration reload cannot change listeners, TLS files, thread count,
   socket buffers, control socket, or verbosity. Those require a restart.
 
