@@ -19,6 +19,7 @@ Summary:        Validating, recursive, caching DNS resolver
 License:        BSD-3-Clause
 URL:            https://github.com/ChandanGhosh/dns-rs
 Source0:        https://github.com/ChandanGhosh/dns-rs/releases/download/v%{version}/dns-rs-%{version}-linux-%{tarball_arch}.tar.gz
+Source1:        https://github.com/ChandanGhosh/dns-rs/releases/download/v%{version}/SHA256SUMS
 
 BuildRequires:  systemd-rpm-macros
 Requires:       systemd
@@ -30,6 +31,13 @@ Unbound-compatible configuration format, DNSSEC validation, and a local
 control socket. The systemd service binds port 53 as an unprivileged user.
 
 %prep
+# Verify the downloaded bundle against the checksums published with it.
+expected="$(awk -v f='dns-rs-%{version}-linux-%{tarball_arch}.tar.gz' '$2 == f { print $1 }' '%{SOURCE1}')"
+actual="$(sha256sum '%{SOURCE0}' | awk '{ print $1 }')"
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    echo "SHA256 mismatch for %{SOURCE0}" >&2
+    exit 1
+fi
 %setup -q -n dns-rs-%{version}-linux-%{tarball_arch}
 
 %install

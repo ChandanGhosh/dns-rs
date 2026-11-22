@@ -53,7 +53,8 @@ works across glibc versions without additional runtime packages.
 The recipes in [`packaging/`](../packaging/) produce installable `.deb` and
 `.rpm` packages from the release tarballs. They install the static binary, the
 default configuration as a conffile, the systemd unit, and a `dns-rs` system
-user. No Rust toolchain is needed on the build host.
+user. No Rust toolchain is needed on the build host. Both recipes verify the
+downloaded tarball against the release's `SHA256SUMS` before installing it.
 
 Official Debian and Fedora repositories are not targeted. Publish through a
 community build service or a signed repository you control.

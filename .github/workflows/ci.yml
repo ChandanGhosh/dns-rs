@@ -493,6 +493,7 @@ jobs:
                       printf -- '- `dns-rs-%s-linux-amd64.tar.gz`\n' "$VERSION"
                       printf -- '- `dns-rs-%s-linux-arm64.tar.gz`\n' "$VERSION"
                       printf -- '- `SHA256SUMS`\n\n'
+                      printf 'Verify a bundle with `sha256sum --check SHA256SUMS`.\n\n'
                       printf '## Container images\n\n'
                       printf 'Container images published for this release:\n\n'
                       printf -- '- `docker.io/chandanghosh/dns-rs:%s`\n' "$VERSION"

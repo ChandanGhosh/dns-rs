@@ -96,3 +96,5 @@ EOF
         (cd "$output_dir" && sha256sum "$name.tar.gz" >>SHA256SUMS)
     )
 done
+
+(cd "$output_dir" && sha256sum --check SHA256SUMS)
