@@ -6,4 +6,9 @@ if ! getent passwd dns-rs >/dev/null; then
         --shell /usr/sbin/nologin --group dns-rs
 fi
 
+chown root:dns-rs /etc/dns-rs/dns-rs.conf
+chmod 0640 /etc/dns-rs/dns-rs.conf
+chown dns-rs:dns-rs /var/lib/dns-rs
+chmod 0750 /var/lib/dns-rs
+
 #DEBHELPER#
