@@ -14,7 +14,7 @@
 %endif
 
 Name:           dns-rs
-Version:        0.6.2
+Version:        0.6.3
 Release:        1%{?dist}
 Summary:        Validating, recursive, caching DNS resolver
 
@@ -72,6 +72,9 @@ exit 0
 %systemd_postun_with_restart dns-rs.service
 
 %changelog
+* Sun Nov 22 2026 Chandan Ghosh <ckghosh1983@gmail.com> - 0.6.3-1
+- Publish prebuilt deb and rpm packages with each release.
+
 * Sun Nov 22 2026 Chandan Ghosh <ckghosh1983@gmail.com> - 0.6.2-1
 - Point the systemd unit at the packaged binary path.
 
