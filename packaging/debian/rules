@@ -23,6 +23,11 @@ override_dh_auto_install:
 	install -D -m 0644 dns-rs.service debian/dns-rs/lib/systemd/system/dns-rs.service
 	install -d -m 0750 debian/dns-rs/var/lib/dns-rs
 
+override_dh_fixperms:
+	dh_fixperms
+	chmod 0640 debian/dns-rs/etc/dns-rs/dns-rs.conf
+	chmod 0750 debian/dns-rs/var/lib/dns-rs
+
 override_dh_auto_clean:
 	rm -f dns-rs dns-rs.conf dns-rs.service LICENSE README.md SHA256SUMS
 	rm -f "$(bundle).tar.gz"

@@ -1,6 +1,8 @@
 # Fedora/RHEL-family recipe. The binary comes from the static musl release
 # bundle, so no Rust toolchain is needed on the build host. Bump Version and
 # Release together with Cargo.toml for each new release.
+%global debug_package %{nil}
+
 %ifarch x86_64
 %global tarball_arch amd64
 %else
@@ -12,7 +14,7 @@
 %endif
 
 Name:           dns-rs
-Version:        0.6.1
+Version:        0.6.2
 Release:        1%{?dist}
 Summary:        Validating, recursive, caching DNS resolver
 
@@ -50,7 +52,7 @@ install -d -m 0750 %{buildroot}%{_sharedstatedir}/dns-rs
 %license LICENSE
 %{_bindir}/dns-rs
 %dir %{_sysconfdir}/dns-rs
-%config(noreplace) %{_sysconfdir}/dns-rs/dns-rs.conf
+%attr(0640,root,dns-rs) %config(noreplace) %{_sysconfdir}/dns-rs/dns-rs.conf
 %{_unitdir}/dns-rs.service
 %dir %attr(0750,dns-rs,dns-rs) %{_sharedstatedir}/dns-rs
 
@@ -70,5 +72,8 @@ exit 0
 %systemd_postun_with_restart dns-rs.service
 
 %changelog
+* Sun Nov 22 2026 Chandan Ghosh <ckghosh1983@gmail.com> - 0.6.2-1
+- Point the systemd unit at the packaged binary path.
+
 * Sun Nov 22 2026 Chandan Ghosh <ckghosh1983@gmail.com> - 0.6.1-1
 - Package the static release bundle with a systemd service.
