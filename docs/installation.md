@@ -7,8 +7,8 @@ container image. For a first run, start with the [Quick start](quickstart.md).
 
 | Platform | Architecture | Methods | Tier | Notes |
 |---|---|---|---|---|
-| Linux | x86_64 | source, container image | 1 | Unit, integration, and container smoke tests run in CI on `ubuntu-latest`. |
-| Linux | aarch64/arm64 | container image | 2 | Multi-arch image is built and smoke-tested under QEMU. Sustained Raspberry Pi hardware testing is still pending. |
+| Linux | x86_64 | release tarball, source, container image | 1 | Unit, integration, and container smoke tests run in CI on `ubuntu-latest`. |
+| Linux | aarch64/arm64 | release tarball, container image | 2 | Multi-arch image is built and smoke-tested under QEMU. Sustained Raspberry Pi hardware testing is still pending. |
 | macOS | x86_64, arm64 | source | 3 | Expected to build and run; not covered by CI. Host benchmarking CPU pinning and container tooling are Linux-only. |
 | Windows | x86_64 | source | 3 | Expected to build and run; not covered by CI. |
 | Other / 32-bit | — | source | unsupported | Not tested and not maintained. |
@@ -16,8 +16,67 @@ container image. For a first run, start with the [Quick start](quickstart.md).
 Tier 1 means regressions block a release. Tier 2 means best-effort validation.
 Tier 3 means the code is expected to compile but no automated check protects it.
 
-There are no prebuilt host binaries in GitHub Releases today. Install from
-source or use the container image.
+Prebuilt static musl binaries are attached to every versioned GitHub release.
+Install from a release tarball, from source, from a distro package, or use the
+container image.
+
+## Install from a release tarball
+
+Each release publishes `dns-rs-<version>-linux-amd64.tar.gz` and
+`dns-rs-<version>-linux-arm64.tar.gz`, with a `SHA256SUMS` covering both. Each
+bundle contains the binary, `dns-rs.conf`, `dns-rs.service`, `LICENSE`, and a
+README.
+
+```bash
+version=0.6.1
+arch=amd64  # or arm64
+base="https://github.com/ChandanGhosh/dns-rs/releases/download/v$version"
+curl -fsSLO "$base/dns-rs-$version-linux-$arch.tar.gz"
+curl -fsSLO "$base/SHA256SUMS"
+sha256sum --check SHA256SUMS --ignore-missing
+tar -xzf "dns-rs-$version-linux-$arch.tar.gz"
+cd "dns-rs-$version-linux-$arch"
+
+# The bundle README repeats these steps; see Host service below for the
+# service user, state directories, and verification.
+sudo install -m 0755 dns-rs /usr/bin/dns-rs
+sudo install -o dns-rs -g dns-rs -m 0640 dns-rs.conf /etc/dns-rs/dns-rs.conf
+sudo install -m 0644 dns-rs.service /etc/systemd/system/dns-rs.service
+```
+
+Create the `dns-rs` user and state directories first as shown in
+[Host service](#host-service-systemd). The binary is statically linked, so it
+works across glibc versions without additional runtime packages.
+
+## Distro packages
+
+The recipes in [`packaging/`](../packaging/) produce installable `.deb` and
+`.rpm` packages from the release tarballs. They install the static binary, the
+default configuration as a conffile, the systemd unit, and a `dns-rs` system
+user. No Rust toolchain is needed on the build host.
+
+Official Debian and Fedora repositories are not targeted. Publish through a
+community build service or a signed repository you control.
+
+### Fedora and RHEL with COPR
+
+1. Create a COPR project and submit [`packaging/rpm/dns-rs.spec`](../packaging/rpm/dns-rs.spec).
+2. The spec fetches `Source0` from the versioned GitHub release and builds
+   natively for `x86_64` and `aarch64`.
+3. For each new release, set `Version` to the new workspace version and reset
+   `Release` to `1`.
+
+### Debian and Ubuntu with openSUSE Build Service
+
+1. Create an OBS package and copy [`packaging/debian/`](../packaging/debian/)
+   into it alongside the RPM spec. OBS uses the spec for RPM targets and the
+   `debian/` directory for DEB targets.
+2. Enable the Debian and Ubuntu distributions you need for `amd64` and `arm64`.
+3. `debian/rules` downloads the matching release tarball during the build; add
+   a new `debian/changelog` entry with the new version for each release.
+
+Upgrades keep local edits to `/etc/dns-rs/dns-rs.conf` through the package
+manager's conffile handling.
 
 ## Install from source
 
@@ -50,8 +109,8 @@ automatic `cargo fmt`.
 ## Container image
 
 ```bash
-docker pull chandanghosh/dns-rs:0.6.0
-docker run --rm chandanghosh/dns-rs:0.6.0 --version
+docker pull chandanghosh/dns-rs:0.6.1
+docker run --rm chandanghosh/dns-rs:0.6.1 --version
 ```
 
 Images are published for `linux/amd64` and `linux/arm64`. `X.Y.Z` tags are

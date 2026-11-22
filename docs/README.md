@@ -8,8 +8,8 @@ the map of the full documentation set.
 
 - [Quick start](quickstart.md) — build or pull, run, and verify a resolver in a
   few minutes.
-- [Installation](installation.md) — support tiers, source builds, container
-  images, and a host systemd service.
+- [Installation](installation.md) — support tiers, release tarballs, distro
+  packages, source builds, container images, and a host systemd service.
 - [Configuration](configuration.md) — file formats, CLI precedence, the TOML
   reference, and what reload can and cannot change.
 

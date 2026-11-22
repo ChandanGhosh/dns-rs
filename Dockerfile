@@ -83,6 +83,11 @@ RUN target="$(cat /tmp/rust-target)" \
     && cp "target/$target/dist/dns-rs" /out/dns-rs \
     && chown -R 65532:65532 /out/var
 
+# Export the cross-compiled binary alone for release tarballs. BuildKit skips
+# this stage during normal image builds, so it adds no cost to `make image`.
+FROM scratch AS release-binary
+COPY --from=builder /out/dns-rs /dns-rs
+
 FROM scratch AS runtime
 
 # `VERSION` is the workspace semver. The mutable `DDMMYYYY` build date lives in

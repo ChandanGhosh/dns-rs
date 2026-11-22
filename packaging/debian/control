@@ -1,0 +1,16 @@
+Source: dns-rs
+Section: net
+Priority: optional
+Maintainer: Chandan Ghosh <ckghosh1983@gmail.com>
+Build-Depends: debhelper-compat (= 13), curl
+Standards-Version: 4.6.2
+Homepage: https://github.com/ChandanGhosh/dns-rs
+Rules-Requires-Root: no
+
+Package: dns-rs
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, adduser, systemd
+Description: validating, recursive, caching DNS resolver
+ dns-rs is a validating, recursive, caching DNS resolver with an
+ Unbound-compatible configuration format, DNSSEC validation, and a local
+ control socket. The systemd service binds port 53 as an unprivileged user.
