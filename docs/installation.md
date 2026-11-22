@@ -160,8 +160,9 @@ plain-DNS listener if you want to use `dns-rs healthcheck` and systemd's
 reload path.
 
 Reload is `systemctl reload dns-rs.service` (it sends `SIGHUP`). It rebuilds
-the query pipeline and flushes caches, but listener, TLS, thread, socket-buffer,
-control-socket, and verbosity changes need `systemctl restart dns-rs.service`.
+the query pipeline, flushes caches, and applies a new `verbosity`, but listener,
+TLS, thread, socket-buffer, and control-socket changes need
+`systemctl restart dns-rs.service`.
 See [Configuration](configuration.md#reload-and-restart) for the exact list.
 
 ## Verify an installation

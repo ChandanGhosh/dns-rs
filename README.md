@@ -108,7 +108,8 @@ The most important gaps are:
   four bundled iterator scenarios. The upstream corpus, virtual time, cache
   manipulation, and DNSSEC replay are not implemented.
 - Configuration reload cannot change listeners, TLS files, thread count,
-  socket buffers, control socket, or verbosity. Those require a restart.
+  socket buffers, or the control socket. Those require a restart. `verbosity`
+  is applied by a reload.
 
 See [Limitations](docs/limitations.md) for the complete list and workarounds.
 

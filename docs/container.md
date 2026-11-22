@@ -90,10 +90,11 @@ Counter commands, the metric names, and Prometheus scraping are covered in
 A reload replaces the query pipeline atomically: in-flight queries finish on
 the old pipeline, and a file that fails to parse or validate leaves the running
 configuration untouched. Interfaces, ports, TLS certificate/key paths, the
-thread count, socket buffer sizes, control socket paths, and `verbosity` are
-fixed when the listeners are bound. A change to one of them is logged as
-requiring a restart; `docker compose restart resolver` (or `docker restart
-dns-rs`) applies it.
+thread count, socket buffer sizes, and control socket paths are fixed when the
+listeners are bound. A change to one of them is logged as requiring a restart;
+`docker compose restart resolver` (or `docker restart dns-rs`) applies it.
+`verbosity` is applied by `docker compose kill -s HUP resolver` (or `docker
+kill -s HUP dns-rs`) together with the rest of the reloadable settings.
 
 When reloading, mount the configuration directory rather than a single file.
 Editors that save by renaming replace the host inode, and a single-file bind

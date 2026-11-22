@@ -37,6 +37,12 @@ use tracing::{error, info, warn};
 
 pub use pipeline::{PipelineHandle, PipelineStats, QueryPipeline, QueryStats, Transport};
 
+/// Called after a successful reload with the newly loaded configuration.
+///
+/// This lets the embedder apply settings that a reload can change without
+/// swapping the listeners, such as log verbosity.
+pub type ReloadCallback = Arc<dyn Fn(&Config) + Send + Sync>;
+
 /// Start the `stats phases ...` reporter used by the benchmark runner.
 /// Only exists in `phase-stats` builds.
 #[cfg(feature = "phase-stats")]
@@ -70,7 +76,7 @@ impl From<privilege::PrivilegeError> for ServerError {
 
 /// Run the server until the shutdown token is cancelled.
 pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(), ServerError> {
-    serve_inner(config, None, shutdown).await
+    serve_inner(config, None, shutdown, None).await
 }
 
 /// Run the server with live configuration reload enabled from `config_path`.
@@ -82,23 +88,26 @@ pub async fn serve(config: Arc<Config>, shutdown: CancellationToken) -> Result<(
 /// is kept.
 ///
 /// Settings that are fixed when the listeners are bound (interfaces, ports,
-/// TLS files, thread count, socket buffers, control sockets, and verbosity)
-/// cannot be applied by a reload. A change to one of them is logged and the
-/// running listener is kept; restart the process to apply it.
+/// TLS files, thread count, socket buffers, and control sockets) cannot be
+/// applied by a reload. A change to one of them is logged and the running
+/// listener is kept; restart the process to apply it. `on_reload`, when given,
+/// receives the new configuration so the embedder can apply live settings such
+/// as log verbosity.
 pub async fn serve_with_reload(
     config: Arc<Config>,
     config_path: PathBuf,
     shutdown: CancellationToken,
+    on_reload: Option<ReloadCallback>,
 ) -> Result<(), ServerError> {
     #[cfg(unix)]
     {
-        serve_inner(config, Some(config_path), shutdown).await
+        serve_inner(config, Some(config_path), shutdown, on_reload).await
     }
     #[cfg(not(unix))]
     {
-        let _ = config_path;
+        let _ = (config_path, on_reload);
         warn!("configuration reload is only supported on Unix; starting without it");
-        serve_inner(config, None, shutdown).await
+        serve_inner(config, None, shutdown, None).await
     }
 }
 
@@ -106,6 +115,7 @@ async fn serve_inner(
     config: Arc<Config>,
     config_path: Option<PathBuf>,
     shutdown: CancellationToken,
+    on_reload: Option<ReloadCallback>,
 ) -> Result<(), ServerError> {
     // Resolve the target account before any socket is bound so a typo in
     // `username` fails startup while the process is still privileged. The
@@ -124,7 +134,7 @@ async fn serve_inner(
 
     let pipeline = PipelineHandle::new(Arc::clone(&config));
     #[cfg(unix)]
-    let reloader = config_path.map(|path| reload::Reloader::new(path, pipeline.clone()));
+    let reloader = config_path.map(|path| reload::Reloader::new(path, pipeline.clone(), on_reload));
     #[cfg(not(unix))]
     let _ = config_path;
     // Install the SIGHUP handler before binding anything. If a reload request

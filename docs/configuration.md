@@ -29,9 +29,9 @@ which controls logging at startup. Precedence for the log filter is:
 3. `verbosity` in the configuration (0 = warnings, 1 = info, 2-3 = debug,
    4-5 = trace).
 
-These overrides are applied when the process starts. Because `verbosity` is
-fixed when listeners are bound, changing the configured log level at runtime
-also requires a restart.
+`RUST_LOG` and `-v` are read when the process starts. Changing `verbosity` in
+the file and reloading applies the new level without a restart; a running
+`RUST_LOG` filter continues to take precedence.
 
 Command syntax:
 
@@ -76,7 +76,7 @@ truth in [`crates/dns-config/src/model.rs`](../crates/dns-config/src/model.rs).
 | Group | Keys | Notes |
 |---|---|---|
 | Listeners | `interfaces`, `port`, `tls_port`, `https_port`, `http_endpoint`, `tls_service_key`, `tls_service_pem` | At least one interface is required. The listener protocol is selected by port. DoT/DoH are enabled only when both TLS files are set. |
-| Runtime | `num_threads`, `verbosity` | `0` or `"auto"` for `num_threads` uses all CPUs visible to the process. Default: `1`. |
+| Runtime | `num_threads`, `verbosity` | `0` or `"auto"` for `num_threads` uses all CPUs visible to the process. Default: `1`. `verbosity` is reloadable; `num_threads` is not. |
 | Transports | `do_ip4`, `do_ip6`, `do_udp`, `do_tcp`, `outgoing_interfaces` | At least one IP family and one transport must stay enabled. |
 | Access control | `access_control`, `access_control_view` | Strings like `"10.0.0.0/8 allow"`. The most specific matching prefix wins; later equal-prefix entries win ties; no match is `REFUSED`. |
 | DNSSEC | `dnssec_validation`, `domain_insecure`, `trust_anchor`, `trust_anchor_file`, `auto_trust_anchor_file`, `nsec3_max_iterations`, `val_permissive_mode` | Validation is on by default with built-in root anchors. `val_permissive_mode` still validates but returns bogus data with `AD=0` instead of `SERVFAIL`. |
@@ -236,8 +236,7 @@ requiring a restart:
 - `tls-port`, `https-port`, `http-endpoint`
 - `udp-recv-buffer-size`, `udp-send-buffer-size`
 - `tcp-recv-buffer-size`, `tcp-send-buffer-size`, `tcp-user-timeout`
-- `verbosity`
 - `remote-control`
 
-Everything else, including zones, ACLs, DNSSEC settings, forwarders, and cache
-limits, is applied by a reload.
+Everything else, including zones, ACLs, DNSSEC settings, forwarders, cache
+limits, and `verbosity`, is applied by a reload.

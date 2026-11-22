@@ -11,10 +11,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use dns_config::LoadedConfig;
+use dns_config::{Config, LoadedConfig};
 use dns_control::ControlCommand;
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{EnvFilter, Registry, reload};
 
 /// The resolver allocates per-query names, records, and response buffers.
 /// mimalloc handles that allocation pattern better than the system allocator,
@@ -219,7 +220,7 @@ fn run(cli: &Cli) -> Result<()> {
     // Log level is resolved after the configuration loads so the `verbosity`
     // server key mirrors Unbound and is honoured before the flags or `RUST_LOG`.
     let loaded = load(&cli.config)?;
-    init_tracing(cli.verbose, loaded.config.server.verbosity);
+    let on_reload = init_tracing(cli.verbose, loaded.config.server.verbosity);
     // `num-threads` is the number of resolver worker threads. Build the
     // runtime explicitly so the setting controls Tokio's worker pool instead
     // of always using one worker per available CPU. `0` and `"auto"` resolve
@@ -239,10 +240,10 @@ fn run(cli: &Cli) -> Result<()> {
     // runner can attribute time to a stage of the pipeline.
     #[cfg(feature = "phase-stats")]
     dns_server::spawn_reporter();
-    runtime.block_on(run_server(&cli.config, loaded.config))
+    runtime.block_on(run_server(&cli.config, loaded.config, on_reload))
 }
 
-async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
+async fn run_server(path: &Path, config: Config, on_reload: ReloadCallback) -> Result<()> {
     let config = Arc::new(config);
 
     tracing::info!(
@@ -259,7 +260,8 @@ async fn run_server(path: &Path, config: dns_config::Config) -> Result<()> {
     let config_path = path.to_path_buf();
     let mut server = tokio::spawn(async move {
         // The server owns `SIGHUP` and the control socket's `reload` command.
-        dns_server::serve_with_reload(server_config, config_path, server_shutdown).await
+        dns_server::serve_with_reload(server_config, config_path, server_shutdown, Some(on_reload))
+            .await
     });
 
     tokio::select! {
@@ -303,15 +305,52 @@ fn default_filter(flag_verbose: u8, config_verbosity: u8) -> &'static str {
     }
 }
 
-fn init_tracing(flag_verbose: u8, config_verbosity: u8) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(default_filter(flag_verbose, config_verbosity)));
+/// Applied after a successful reload so the daemon can update live settings.
+type ReloadCallback = Arc<dyn Fn(&Config) + Send + Sync>;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
+/// Install a subscriber with a reloadable log filter and return the reload hook.
+///
+/// `RUST_LOG` wins over `-v`, which wins over `server.verbosity`. When `RUST_LOG`
+/// is set, reloads leave the environment filter in place.
+fn init_tracing(flag_verbose: u8, config_verbosity: u8) -> ReloadCallback {
+    let env_filter = EnvFilter::try_from_default_env();
+    let from_env = env_filter.is_ok();
+    let filter = env_filter
+        .unwrap_or_else(|_| EnvFilter::new(default_filter(flag_verbose, config_verbosity)));
+    let (filter_layer, handle) = reload::Layer::new(filter);
+    Registry::default()
+        .with(filter_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_target(false),
+        )
         .init();
+
+    let controller = LogController {
+        handle,
+        flag_verbose,
+        from_env,
+    };
+    Arc::new(move |config: &Config| controller.apply(config.server.verbosity))
+}
+
+struct LogController {
+    handle: reload::Handle<EnvFilter, Registry>,
+    flag_verbose: u8,
+    from_env: bool,
+}
+
+impl LogController {
+    fn apply(&self, config_verbosity: u8) {
+        if self.from_env {
+            return;
+        }
+        let filter = EnvFilter::new(default_filter(self.flag_verbose, config_verbosity));
+        if let Err(error) = self.handle.reload(filter) {
+            tracing::error!(%error, "failed to apply the reloaded log verbosity");
+        }
+    }
 }
 
 async fn shutdown_signal() {

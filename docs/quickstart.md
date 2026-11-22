@@ -77,7 +77,9 @@ and zone/blocklist layout.
 ## What to try next
 
 - Change `verbosity` in `examples/minimal.toml` to `2` and watch one line per
-  query, including cache hits and misses.
+  query, including cache hits and misses. While the daemon is running, edit the
+  file and use `dns-rs control reload` (`SIGHUP` also works) to apply the new
+  level without a restart.
 - Replace the DoT forward zone with an iterative resolver by deleting its
   `[[forward_zones]]` block, then re-run `checkconf` and `run`. Iteration needs
   outbound UDP/TCP port 53 to authoritative servers.
