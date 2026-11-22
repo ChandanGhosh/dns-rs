@@ -15,6 +15,7 @@ use dns_config::Config;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::ReloadCallback;
 use crate::pipeline::{PipelineHandle, QueryPipeline};
 
 /// A cloneable handle that rebuilds the query pipeline from disk.
@@ -25,6 +26,8 @@ pub(crate) struct Reloader {
     /// Serializes reloads so two requests cannot interleave and leave the
     /// older pipeline installed.
     gate: Arc<Mutex<()>>,
+    /// Applies settings that do not require rebinding a listener.
+    on_reload: Option<ReloadCallback>,
 }
 
 /// Why a reload was refused.
@@ -40,11 +43,16 @@ pub(crate) enum ReloadError {
 
 impl Reloader {
     /// Create a reloader for `config_path` that installs into `pipeline`.
-    pub(crate) fn new(config_path: PathBuf, pipeline: PipelineHandle) -> Self {
+    pub(crate) fn new(
+        config_path: PathBuf,
+        pipeline: PipelineHandle,
+        on_reload: Option<ReloadCallback>,
+    ) -> Self {
         Self {
             config_path: Arc::new(config_path),
             pipeline,
             gate: Arc::new(Mutex::new(())),
+            on_reload,
         }
     }
 
@@ -90,6 +98,9 @@ impl Reloader {
         }
 
         self.pipeline.replace(pipeline);
+        if let Some(on_reload) = &self.on_reload {
+            on_reload(&config);
+        }
         info!(
             config = %self.config_path.display(),
             "configuration reloaded; caches flushed"
@@ -137,7 +148,6 @@ fn restart_required(previous: &Config, next: &Config) -> Vec<&'static str> {
         tcp_recv_buffer_size => "server.tcp-recv-buffer-size",
         tcp_send_buffer_size => "server.tcp-send-buffer-size",
         tcp_user_timeout_ms => "server.tcp-user-timeout",
-        verbosity => "server.verbosity",
     }
 
     if previous.remote_control != next.remote_control {
@@ -201,7 +211,7 @@ mod tests {
 
         let loaded = dns_config::load(&path).expect("load config");
         let pipeline = PipelineHandle::new(Arc::new(loaded.config));
-        let reloader = Reloader::new(path.clone(), pipeline.clone());
+        let reloader = Reloader::new(path.clone(), pipeline.clone(), None);
 
         assert_eq!(answer(&pipeline).await, Ipv4Addr::new(192, 0, 2, 1));
 
@@ -219,12 +229,38 @@ mod tests {
 
         let loaded = dns_config::load(&path).expect("load config");
         let pipeline = PipelineHandle::new(Arc::new(loaded.config));
-        let reloader = Reloader::new(path.clone(), pipeline.clone());
+        let reloader = Reloader::new(path.clone(), pipeline.clone(), None);
 
         std::fs::write(&path, "[server\ninterfaces = []\n").expect("write broken config");
         reloader.reload().await.expect_err("invalid config");
 
         assert_eq!(answer(&pipeline).await, Ipv4Addr::new(192, 0, 2, 1));
+    }
+
+    #[tokio::test]
+    async fn reload_applies_live_settings_to_the_callback() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.toml");
+        std::fs::write(&path, config_text("192.0.2.1")).expect("write config");
+
+        let loaded = dns_config::load(&path).expect("load config");
+        let pipeline = PipelineHandle::new(Arc::new(loaded.config));
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let seen = Arc::clone(&observed);
+        let reloader = Reloader::new(
+            path.clone(),
+            pipeline.clone(),
+            Some(Arc::new(move |config: &Config| {
+                *seen.lock().expect("lock") = Some(config.server.verbosity);
+            })),
+        );
+
+        let updated = format!("{}verbosity = 3\n", config_text("192.0.2.2"));
+        std::fs::write(&path, updated).expect("rewrite config");
+        reloader.reload().await.expect("reload");
+
+        assert_eq!(*observed.lock().expect("lock"), Some(3));
+        assert_eq!(answer(&pipeline).await, Ipv4Addr::new(192, 0, 2, 2));
     }
 
     #[test]
@@ -234,6 +270,10 @@ mod tests {
         let mut reloadable = base.clone();
         reloadable.server.prefetch = !base.server.prefetch;
         assert!(restart_required(&base, &reloadable).is_empty());
+
+        let mut verbosity = base.clone();
+        verbosity.server.verbosity = 4;
+        assert!(restart_required(&base, &verbosity).is_empty());
 
         let mut listener = base.clone();
         listener.server.interfaces = vec![dns_config::ListenAddress::new(

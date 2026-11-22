@@ -5,7 +5,7 @@ operational model of [Unbound](https://github.com/NLnetLabs/unbound): it can
 iterate from the root, forward through encrypted upstreams, validate DNSSEC,
 serve local zones, and expose operational controls through a local socket.
 
-> **Status: working resolver, version 0.6.0, pre-1.0.** The core resolver,
+> **Status: working resolver, version 0.6.1, pre-1.0.** The core resolver,
 > DNSSEC validation, cache, listeners, configuration front-ends, and container
 > image are implemented. Several features commonly found in production Unbound
 > deployments are not. Read [Limitations](docs/limitations.md) before adopting
@@ -46,7 +46,7 @@ docker run -d --rm --name dns-rs-test \
   --security-opt no-new-privileges=true \
   -p 127.0.0.1:15353:53/udp \
   -p 127.0.0.1:15353:53/tcp \
-  chandanghosh/dns-rs:0.6.0
+  chandanghosh/dns-rs:0.6.1
 
 dig @127.0.0.1 -p 15353 example.com A
 docker logs dns-rs-test
@@ -64,7 +64,7 @@ useful starting points are:
 | Page | Use it for |
 |---|---|
 | [Quick start](docs/quickstart.md) | First run from source or container, with verification steps |
-| [Installation](docs/installation.md) | Support tiers, source installs, image pulls, and a systemd unit |
+| [Installation](docs/installation.md) | Support tiers, release tarballs, distro packages, source builds, and a systemd unit |
 | [Configuration](docs/configuration.md) | File formats, settings, upstream models, reload rules |
 | [Container image](docs/container.md) | `docker run`, Compose, Kubernetes, volumes, monitoring, troubleshooting |
 | [Operations](docs/operations.md) | Control socket, statistics, logs, signals, healthchecks, upgrades |
@@ -108,7 +108,8 @@ The most important gaps are:
   four bundled iterator scenarios. The upstream corpus, virtual time, cache
   manipulation, and DNSSEC replay are not implemented.
 - Configuration reload cannot change listeners, TLS files, thread count,
-  socket buffers, control socket, or verbosity. Those require a restart.
+  socket buffers, or the control socket. Those require a restart. `verbosity`
+  is applied by a reload.
 
 See [Limitations](docs/limitations.md) for the complete list and workarounds.
 
@@ -143,7 +144,7 @@ Published images support `linux/amd64` and `linux/arm64` under
 
 | Tag | Stable? | Meaning |
 |---|---|---|
-| `X.Y.Z` | Immutable | Release image, for example `0.6.0` |
+| `X.Y.Z` | Immutable | Release image, for example `0.6.1` |
 | `latest` | Mutable | Repointed to the newest release |
 | `DDMMYYYY` (UTC) | Mutable | Edge build from `main` |
 | Digest | Immutable | `chandanghosh/dns-rs@sha256:...` |

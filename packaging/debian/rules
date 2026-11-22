@@ -1,0 +1,28 @@
+#!/usr/bin/make -f
+
+version := $(shell dpkg-parsechangelog -S Version | cut -d- -f1)
+arch := $(shell dpkg --print-architecture)
+bundle := dns-rs-$(version)-linux-$(arch)
+base := https://github.com/ChandanGhosh/dns-rs/releases/download/v$(version)
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	curl -fsSLO "$(base)/$(bundle).tar.gz"
+	curl -fsSLO "$(base)/SHA256SUMS"
+	awk -v f='$(bundle).tar.gz' '$$2 == f' SHA256SUMS | sha256sum --check -
+	tar -xzf "$(bundle).tar.gz" --strip-components=1
+
+override_dh_auto_build:
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -D -m 0755 dns-rs debian/dns-rs/usr/bin/dns-rs
+	install -D -m 0640 dns-rs.conf debian/dns-rs/etc/dns-rs/dns-rs.conf
+	install -D -m 0644 dns-rs.service debian/dns-rs/lib/systemd/system/dns-rs.service
+	install -d -m 0750 debian/dns-rs/var/lib/dns-rs
+
+override_dh_auto_clean:
+	rm -f dns-rs dns-rs.conf dns-rs.service LICENSE README.md SHA256SUMS
+	rm -f "$(bundle).tar.gz"

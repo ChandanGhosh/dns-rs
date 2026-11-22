@@ -1,0 +1,5 @@
+dns-rs (0.6.1) unstable; urgency=medium
+
+  * Package the static release bundle with a systemd service.
+
+ -- Chandan Ghosh <ckghosh1983@gmail.com>  Sun, 22 Nov 2026 15:30:00 +0000

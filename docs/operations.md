@@ -123,8 +123,8 @@ collector that calls `control stats-prometheus`. See
 
 `verbosity` sets the startup log filter: 0 warnings, 1 info, 2-3 debug with one
 line per query, 4-5 trace. `-v`/`-vv` raise it to debug/trace, and `RUST_LOG`
-overrides both. These overrides are applied only at startup; `verbosity` is a
-restart-only setting when changed in the file.
+overrides both. `RUST_LOG` and `-v` are applied only at startup; changing
+`verbosity` in the file takes effect on `SIGHUP` or `control reload`.
 
 Logs go to standard output. The daemon does not write a log file, use syslog, or
 daemonize. Under systemd, use `journalctl -u dns-rs`; in Docker, use
@@ -137,14 +137,14 @@ that are logged.
 |---|---|
 | `SIGINT`, `SIGTERM` | Graceful shutdown; in-flight work is allowed to finish. |
 | `SIGHUP` or `control reload` | Re-read configuration, rebuild the pipeline, flush caches, atomically swap. Failed reload leaves the old pipeline running. |
-| Restart | Required for listener, TLS, thread, socket-buffer, control-socket, and verbosity changes. |
+| Restart | Required for listener, TLS, thread, socket-buffer, and control-socket changes. |
 
 Settings fixed when listeners are bound: `interfaces`, `port`, `do-ip4`,
 `do-ip6`, `do-udp`, `do-tcp`, `num-threads`, `incoming-num-tcp`,
 `tls-service-key`, `tls-service-pem`, `tls-port`, `https-port`, `http-endpoint`,
-socket buffer sizes, `tcp-user-timeout`, `verbosity`, and `remote-control`.
-Everything else, including zones, ACLs, forwarders, DNSSEC settings, and cache
-limits, is reloadable.
+socket buffer sizes, `tcp-user-timeout`, and `remote-control`. Everything else,
+including zones, ACLs, forwarders, DNSSEC settings, cache limits, and
+`verbosity`, is reloadable.
 
 When reloading a container or service that uses a bind-mounted configuration,
 mount the directory rather than a single file. Editors that save by renaming

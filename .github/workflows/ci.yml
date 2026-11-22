@@ -286,6 +286,16 @@ jobs:
                       exit 1
                   fi
                   echo "version $version is newer than ${latest_version:+v$latest_version}; a release will be cut"
+            - name: Validate package recipe versions
+              run: |
+                  set -euo pipefail
+                  version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+                  spec_version="$(sed -n 's/^Version:[[:space:]]*//p' packaging/rpm/dns-rs.spec | head -1)"
+                  deb_version="$(sed -n '1s/^dns-rs (\([^)]*\)).*/\1/p' packaging/debian/changelog)"
+                  if [[ "$spec_version" != "$version" || "$deb_version" != "$version" ]]; then
+                      echo "::error::package recipes must use the workspace version $version (spec=$spec_version, debian=$deb_version)"
+                      exit 1
+                  fi
 
     publish:
         name: Publish container
@@ -412,6 +422,31 @@ jobs:
                   provenance: mode=max
                   cache-from: type=gha,scope=container
                   cache-to: type=gha,mode=max,scope=container
+            - name: Build release tarballs
+              if: steps.latest.outputs.skip != 'true' && steps.meta.outputs.release == 'true'
+              env:
+                  VERSION: ${{ steps.meta.outputs.version }}
+                  BUILD_DATE: ${{ steps.meta.outputs.build_date }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p release/bin release/artifacts
+                  for arch in amd64 arm64; do
+                      # Reuse the Dockerfile's cross-compile stage instead of
+                      # duplicating its musl toolchain setup here.
+                      docker buildx build \
+                          --platform "linux/$arch" \
+                          --target release-binary \
+                          --build-arg "VERSION=$VERSION" \
+                          --build-arg "BUILD_DATE=$BUILD_DATE" \
+                          --output "type=local,dest=$PWD/release/bin/$arch" \
+                          --cache-from=type=gha,scope=container \
+                          .
+                      cp "release/bin/$arch/dns-rs" "release/bin/dns-rs-$arch"
+                  done
+                  scripts/build-release-tarballs.sh \
+                      --version "$VERSION" \
+                      --input-dir release/bin \
+                      --output-dir release/artifacts
             - name: Create GitHub release
               if: steps.latest.outputs.skip != 'true' && steps.meta.outputs.release == 'true'
               env:
@@ -428,7 +463,9 @@ jobs:
                   tag="v$VERSION"
 
                   if gh release view "$tag" >/dev/null 2>&1; then
-                      echo "::notice::release $tag already exists; leaving it unchanged"
+                      echo "::notice::release $tag already exists; refreshing artifacts"
+                      gh release upload "$tag" release/artifacts/*.tar.gz \
+                          release/artifacts/SHA256SUMS --clobber
                       exit 0
                   fi
 
@@ -451,6 +488,12 @@ jobs:
                           fi
                       fi
 
+                      printf '## Native install bundles\n\n'
+                      printf 'Static musl binaries with the systemd unit and default config:\n\n'
+                      printf -- '- `dns-rs-%s-linux-amd64.tar.gz`\n' "$VERSION"
+                      printf -- '- `dns-rs-%s-linux-arm64.tar.gz`\n' "$VERSION"
+                      printf -- '- `SHA256SUMS`\n\n'
+                      printf 'Verify a bundle with `sha256sum --check SHA256SUMS`.\n\n'
                       printf '## Container images\n\n'
                       printf 'Container images published for this release:\n\n'
                       printf -- '- `docker.io/chandanghosh/dns-rs:%s`\n' "$VERSION"
@@ -487,4 +530,6 @@ jobs:
                       --verify-tag \
                       --title "dns-rs $VERSION" \
                       --notes-file "$notes" \
-                      --latest
+                      --latest \
+                      release/artifacts/*.tar.gz \
+                      release/artifacts/SHA256SUMS
