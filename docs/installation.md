@@ -28,7 +28,7 @@ bundle contains the binary, `dns-rs.conf`, `dns-rs.service`, `LICENSE`, and a
 README.
 
 ```bash
-version=0.6.2
+version=0.6.3
 arch=amd64  # or arm64
 base="https://github.com/ChandanGhosh/dns-rs/releases/download/v$version"
 curl -fsSLO "$base/dns-rs-$version-linux-$arch.tar.gz"
@@ -50,11 +50,29 @@ works across glibc versions without additional runtime packages.
 
 ## Distro packages
 
-The recipes in [`packaging/`](../packaging/) produce installable `.deb` and
-`.rpm` packages from the release tarballs. They install the static binary, the
-default configuration as a conffile, the systemd unit, and a `dns-rs` system
-user. No Rust toolchain is needed on the build host. Both recipes verify the
-downloaded tarball against the release's `SHA256SUMS` before installing it.
+Every versioned GitHub release also attaches prebuilt `.deb` and `.rpm`
+packages alongside the tarballs. They install the static binary, the default
+configuration as a conffile, the systemd unit, and a `dns-rs` system user.
+
+```bash
+version=0.6.3
+base="https://github.com/ChandanGhosh/dns-rs/releases/download/v$version"
+
+# Debian / Ubuntu (amd64 shown; arm64 is also published).
+curl -fsSLO "$base/dns-rs_${version}_amd64.deb"
+curl -fsSLO "$base/PACKAGES_SHA256SUMS"
+sha256sum --check PACKAGES_SHA256SUMS --ignore-missing
+sudo apt install ./dns-rs_${version}_amd64.deb
+
+# Fedora / RHEL (x86_64 shown; aarch64 is also published).
+curl -fsSLO "$base/dns-rs-${version}-1.fc41.x86_64.rpm"
+sha256sum --check PACKAGES_SHA256SUMS --ignore-missing
+sudo dnf install ./dns-rs-${version}-1.fc41.x86_64.rpm
+```
+
+The recipes in [`packaging/`](../packaging/) can also build these packages from
+the release tarballs with no Rust toolchain on the build host. Both recipes
+verify the tarball against the release's `SHA256SUMS` before installing it.
 
 Official Debian and Fedora repositories are not targeted. Publish through a
 community build service or a signed repository you control.
@@ -110,8 +128,8 @@ automatic `cargo fmt`.
 ## Container image
 
 ```bash
-docker pull chandanghosh/dns-rs:0.6.2
-docker run --rm chandanghosh/dns-rs:0.6.2 --version
+docker pull chandanghosh/dns-rs:0.6.3
+docker run --rm chandanghosh/dns-rs:0.6.3 --version
 ```
 
 Images are published for `linux/amd64` and `linux/arm64`. `X.Y.Z` tags are
