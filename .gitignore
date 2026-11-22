@@ -2,6 +2,7 @@
 **/*.rs.bk
 *.log
 *.pid
+.env
 .DS_Store
 .idea/
 .vscode/

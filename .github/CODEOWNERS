@@ -1,7 +1,3 @@
-# Changes to automation require the repository owner's review. This is only
-# enforced when the default branch requires review from code owners; see the
-# repository ruleset or branch protection settings.
-
-/.github/workflows/ @ChandanGhosh
-/.github/actions/ @ChandanGhosh
-/.github/CODEOWNERS @ChandanGhosh
+# Require the repository owner's review for every change, including .github/.
+# This is enforced when the default branch requires review from code owners.
+* @ChandanGhosh
