@@ -28,7 +28,7 @@ bundle contains the binary, `dns-rs.conf`, `dns-rs.service`, `LICENSE`, and a
 README.
 
 ```bash
-version=0.6.1
+version=0.6.2
 arch=amd64  # or arm64
 base="https://github.com/ChandanGhosh/dns-rs/releases/download/v$version"
 curl -fsSLO "$base/dns-rs-$version-linux-$arch.tar.gz"
@@ -100,7 +100,7 @@ For a system-wide install, build the release binary and copy it yourself:
 
 ```bash
 make release
-sudo install -m 0755 target/release/dns-rs /usr/local/bin/dns-rs
+sudo install -m 0755 target/release/dns-rs /usr/bin/dns-rs
 ```
 
 `make build` formats the workspace before a debug build; use `make release` or
@@ -110,8 +110,8 @@ automatic `cargo fmt`.
 ## Container image
 
 ```bash
-docker pull chandanghosh/dns-rs:0.6.1
-docker run --rm chandanghosh/dns-rs:0.6.1 --version
+docker pull chandanghosh/dns-rs:0.6.2
+docker run --rm chandanghosh/dns-rs:0.6.2 --version
 ```
 
 Images are published for `linux/amd64` and `linux/arm64`. `X.Y.Z` tags are
@@ -135,12 +135,12 @@ sudo useradd --system --home-dir /var/lib/dns-rs \
 sudo install -d -o dns-rs -g dns-rs -m 0750 /etc/dns-rs /var/lib/dns-rs /run/dns-rs
 
 # 2. Install the binary and the default configuration.
-sudo install -m 0755 target/release/dns-rs /usr/local/bin/dns-rs
+sudo install -m 0755 target/release/dns-rs /usr/bin/dns-rs
 sudo install -o dns-rs -g dns-rs -m 0640 \
   packaging/config/dns-rs.conf /etc/dns-rs/dns-rs.conf
 
 # 3. Validate before starting the service.
-sudo -u dns-rs /usr/local/bin/dns-rs -c /etc/dns-rs/dns-rs.conf checkconf
+sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf checkconf
 
 # 4. Install and enable the unit.
 sudo install -m 0644 packaging/systemd/dns-rs.service /etc/systemd/system/dns-rs.service
@@ -182,7 +182,7 @@ files, or trust anchors; those are loaded when the resolver starts.
 
 ## Uninstall
 
-For a source install, remove `/usr/local/bin/dns-rs` (or
+For a source install, remove `/usr/bin/dns-rs` (or
 `~/.cargo/bin/dns-rs`), the systemd unit, the service user, and the state
 directories. For a container, run `docker rm`/`docker compose down` and delete
 any named volumes separately with `docker compose down -v`.
