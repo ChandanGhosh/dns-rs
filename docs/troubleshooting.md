@@ -104,8 +104,15 @@ report unhealthy for the wrong reason.
 The control socket is disabled in the shipped configuration. Enable
 `remote-control` with an absolute socket path, mount a writable directory, and
 restart. Use the same UID as the daemon (`docker exec` without `-u`), because
-peer credentials are checked and the socket is mode `0600`. There is no HTTP
-metrics endpoint.
+peer credentials are checked and the socket is mode `0600`. On a host installed
+from the deb/rpm, the daemon runs as `dns-rs`; run control commands with
+`sudo -u dns-rs`:
+
+```bash
+sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf control status
+```
+
+Running as root gives a connection reset. There is no HTTP metrics endpoint.
 
 ## Memory or CPU is higher than expected
 
