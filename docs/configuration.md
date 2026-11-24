@@ -113,6 +113,18 @@ Setting either list replaces the built-in defaults rather than appending to
 them. An empty `private_address = []` disables address filtering. In Unbound
 syntax, empty lists are rejected; use TOML if you need that behavior.
 
+### Local namespaces
+
+The local suffixes above, except `test`, and the private reverse zones are
+built into the resolver. They are always routed to the default gateway over
+plain DNS and are never sent to a public, DoT, or DoH resolver, regardless of
+`forward-zone` settings for `.`. If no default gateway is available, those
+names are REFUSED. A more specific `forward-zone` for a local name is honored
+only when it also uses a plain on-LAN server. `test` is excluded so examples
+and test fixtures keep working; add an explicit plain on-LAN forward zone for
+it if the LAN resolves `.test` names. `examples/full.conf` and
+`examples/full.toml` show one explicit local-zone override.
+
 ### Zones and blocklists
 
 TOML uses arrays of tables:

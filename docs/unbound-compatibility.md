@@ -172,10 +172,14 @@ feature that is out of scope.
 2. **`use-caps-for-id` defaults to `yes`.** Unbound defaults to `no`. The option
    only affects upstream traffic; set `use-caps-for-id: no` for byte-for-byte
    matching behavior.
-3. **Private reverse zones are always resolved upstream.** dns-rs behaves as if
-   `unblock-lan-zones: yes` were set. `unblock-lan-zones: no` is accepted with a
-   warning because implementing the blocked form would require an additional
-   local-zone layer.
+3. **Local namespaces are routed through the default gateway.** Private reverse
+   zones and common local suffixes are never sent to a public, DoT, or DoH
+   resolver. dns-rs adds built-in forward zones for them that use the default
+   gateway over plain DNS. With no discoverable gateway they are REFUSED. A
+   user-configured forward zone for one of these names must also use a plain
+   on-LAN server; a public or encrypted one is refused. `unblock-lan-zones: no`
+   is accepted with a warning because dns-rs resolves these names locally
+   instead of blocking them outright.
 4. **Relative includes prefer the including file's directory.** Unbound resolves
    them against its working directory (or chroot). The fallback keeps
    `include: "/etc/unbound/unbound.conf.d/*.conf"`-style configurations working

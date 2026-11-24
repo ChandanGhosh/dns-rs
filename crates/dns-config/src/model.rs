@@ -842,6 +842,42 @@ fn default_private_domains() -> Vec<String> {
     .collect()
 }
 
+/// Local namespaces that must never be sent to a public resolver.
+const LOCAL_NAMESPACES: [&str; 10] = [
+    "local",
+    "localdomain",
+    "lan",
+    "home",
+    "home.arpa",
+    "internal",
+    "intranet",
+    "corp",
+    "private",
+    "localhost",
+];
+
+/// All built-in local and private-reverse namespaces.
+///
+/// These names are never sent to a public resolver. They are absolute,
+/// deduplicated, and independent of the user-configured `private-domain` list
+/// so a configuration cannot silently disable the protection. The reserved
+/// `.test` namespace is deliberately absent: it is for documentation and test
+/// fixtures, not private LAN data.
+pub fn local_domains() -> Vec<Name> {
+    let mut domains = LOCAL_NAMESPACES
+        .iter()
+        .filter_map(|domain| absolute_name(domain).ok())
+        .collect::<Vec<_>>();
+    domains.extend(
+        PRIVATE_REVERSE_ZONES
+            .iter()
+            .filter_map(|zone| Name::from_ascii(zone).ok()),
+    );
+    domains.sort_unstable();
+    domains.dedup();
+    domains
+}
+
 fn default_access_control() -> Vec<AccessControl> {
     vec![
         AccessControl {

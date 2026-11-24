@@ -28,6 +28,15 @@ private_domain = [
     "localhost",
 ]
 
+# Local namespace example. Built-in local names and private reverse zones are
+# routed to the detected default gateway over plain DNS automatically. This
+# shows an explicit override; never use a public or encrypted forwarder here.
+[[forward_zones]]
+name = "localdomain."
+forward_addrs = ["192.168.1.1"]
+tls_upstream = false
+forward_first = false
+
 # DNS over TLS (RFC 7858). The name after `#` is verified against the
 # forwarder's certificate and, without `@port`, implies port 853.
 [[forward_zones]]

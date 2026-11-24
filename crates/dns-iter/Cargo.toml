@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 dns-cache.workspace = true
+dns-config.workspace = true
 dns-client.workspace = true
 dns-dnssec.workspace = true
 dns-proto.workspace = true

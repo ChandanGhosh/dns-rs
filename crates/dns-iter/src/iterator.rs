@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,52 @@ const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 const ROOT_PRIME_TIMEOUT: Duration = Duration::from_secs(5);
 const ROOT_PRIME_INTERVAL: Duration = Duration::from_secs(3600);
 const ROOT_PRIME_RETRY: Duration = Duration::from_secs(60);
+
+static LOCAL_DOMAINS: OnceLock<HashSet<Name>> = OnceLock::new();
+static LOCAL_FORWARD_NETS: OnceLock<Vec<IpNet>> = OnceLock::new();
+
+/// Whether a name belongs to a built-in local or private-reverse namespace.
+fn is_local_name(name: &Name) -> bool {
+    let domains = LOCAL_DOMAINS.get_or_init(|| {
+        dns_config::local_domains()
+            .into_iter()
+            .collect::<HashSet<_>>()
+    });
+    let mut suffix = name.clone();
+    loop {
+        if domains.contains(&suffix) {
+            return true;
+        }
+        if suffix.is_root() {
+            return false;
+        }
+        suffix = suffix.base_name();
+    }
+}
+
+/// Networks that are safe to use as a forwarder for local names.
+fn local_forward_nets() -> &'static [IpNet] {
+    LOCAL_FORWARD_NETS.get_or_init(|| {
+        [
+            "127.0.0.0/8",
+            "10.0.0.0/8",
+            "100.64.0.0/10",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "169.254.0.0/16",
+            "::1/128",
+            "fc00::/7",
+            "fe80::/10",
+        ]
+        .iter()
+        .map(|network| {
+            network
+                .parse()
+                .expect("static local forward network is valid")
+        })
+        .collect()
+    })
+}
 
 /// A zone whose queries are sent to recursive forwarders instead of being
 /// resolved iteratively.
@@ -109,6 +156,20 @@ pub struct ForwardServer {
     pub tls_name: Option<String>,
     /// HTTP path for DoH.
     pub path: Option<String>,
+}
+
+impl ForwardServer {
+    /// Whether this forwarder may receive local/private queries.
+    ///
+    /// Local queries may only go to a plain-DNS server on a local network.
+    /// Encrypted transports and public addresses are never allowed.
+    fn is_local_plain(&self) -> bool {
+        let address = self.addr.ip();
+        self.transport == ForwardTransport::Plain
+            && local_forward_nets()
+                .iter()
+                .any(|network| network.contains(&address))
+    }
 }
 
 impl From<SocketAddr> for ForwardServer {
@@ -529,13 +590,45 @@ impl IteratorResolver {
         qtype: RecordType,
         context: WalkContext<'_>,
     ) -> Result<WalkAnswer, ResolveError> {
-        // A matching forward zone normally short-circuits iteration. Subqueries
-        // inherit this path, so a CNAME target inside the zone is forwarded
-        // too. A `forward_fallback` zone is only used when iteration fails.
         let forward = self.forward_zone(&name).cloned();
-        if let Some(zone) = &forward
+        let local = is_local_name(&name);
+
+        if local {
+            // Local names never go to an encrypted or public resolver, and they
+            // never start an iterative walk toward the root. The pipeline has
+            // already answered configured local data; everything else may only
+            // go to the built-in gateway route or a plain on-LAN forwarder.
+            let Some(zone) = &forward else {
+                return Ok(self.refused(&name, qtype));
+            };
+            let usable = zone.servers.iter().all(ForwardServer::is_local_plain);
+            if !usable {
+                warn!(
+                    qname = %name,
+                    zone = %zone.zone,
+                    "refusing local query with a public or encrypted forwarder"
+                );
+                return Ok(self.refused(&name, qtype));
+            }
+            return match self.walk_forward(&name, qtype, zone, &context).await {
+                Ok(message) => Ok(message),
+                Err(error) => {
+                    warn!(
+                        qname = %name,
+                        zone = %zone.zone,
+                        %error,
+                        "local forwarder failed"
+                    );
+                    Ok(self.refused(&name, qtype))
+                }
+            };
+        } else if let Some(zone) = &forward
             && !zone.forward_fallback
         {
+            // A matching forward zone normally short-circuits iteration.
+            // Subqueries inherit this path, so a CNAME target inside the zone
+            // is forwarded too. A `forward_fallback` zone is only used when
+            // iteration fails.
             match self.walk_forward(&name, qtype, zone, &context).await {
                 Ok(message) => return Ok(message),
                 Err(error) if zone.forward_first => {
@@ -1601,6 +1694,18 @@ impl IteratorResolver {
         )
     }
 
+    /// Build a local REFUSED answer without contacting any upstream.
+    fn refused(&self, name: &Name, qtype: RecordType) -> WalkAnswer {
+        WalkAnswer::new(self.build_response(
+            name,
+            qtype,
+            ResponseCode::Refused,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))
+    }
+
     fn build_response(
         &self,
         name: &Name,
@@ -2160,9 +2265,12 @@ fn randomize_case(name: &Name) -> Name {
 #[cfg(test)]
 mod tests {
     use dns_cache::{InfraCache, RrsetCache};
-    use dns_proto::{Name, RecordType};
+    use dns_proto::{Name, RecordType, ResponseCode};
 
-    use super::{IteratorConfig, IteratorResolver, group_rrsets, randomize_case};
+    use super::{
+        ForwardServer, ForwardTransport, ForwardZone, IteratorConfig, IteratorResolver,
+        group_rrsets, is_local_name, randomize_case,
+    };
     use dns_proto::{RData, Record};
 
     #[test]
@@ -2254,6 +2362,80 @@ mod tests {
         let ordered = resolver.ordered_servers(vec![failing, healthy]);
         assert_eq!(ordered[0], healthy, "backed-off servers must be tried last");
         assert_eq!(ordered[1], failing);
+    }
+
+    #[tokio::test]
+    async fn local_query_with_public_forwarder_is_refused() {
+        let config = IteratorConfig {
+            forward_zones: vec![ForwardZone {
+                zone: Name::from_ascii(".").expect("root zone"),
+                servers: vec![ForwardServer::from(
+                    "8.8.8.8:53"
+                        .parse::<std::net::SocketAddr>()
+                        .expect("forwarder address"),
+                )],
+                forward_first: false,
+                forward_fallback: false,
+            }],
+            ..IteratorConfig::default()
+        };
+        let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+
+        let response = resolver
+            .resolve("host.localdomain.", RecordType::A)
+            .await
+            .expect("local response");
+
+        assert_eq!(response.metadata.response_code, ResponseCode::Refused);
+        assert!(response.answers.is_empty(), "refusal must carry no data");
+    }
+
+    #[tokio::test]
+    async fn local_query_without_local_forwarder_is_refused() {
+        let resolver = IteratorResolver::new().expect("resolver");
+
+        let response = resolver
+            .resolve("1.1.10.in-addr.arpa.", RecordType::PTR)
+            .await
+            .expect("local response");
+
+        assert_eq!(response.metadata.response_code, ResponseCode::Refused);
+    }
+
+    #[test]
+    fn local_names_cover_private_domains_and_reverse_zones() {
+        for name in [
+            "host.localdomain.",
+            "printer.lan.",
+            "10.1.168.192.in-addr.arpa.",
+            "8.b.d.0.1.0.0.2.ip6.arpa.",
+        ] {
+            assert!(
+                is_local_name(&Name::from_ascii(name).expect("name")),
+                "{name}"
+            );
+        }
+        assert!(!is_local_name(
+            &Name::from_ascii("www.example.com.").expect("name")
+        ));
+    }
+
+    #[test]
+    fn encrypted_forwarder_is_never_local() {
+        let mut server = ForwardServer {
+            addr: "192.168.1.1:853".parse().expect("address"),
+            transport: ForwardTransport::Tls,
+            tls_name: Some("router.localdomain".to_owned()),
+            path: None,
+        };
+        assert!(!server.is_local_plain());
+
+        server.transport = ForwardTransport::Plain;
+        server.addr = "192.168.1.1:53".parse().expect("address");
+        assert!(server.is_local_plain());
+
+        server.addr = "8.8.8.8:53".parse().expect("address");
+        assert!(!server.is_local_plain());
     }
 
     #[test]
