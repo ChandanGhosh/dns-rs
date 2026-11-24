@@ -63,6 +63,11 @@ re-reads the daemon's own configuration file; the request cannot name a path.
 interface; pass `--socket PATH` to override it without loading the
 configuration.
 
+The client must have the daemon's effective UID. On a host install the packaged
+service runs as `dns-rs`, so prefix these commands with `sudo -u dns-rs` or
+`runuser -u dns-rs --`. Running them as root is rejected; use
+`systemctl reload dns-rs.service` when only a reload is needed.
+
 Any client able to write one JSON line to the socket works. For example:
 
 ```bash

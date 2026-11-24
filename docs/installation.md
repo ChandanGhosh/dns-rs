@@ -97,6 +97,20 @@ community build service or a signed repository you control.
 Upgrades keep local edits to `/etc/dns-rs/dns-rs.conf` through the package
 manager's conffile handling.
 
+The packaged unit runs the daemon as `dns-rs` and ships with the control socket
+disabled. To use control commands, enable `remote-control` with a path under
+`/run/dns-rs/` (the unit's writable runtime directory), then restart the
+service. Run the client as the service user:
+
+```bash
+sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf control status
+sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf control reload
+```
+
+The socket checks the peer's effective UID, so running the client as root fails
+with a connection reset. For reloads, `sudo systemctl reload dns-rs.service`
+works without a control socket.
+
 ## Install from source
 
 Requirements: Rust 1.100 or newer and a C toolchain for dependencies such as
