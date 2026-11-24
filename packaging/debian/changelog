@@ -1,3 +1,9 @@
+dns-rs (0.6.4) unstable; urgency=medium
+
+  * Contain local DNS names on plain LAN forwarders.
+
+ -- Chandan Ghosh <ckghosh1983@gmail.com>  Tue, 24 Nov 2026 07:25:35 +0000
+
 dns-rs (0.6.3) unstable; urgency=medium
 
   * Publish prebuilt deb and rpm packages with each release.

@@ -70,6 +70,7 @@ impl TestServer {
         config.server.https_port = doh.port();
         config.server.dnssec_validation = false;
         config.server.incoming_num_tcp = incoming_num_tcp;
+        config.local_data = vec!["upstream.test. 60 IN A 127.0.0.1".to_owned()];
 
         let shutdown = CancellationToken::new();
         let server_shutdown = shutdown.clone();
@@ -271,7 +272,7 @@ async fn upstream_dot_forwarder_resolves() {
     );
     let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     let message = resolver
-        .resolve("localhost.", RecordType::A)
+        .resolve("upstream.test.", RecordType::A)
         .await
         .expect("forwarded DoT resolution");
     assert_eq!(message.metadata.response_code, ResponseCode::NoError);
@@ -286,7 +287,7 @@ async fn upstream_dot_forwarder_without_auth_name_ignores_the_certificate_name()
     let config = forward_config(server.dot, ForwardTransport::Tls, None, None, &server.cert);
     let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     let message = resolver
-        .resolve("localhost.", RecordType::A)
+        .resolve("upstream.test.", RecordType::A)
         .await
         .expect("forwarded DoT resolution without an auth name");
     assert_eq!(message.metadata.response_code, ResponseCode::NoError);
@@ -304,7 +305,10 @@ async fn upstream_dot_forwarder_rejects_a_mismatched_auth_name() {
     );
     let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     assert!(
-        resolver.resolve("localhost.", RecordType::A).await.is_err(),
+        resolver
+            .resolve("upstream.test.", RecordType::A)
+            .await
+            .is_err(),
         "certificate name verification must still apply when #auth-name is set"
     );
 }
@@ -321,7 +325,7 @@ async fn upstream_doh_forwarder_resolves() {
     );
     let resolver = IteratorResolver::with_config(config, None).expect("resolver");
     let message = resolver
-        .resolve("localhost.", RecordType::A)
+        .resolve("upstream.test.", RecordType::A)
         .await
         .expect("forwarded DoH resolution");
     assert_eq!(message.metadata.response_code, ResponseCode::NoError);

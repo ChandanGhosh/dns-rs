@@ -169,6 +169,15 @@ trust_anchor = []
 tls_use_system_ca = true
 # tls_cert_bundle = "/etc/dns-rs/upstream-ca.pem"
 
+# Local namespace example. Built-in local names and private reverse zones are
+# routed to the detected default gateway over plain DNS automatically. This
+# shows an explicit override; never use a public or encrypted forwarder here.
+[[forward_zones]]
+name = "localdomain."
+forward_addrs = ["192.168.1.1"]
+tls_upstream = false
+forward_first = false
+
 # Forward zones. The most specific matching zone wins; name = "." forwards
 # everything. Forwarders may be plain UDP (with TCP fallback), DoT with
 # tls_upstream = true and "addr@853#auth-name", or DoH with an https:// URL.

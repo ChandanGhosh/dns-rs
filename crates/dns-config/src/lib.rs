@@ -10,17 +10,20 @@
 //! that an existing configuration can be brought over incrementally.
 
 mod error;
+mod gateway;
 mod hints;
 mod model;
 mod parser;
 mod warnings;
 
 pub use error::{ConfigError, ConfigWarning, LoadedConfig};
+pub use gateway::default_gateways;
 pub use hints::{RootHintsError, load_root_hints, parse_root_hints};
 pub use model::{
     AccessAction, AccessControl, AccessControlView, AuthZoneConfig, Config, ForwardTarget,
     ForwardZoneConfig, LOCAL_DATA_DEFAULT_TTL, ListenAddress, LocalZoneConfig, LocalZoneType,
-    RemoteControlConfig, ServerConfig, StubZoneConfig, ThreadCount, ViewConfig, parse_local_data,
+    RemoteControlConfig, ServerConfig, StubZoneConfig, ThreadCount, ViewConfig, local_domains,
+    parse_local_data,
 };
 pub use parser::parse_unbound_str;
 

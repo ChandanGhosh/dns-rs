@@ -321,9 +321,11 @@ matching behavior or if an upstream is known to mishandle mixed-case names.
 
 ### Private reverse zones
 
-dns-rs behaves as if `unblock-lan-zones: yes` were set. Private reverse zones
-are resolved upstream rather than answered with synthetic local data.
-`unblock-lan-zones: no` is accepted with a warning but does not change this.
+dns-rs routes private reverse zones and common local suffixes through the
+default gateway over plain DNS. They are never sent to a public, DoT, or DoH
+resolver. With no discoverable gateway, these names are REFUSED.
+`unblock-lan-zones: no` is accepted with a warning because dns-rs resolves the
+names locally instead of blocking them outright.
 
 ### Relative includes
 

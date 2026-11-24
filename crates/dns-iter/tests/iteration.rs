@@ -788,6 +788,60 @@ async fn forward_zone_sends_recursive_queries_directly() {
 }
 
 #[tokio::test]
+async fn local_namespace_uses_only_the_plain_local_zone() {
+    let server = MockAuth::start(|query, _tcp| {
+        Some(answer(
+            query,
+            vec![a("nas.localdomain.", [192, 168, 1, 10])],
+        ))
+    })
+    .await;
+    let config = IteratorConfig {
+        case_randomization: false,
+        cookies: false,
+        forward_zones: vec![
+            ForwardZone {
+                zone: n("."),
+                servers: vec![
+                    "8.8.8.8:53"
+                        .parse::<SocketAddr>()
+                        .expect("public forwarder")
+                        .into(),
+                ],
+                forward_first: false,
+                forward_fallback: false,
+            },
+            ForwardZone {
+                zone: n("localdomain."),
+                servers: vec![server.addr.into()],
+                forward_first: false,
+                forward_fallback: false,
+            },
+        ],
+        ..IteratorConfig::default()
+    };
+
+    let resolver = IteratorResolver::with_config(config, None).expect("resolver");
+    let message = resolver
+        .resolve("nas.localdomain.", RecordType::A)
+        .await
+        .expect("local resolution succeeds");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        message
+            .answers
+            .iter()
+            .any(|record| *record == a("nas.localdomain.", [192, 168, 1, 10]))
+    );
+    assert_eq!(
+        server.observed().len(),
+        1,
+        "only the local forwarder was queried"
+    );
+}
+
+#[tokio::test]
 async fn forward_zone_accepts_nodata_without_soa() {
     // nextdns.io answers `*.test.nextdns.io HTTPS` with NOERROR and nothing
     // else: no answer records and no SOA in the authority section.

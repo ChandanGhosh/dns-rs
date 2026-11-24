@@ -802,7 +802,7 @@ impl QueryPipeline {
         // addresses learned from referrals.
         let do_not_query = config.server.do_not_query_networks();
 
-        let forward_zones = config
+        let mut forward_zones = config
             .forward_zones
             .iter()
             .filter_map(|zone| {
@@ -853,6 +853,30 @@ impl QueryPipeline {
                 })
             })
             .collect::<Vec<_>>();
+
+        let local_domains = dns_config::local_domains();
+        let gateways = dns_config::default_gateways();
+        let local_gateway = gateways
+            .iter()
+            .find(|address| matches!(address, IpAddr::V4(_)) && config.server.do_ip4)
+            .or_else(|| {
+                gateways
+                    .iter()
+                    .find(|address| matches!(address, IpAddr::V6(_)) && config.server.do_ip6)
+            })
+            .copied();
+        if let Some(gateway) = local_gateway {
+            let server = ForwardServer::from(SocketAddr::new(gateway, 53));
+            forward_zones.extend(local_domains.iter().cloned().map(|zone| ForwardZone {
+                zone,
+                servers: vec![server.clone()],
+                forward_first: false,
+                forward_fallback: false,
+            }));
+            info!(%gateway, "routing local namespaces through the default gateway");
+        } else {
+            warn!("no default gateway found; local namespaces will be refused");
+        }
 
         if !forward_zones.is_empty() {
             info!(
@@ -958,6 +982,11 @@ impl QueryPipeline {
             }
         };
 
+        let mut insecure_domains = config.server.insecure_domains();
+        insecure_domains.extend(local_domains);
+        insecure_domains.sort_unstable();
+        insecure_domains.dedup();
+
         let iterator_config = IteratorConfig {
             case_randomization: config.server.use_caps_for_id,
             qname_minimization: config.server.qname_minimisation,
@@ -975,7 +1004,7 @@ impl QueryPipeline {
             bootstrap_servers,
             dnssec_validation: config.server.dnssec_validation,
             trust_store: trust_store.clone(),
-            domain_insecure: config.server.insecure_domains(),
+            domain_insecure: insecure_domains,
             harden_dnssec_stripped: config.server.harden_dnssec_stripped,
             nsec3_max_iterations: config.server.nsec3_max_iterations,
             val_permissive_mode: config.server.val_permissive_mode,
