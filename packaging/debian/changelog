@@ -1,3 +1,11 @@
+dns-rs (0.6.5) unstable; urgency=medium
+
+  * Bound upstream connection pools by RLIMIT_NOFILE and raise the packaged
+    service's soft descriptor limit to 65536.
+  * Warn at startup when a low descriptor limit reduces pool capacity.
+
+  -- Chandan Ghosh <ckghosh1983@gmail.com>  Wed, 25 Nov 2026 13:34:35 +0000
+
 dns-rs (0.6.4) unstable; urgency=medium
 
   * Contain local DNS names on plain LAN forwarders.
