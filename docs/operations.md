@@ -198,7 +198,8 @@ RFC 5011 is enabled, and access to the control socket for monitoring.
 
 The upstream connection pools size themselves from the process's soft
 `RLIMIT_NOFILE`, so a low limit reduces idle sockets instead of failing with
-`EMFILE`. The packaged systemd unit raises the soft limit to 65536 because
-older systemd releases (including EL9) default to 1024. When running the binary
-directly or in a container without that unit, raise the limit to at least 4096
-under sustained recursive load.
+`EMFILE`. A startup warning reports the effective limit and the reduced pool
+capacity with the suggested override. The packaged systemd unit raises the soft
+limit to 65536 because older systemd releases (including EL9) default to 1024.
+When running the binary directly or in a container without that unit, raise the
+limit to at least 4096 under sustained recursive load.

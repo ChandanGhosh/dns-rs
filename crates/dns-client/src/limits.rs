@@ -9,6 +9,8 @@
 
 use std::sync::OnceLock;
 
+use tracing::warn;
+
 /// Shards in each upstream pool. Kept here because every transport uses the
 /// same sharding scheme.
 pub(crate) const SHARD_COUNT: usize = 32;
@@ -26,13 +28,27 @@ const TRANSPORT_COUNT: u64 = 4;
 const MAX_CAPACITY: usize = 4096;
 /// Soft limit assumed when the real one cannot be read.
 const FALLBACK_LIMIT: u64 = 1024;
+/// Soft limit recommended for full pool capacity and in-flight headroom.
+const RECOMMENDED_LIMIT: u64 = 65_536;
 
 /// Upper bound on idle descriptors for one transport pool.
 pub(crate) fn idle_pool_capacity() -> usize {
     static CAPACITY: OnceLock<usize> = OnceLock::new();
     *CAPACITY.get_or_init(|| {
-        let limit = soft_no_file_limit().unwrap_or(FALLBACK_LIMIT);
-        capacity_from_limit(limit)
+        let queried = soft_no_file_limit();
+        let limit = queried.unwrap_or(FALLBACK_LIMIT);
+        let capacity = capacity_from_limit(limit);
+        if capacity < MAX_CAPACITY {
+            warn!(
+                soft_limit = limit,
+                pool_capacity = capacity,
+                recommended_limit = RECOMMENDED_LIMIT,
+                assumed = queried.is_none(),
+                "low RLIMIT_NOFILE; upstream pools are reduced; raise the soft limit with \
+                 systemd LimitNOFILE=65536 or container --ulimit nofile=65536:65536 for better QPS"
+            );
+        }
+        capacity
     })
 }
 
@@ -90,6 +106,7 @@ mod tests {
         assert_eq!(capacity_from_limit(RESERVED_FDS), 0);
         assert_eq!(capacity_from_limit(1024), 128);
         assert_eq!(capacity_from_limit(2048), 384);
+        assert_eq!(capacity_from_limit(RECOMMENDED_LIMIT), MAX_CAPACITY);
         assert_eq!(capacity_from_limit(u64::MAX), MAX_CAPACITY);
     }
 
