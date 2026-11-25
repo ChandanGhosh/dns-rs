@@ -14,32 +14,42 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
+use crate::limits::{SHARD_COUNT, idle_pool_capacity, pool_parameters};
 use crate::{ClientError, exchange};
 
+/// Ideal number of idle connections per upstream server before the descriptor
+/// budget scales it down.
 const MAX_IDLE_PER_SERVER: usize = 4;
-/// Maximum number of upstream servers tracked per shard. Combined with
-/// [`MAX_IDLE_PER_SERVER`] this bounds the map and the idle connections a
-/// hostile zone can accumulate by churning nameserver addresses.
-const MAX_SERVERS_PER_SHARD: usize = 32;
-const SHARD_COUNT: usize = 32;
 
 type TcpStreamList = Vec<TcpStream>;
 type TcpPoolMap = HashMap<SocketAddr, TcpStreamList>;
 type TcpPoolShard = Mutex<TcpPoolMap>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ConnectionPool {
     shards: Arc<Vec<TcpPoolShard>>,
+    idle_per_server: usize,
+    servers_per_shard: usize,
+}
+
+impl Default for ConnectionPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConnectionPool {
     fn new() -> Self {
+        let (idle_per_server, servers_per_shard) =
+            pool_parameters(idle_pool_capacity(), MAX_IDLE_PER_SERVER);
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
             shards.push(Mutex::new(HashMap::new()));
         }
         Self {
             shards: Arc::new(shards),
+            idle_per_server,
+            servers_per_shard,
         }
     }
 
@@ -142,12 +152,12 @@ impl TcpClient {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(idle) = pool.get_mut(&server) {
-            if idle.len() < MAX_IDLE_PER_SERVER {
+            if idle.len() < self.pool.idle_per_server {
                 idle.push(stream);
             }
             return;
         }
-        if pool.len() >= MAX_SERVERS_PER_SHARD
+        if pool.len() >= self.pool.servers_per_shard
             && let Some(evicted) = pool.keys().next().copied()
         {
             // Drop one server's idle connections so a zone that keeps rotating

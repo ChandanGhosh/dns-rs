@@ -24,13 +24,13 @@ use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 
 use crate::ClientError;
+use crate::limits::idle_pool_capacity;
 use crate::tls::client_config;
 
 const DNS_MESSAGE: &str = "application/dns-message";
 const MAX_RESPONSE: usize = 65_535;
-/// Maximum number of upstream HTTP/2 connections kept alive. Bounds the map
-/// and the idle connections when a configuration churns through many
-/// forwarder addresses.
+/// Ideal number of upstream HTTP/2 connections kept alive before the
+/// descriptor budget scales it down.
 const MAX_SENDERS: usize = 1024;
 
 type SenderKey = (SocketAddr, String);
@@ -40,6 +40,7 @@ type SenderCache = Arc<Mutex<HashMap<SenderKey, SendRequest<Full<Bytes>>>>>;
 pub struct HttpsClient {
     connector: TlsConnector,
     senders: SenderCache,
+    max_senders: usize,
 }
 
 impl HttpsClient {
@@ -49,6 +50,7 @@ impl HttpsClient {
         Ok(Self {
             connector: TlsConnector::from(config),
             senders: Arc::new(Mutex::new(HashMap::new())),
+            max_senders: MAX_SENDERS.min(idle_pool_capacity()),
         })
     }
 
@@ -119,7 +121,7 @@ impl HttpsClient {
         });
 
         let mut senders = self.senders.lock().await;
-        if senders.len() >= MAX_SENDERS
+        if senders.len() >= self.max_senders
             && !senders.contains_key(&key)
             && let Some(evicted) = senders.keys().next().cloned()
         {

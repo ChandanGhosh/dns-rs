@@ -1,6 +1,7 @@
 //! Upstream DNS transports used by the iterative resolver.
 
 mod https;
+mod limits;
 mod tcp;
 mod tls;
 mod udp;
