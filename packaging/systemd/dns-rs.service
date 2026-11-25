@@ -18,6 +18,9 @@ RuntimeDirectoryMode=0755
 StateDirectory=dns-rs
 StateDirectoryMode=0750
 ReadWritePaths=/var/lib/dns-rs /run/dns-rs
+# Older systemd releases (including EL9) default to 1024 soft descriptors,
+# which is not enough for the resolver's upstream connection pools under load.
+LimitNOFILE=65536
 
 # Allow binding port 53 without a setuid binary. Remove these two lines and
 # use a high port in the configuration if the capability is not wanted.

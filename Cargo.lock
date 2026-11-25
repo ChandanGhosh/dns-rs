@@ -308,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "dns-cache"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dashmap",
  "dns-proto",
@@ -320,12 +320,13 @@ dependencies = [
 
 [[package]]
 name = "dns-client"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dns-proto",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "rustls",
  "socket2",
  "thiserror",
@@ -337,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "dns-config"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dns-proto",
  "glob",
@@ -350,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "dns-control"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "libc",
  "serde",
@@ -364,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "dns-daemon"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -383,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "dns-dnssec"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "data-encoding",
  "dns-proto",
@@ -396,11 +397,11 @@ dependencies = [
 
 [[package]]
 name = "dns-filter"
-version = "0.6.4"
+version = "0.6.5"
 
 [[package]]
 name = "dns-iter"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "data-encoding",
  "dns-cache",
@@ -419,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "dns-proto"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "hickory-proto",
  "thiserror",
@@ -427,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "dns-replay"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dns-iter",
  "dns-proto",
@@ -437,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "dns-server"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -472,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "dns-testutil"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "dns-dnssec",
  "dns-proto",

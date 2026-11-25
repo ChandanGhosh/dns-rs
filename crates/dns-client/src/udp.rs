@@ -8,15 +8,11 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 use crate::ClientError;
+use crate::limits::{SHARD_COUNT, idle_pool_capacity, pool_parameters};
 
-/// Idle sockets retained per upstream server. The pool bounds both memory
-/// and the source-port set a server sees from this resolver.
+/// Ideal number of idle sockets per upstream server before the descriptor
+/// budget scales it down.
 const MAX_IDLE_PER_SERVER: usize = 16;
-/// Maximum number of upstream servers tracked per shard. Combined with
-/// [`MAX_IDLE_PER_SERVER`] this bounds the map and the idle descriptors a
-/// hostile zone can accumulate by churning nameserver addresses.
-const MAX_SERVERS_PER_SHARD: usize = 32;
-const SHARD_COUNT: usize = 32;
 
 type UdpSocketList = Vec<UdpSocket>;
 type UdpPoolMap = HashMap<SocketAddr, UdpSocketList>;
@@ -25,16 +21,22 @@ type UdpPoolShard = Mutex<UdpPoolMap>;
 #[derive(Clone)]
 struct SocketPool {
     shards: Arc<Vec<UdpPoolShard>>,
+    idle_per_server: usize,
+    servers_per_shard: usize,
 }
 
 impl Default for SocketPool {
     fn default() -> Self {
+        let (idle_per_server, servers_per_shard) =
+            pool_parameters(idle_pool_capacity(), MAX_IDLE_PER_SERVER);
         let mut shards = Vec::with_capacity(SHARD_COUNT);
         for _ in 0..SHARD_COUNT {
             shards.push(Mutex::new(HashMap::new()));
         }
         Self {
             shards: Arc::new(shards),
+            idle_per_server,
+            servers_per_shard,
         }
     }
 }
@@ -86,7 +88,9 @@ fn shard_index(shards: usize, key: SocketAddr) -> usize {
 /// A timed-out or failed exchange drops its socket instead of returning it
 /// to the pool, so a late reply has nowhere to land. Responses are read into
 /// buffers borrowed from a shared [`BufferPool`], so steady-state exchanges
-/// do not allocate and zero-fill a 64 KiB receive buffer per query.
+/// do not allocate and zero-fill a 64 KiB receive buffer per query. Pool
+/// capacity is derived from the process descriptor limit, so a container with
+/// a low `RLIMIT_NOFILE` cannot hit `EMFILE` by filling the pool.
 #[derive(Clone, Debug, Default)]
 pub struct UdpClient {
     bind_addr: Option<IpAddr>,
@@ -196,12 +200,12 @@ impl UdpClient {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(idle) = pool.get_mut(&server) {
-            if idle.len() < MAX_IDLE_PER_SERVER {
+            if idle.len() < self.pool.idle_per_server {
                 idle.push(socket);
             }
             return;
         }
-        if pool.len() >= MAX_SERVERS_PER_SHARD
+        if pool.len() >= self.pool.servers_per_shard
             && let Some(evicted) = pool.keys().next().copied()
         {
             // Drop one server's idle sockets so a zone that keeps rotating
@@ -275,11 +279,12 @@ mod tests {
     #[tokio::test]
     async fn pool_bounds_the_tracked_server_count() {
         let client = UdpClient::new(None).expect("client");
+        let limit = client.pool.servers_per_shard;
         // Fill every shard to capacity; `put` only needs a full map to
         // exercise eviction.
         for shard in client.pool.shards.iter() {
             let mut map = shard.lock().unwrap_or_else(|error| error.into_inner());
-            for port in 0..MAX_SERVERS_PER_SHARD {
+            for port in 0..limit {
                 map.insert(SocketAddr::from(([127, 0, 0, 1], port as u16)), Vec::new());
             }
         }
@@ -292,7 +297,7 @@ mod tests {
         let map = client.pool.shards[idx]
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        assert_eq!(map.len(), MAX_SERVERS_PER_SHARD);
+        assert_eq!(map.len(), limit);
         assert!(map.contains_key(&server));
     }
 }
