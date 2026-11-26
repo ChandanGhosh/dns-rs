@@ -1,3 +1,12 @@
+dns-rs (0.6.7) unstable; urgency=medium
+
+  * Relax QNAME minimisation after an intermediate NXDOMAIN so wildcard names
+    below empty non-terminals are not cached as false negatives.
+  * Preserve strict minimisation and full-QNAME negative answers, with
+    regression tests for both paths.
+
+  -- Chandan Ghosh <ckghosh1983@gmail.com>  Thu, 26 Nov 2026 12:50:11 +0000
+
 dns-rs (0.6.6) unstable; urgency=medium
 
   * Ship zones.d/local-zones.conf with transparent defaults for common router

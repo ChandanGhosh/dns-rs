@@ -190,7 +190,7 @@ pub struct IteratorConfig {
     pub case_randomization: bool,
     /// Minimise QNAMEs sent to authoritative servers (RFC 9156).
     pub qname_minimization: bool,
-    /// Do not relax minimisation on NODATA or CNAME responses.
+    /// Do not relax minimisation on NODATA, CNAME, or NXDOMAIN responses.
     pub qname_minimization_strict: bool,
     /// Reject out-of-bailiwick glue.
     pub harden_glue: bool,
@@ -884,7 +884,7 @@ impl IteratorResolver {
 
             debug!(qname = %qname, step = %suffix, "QNAME minimisation step");
 
-            let response = match self
+            let mut response = match self
                 .query_servers(servers, &suffix, RecordType::NS, context)
                 .await
             {
@@ -899,12 +899,21 @@ impl IteratorResolver {
             };
 
             if response.metadata.response_code == ResponseCode::NXDomain {
-                debug!(step = %suffix, "minimised query proved NXDOMAIN");
-                return Ok(Minimized::Answer(self.negative_message(
-                    qname.clone(),
-                    qtype,
-                    response,
-                )));
+                // Authorities sometimes return NXDOMAIN for an empty
+                // non-terminal while still serving names beneath it from a
+                // wildcard. Only a denial for the full QNAME, or an explicit
+                // strict-mode request, may be returned to the client.
+                if self.config.qname_minimization_strict || suffix == *qname {
+                    debug!(step = %suffix, "minimised query proved NXDOMAIN");
+                    scrub::scrub_authorities(&mut response, qname);
+                    return Ok(Minimized::Answer(self.negative_message(
+                        qname.clone(),
+                        qtype,
+                        response,
+                    )));
+                }
+                debug!(step = %suffix, "minimisation relaxed after NXDOMAIN");
+                return Ok(Minimized::Continue);
             }
 
             let authoritative_ns = response

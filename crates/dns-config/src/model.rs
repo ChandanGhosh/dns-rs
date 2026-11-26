@@ -461,7 +461,7 @@ pub struct ServerConfig {
     pub root_hints: Vec<PathBuf>,
     /// Minimise QNAMEs sent to authoritative servers (RFC 9156).
     pub qname_minimisation: bool,
-    /// Use strict minimisation (no relaxation on NODATA/CNAME).
+    /// Use strict minimisation (no relaxation on NXDOMAIN/NODATA/CNAME).
     pub qname_minimisation_strict: bool,
     /// Randomise the case of outgoing QNAMEs (DNS 0x20).
     pub use_caps_for_id: bool,
