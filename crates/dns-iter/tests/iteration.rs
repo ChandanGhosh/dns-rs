@@ -332,6 +332,69 @@ async fn minimisation_queries_advance_one_label_at_a_time() {
     );
 }
 
+/// Route53-style zone where `api.example.com.` is an empty non-terminal that
+/// answers NXDOMAIN while a name beneath it still has an address.
+fn empty_non_terminal(query: &Message, _tcp: bool) -> Option<Message> {
+    let question = query.queries.first()?;
+    let qname = question.name.to_ascii().to_ascii_lowercase();
+    let response = match (qname.as_str(), question.query_type) {
+        ("com.", RecordType::NS) => referral(query, "com.", "ns.com.", [127, 0, 0, 1]),
+        ("example.com.", RecordType::NS) => {
+            referral(query, "example.com.", "ns.example.com.", [127, 0, 0, 1])
+        }
+        ("api.example.com.", RecordType::NS | RecordType::A) => {
+            let mut response = reply(query, ResponseCode::NXDomain);
+            response.add_authority(soa("example.com."));
+            response
+        }
+        ("host.api.example.com.", RecordType::A) => {
+            answer(query, vec![a("host.api.example.com.", [192, 0, 2, 9])])
+        }
+        _ => reply(query, ResponseCode::ServFail),
+    };
+    Some(response)
+}
+
+#[tokio::test]
+async fn minimisation_falls_back_after_intermediate_nxdomain() {
+    let server = MockAuth::start(empty_non_terminal).await;
+    let resolver = resolver(server.addr);
+
+    let message = resolver
+        .resolve("host.api.example.com.", RecordType::A)
+        .await
+        .expect("a wildcard child of an empty non-terminal must resolve");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(message.answers.len(), 1);
+    assert!(
+        server
+            .observed()
+            .iter()
+            .any(|query| query.name == "host.api.example.com." && query.qtype == RecordType::A)
+    );
+}
+
+#[tokio::test]
+async fn strict_minimisation_keeps_intermediate_nxdomain() {
+    let server = MockAuth::start(empty_non_terminal).await;
+    let resolver = IteratorResolver::with_config(
+        IteratorConfig {
+            qname_minimization_strict: true,
+            ..resolver_config(server.addr)
+        },
+        None,
+    )
+    .expect("resolver");
+
+    let message = resolver
+        .resolve("host.api.example.com.", RecordType::A)
+        .await
+        .expect("strict minimisation returns the minimised NXDOMAIN");
+
+    assert_eq!(message.metadata.response_code, ResponseCode::NXDomain);
+}
+
 #[tokio::test]
 async fn cname_chain_in_single_message() {
     let server = MockAuth::start(with_zone(|query| {
