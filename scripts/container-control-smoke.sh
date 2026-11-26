@@ -47,7 +47,7 @@ access_control = ["127.0.0.0/8 allow", "0.0.0.0/0 refuse"]
 
 [remote_control]
 enabled = true
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 EOF
 
 platform_args=()
@@ -60,7 +60,7 @@ docker run --detach \
     --name "$CONTAINER" \
     "${platform_args[@]}" \
     --read-only \
-    --tmpfs /run:rw,noexec,nosuid,size=16m \
+    --tmpfs /run/dns-rs:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700 \
     --cap-drop ALL \
     --cap-add NET_BIND_SERVICE \
     --security-opt no-new-privileges=true \
@@ -123,7 +123,7 @@ mv "$work/invalid.toml" "$config"
 # Pass --socket explicitly: the client also parses the configuration to find
 # the socket, and the point here is to exercise the server's reload validation.
 if reload="$(docker exec "$CONTAINER" /usr/local/bin/dns-rs \
-    control --socket /run/dns-rs.sock reload 2>&1)"; then
+    control --socket /run/dns-rs/dns-rs.sock reload 2>&1)"; then
     echo "reload unexpectedly accepted an invalid configuration: $reload" >&2
     exit 1
 fi

@@ -27,6 +27,8 @@ services:
         read_only: true
         tmpfs:
             - /tmp:rw,noexec,nosuid,size=16m
+            # Enable when remote-control uses /run/dns-rs/dns-rs.sock.
+            # - /run/dns-rs:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700
         cap_drop:
             - ALL
         cap_add:

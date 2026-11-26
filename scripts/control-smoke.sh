@@ -87,12 +87,31 @@ prometheus="$(control stats-prometheus)"
 grep -q 'dns_rs_cache_hits_total' <<<"$prometheus"
 echo "prometheus: ok"
 
-if reload="$(control reload 2>&1)"; then
-    echo "reload unexpectedly succeeded: $reload" >&2
+reload="$(control reload)"
+if [ "$reload" != "reloaded" ]; then
+    echo "unexpected reload reply: $reload" >&2
     exit 1
 fi
-grep -q 'not implemented' <<<"$reload"
-echo "reload: rejected"
+echo "reload: ok"
+
+# An invalid edit must be rejected without disturbing the running config. Pass
+# the socket explicitly because the client can no longer parse the edited file.
+cp "$work/dns-rs.conf" "$work/valid.conf"
+printf '\nthis is not valid unbound.conf\n' >>"$work/dns-rs.conf"
+if reload="$("$BINARY" -c "$work/dns-rs.conf" control \
+    --socket "$work/control.sock" reload 2>&1)"; then
+    echo "reload unexpectedly accepted an invalid configuration: $reload" >&2
+    exit 1
+fi
+echo "reload: invalid configuration rejected"
+cp "$work/valid.conf" "$work/dns-rs.conf"
+
+reload="$(control reload)"
+if [ "$reload" != "reloaded" ]; then
+    echo "unexpected reload reply after restore: $reload" >&2
+    exit 1
+fi
+echo "reload: restored configuration accepted"
 
 stop="$(control stop)"
 if [ "$stop" != "stopping" ]; then

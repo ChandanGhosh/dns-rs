@@ -13,7 +13,7 @@ path:
 ```toml
 [remote_control]
 enabled = true
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 port = 8953
 ```
 
@@ -22,7 +22,7 @@ Or, in Unbound syntax:
 ```conf
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
     control-port: 8953
 ```
 
@@ -71,7 +71,7 @@ service runs as `dns-rs`, so prefix these commands with `sudo -u dns-rs` or
 Any client able to write one JSON line to the socket works. For example:
 
 ```bash
-printf '{"command":"stats"}\n' | socat - UNIX-CONNECT:/run/dns-rs.sock
+printf '{"command":"stats"}\n' | socat - UNIX-CONNECT:/run/dns-rs/dns-rs.sock
 ```
 
 The `control reload` client waits up to 30 seconds because a reload can resolve

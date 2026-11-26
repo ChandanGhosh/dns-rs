@@ -145,15 +145,15 @@ server:
     interface: 127.0.0.1@5353
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
-    control-interface: /run/dns-rs-2.sock
+    control-interface: /run/dns-rs/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs-2.sock
 "#,
         )
         .expect("write config");
 
         assert_eq!(
             socket_from_config(&path).expect("configured socket"),
-            PathBuf::from("/run/dns-rs.sock")
+            PathBuf::from("/run/dns-rs/dns-rs.sock")
         );
     }
 

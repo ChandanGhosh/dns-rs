@@ -60,5 +60,5 @@ forward_first = false
 [remote_control]
 enabled = false
 # Control interfaces are absolute Unix socket paths, not listener addresses.
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 port = 8953

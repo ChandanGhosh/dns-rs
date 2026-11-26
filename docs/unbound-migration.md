@@ -367,8 +367,8 @@ services:
         read_only: true
         tmpfs:
             - /tmp:rw,noexec,nosuid,size=16m
-            # Enable when remote-control uses a Unix socket.
-            # - /run:rw,noexec,nosuid,size=16m
+            # Enable when remote-control uses the unified Unix socket path.
+            # - /run/dns-rs:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700
         cap_drop:
             - ALL
         cap_add:
@@ -466,9 +466,9 @@ chown 65532:65532 unbound/tls/server.key
 
 `/var/lib/dns-rs` must be writable when `auto-trust-anchor-file` is enabled.
 Use the named volume from the compose file, or a host directory owned by
-`65532:65532`. The control socket needs a writable `/run` tmpfs. If the socket
-must be reachable from the host, bind-mount a host directory instead and give
-UID `65532` write access.
+`65532:65532`. The control socket needs a writable tmpfs at `/run/dns-rs`. If the
+socket must be reachable from the host, bind-mount a host directory at that path
+instead and give UID `65532` write access.
 
 ### Reload and restart
 
@@ -594,10 +594,10 @@ ReadWritePaths=/var/lib/dns-rs /run/dns-rs
 WantedBy=multi-user.target
 ```
 
-Use `control-interface: /run/dns-rs/dns-rs.sock` with this unit, or adjust the
-`RuntimeDirectory` and socket path together. `ProtectSystem=strict` keeps
-`/etc/dns-rs` readable but read-only, which is the intended configuration
-model.
+The control socket path is `/run/dns-rs/dns-rs.sock` everywhere. Adjust the
+`RuntimeDirectory` and socket path together only for a custom unit.
+`ProtectSystem=strict` keeps `/etc/dns-rs` readable but read-only, which is the
+intended configuration model.
 
 ## Recommendations
 

@@ -1707,8 +1707,8 @@ server:
     interface: 127.0.0.1@5353
 remote-control:
     control-enable: yes
-    control-interface: unix:/run/dns-rs.sock
-    control-interface: "/run/dns-rs-2.sock"
+    control-interface: unix:/run/dns-rs/dns-rs.sock
+    control-interface: "/run/dns-rs/dns-rs-2.sock"
 "#,
         )
         .expect("write config");
@@ -1718,8 +1718,8 @@ remote-control:
         assert_eq!(
             config.remote_control.interfaces,
             vec![
-                PathBuf::from("/run/dns-rs.sock"),
-                PathBuf::from("/run/dns-rs-2.sock"),
+                PathBuf::from("/run/dns-rs/dns-rs.sock"),
+                PathBuf::from("/run/dns-rs/dns-rs-2.sock"),
             ]
         );
     }
@@ -1755,7 +1755,7 @@ server:
     interface: 127.0.0.1@5353
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
     control-port: 8954
 "#,
         )
@@ -1776,8 +1776,8 @@ server:
     interface: 127.0.0.1@5353
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
-    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
 "#,
         )
         .expect("write config");

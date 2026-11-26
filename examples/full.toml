@@ -232,5 +232,5 @@ forward_fallback = false
 # Opt-in control socket: JSON commands over a Unix socket, mode 0600.
 [remote_control]
 enabled = false
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 port = 8953
