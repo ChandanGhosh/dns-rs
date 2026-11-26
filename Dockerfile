@@ -79,9 +79,9 @@ RUN target="$(cat /tmp/rust-target)" \
        DNS_RS_BUILD_DATE="${BUILD_DATE}" \
        cargo build --locked --profile dist --target "$target" \
         --package dns-daemon --bin dns-rs \
-    && mkdir -p /out/var/lib/dns-rs /out/var/cache/dns-rs \
+    && mkdir -p /out/var/lib/dns-rs /out/var/cache/dns-rs /out/run/dns-rs \
     && cp "target/$target/dist/dns-rs" /out/dns-rs \
-    && chown -R 65532:65532 /out/var
+    && chown -R 65532:65532 /out/var /out/run
 
 # Export the cross-compiled binary alone for release tarballs. BuildKit skips
 # this stage during normal image builds, so it adds no cost to `make image`.
@@ -107,8 +107,10 @@ LABEL org.opencontainers.image.title="dns-rs" \
 
 COPY --from=builder /out/dns-rs /usr/local/bin/dns-rs
 COPY --chown=65532:65532 packaging/config/dns-rs.conf /etc/dns-rs/dns-rs.conf
+COPY --chown=65532:65532 packaging/config/zones.d /etc/dns-rs/zones.d
 COPY --from=builder --chown=65532:65532 /out/var/lib/dns-rs /var/lib/dns-rs
 COPY --from=builder --chown=65532:65532 /out/var/cache/dns-rs /var/cache/dns-rs
+COPY --from=builder --chown=65532:65532 /out/run/dns-rs /run/dns-rs
 
 WORKDIR /etc/dns-rs
 USER 65532:65532

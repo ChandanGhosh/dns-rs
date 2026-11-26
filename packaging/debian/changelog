@@ -1,3 +1,12 @@
+dns-rs (0.6.6) unstable; urgency=medium
+
+  * Ship zones.d/local-zones.conf with transparent defaults for common router
+    and SOHO local domains, keeping localhost on its built-in local answer.
+  * Unify the packaged control socket path at /run/dns-rs/dns-rs.sock.
+  * Exercise the implemented reload command in the control smoke test.
+
+  -- Chandan Ghosh <ckghosh1983@gmail.com>  Thu, 26 Nov 2026 07:33:31 +0000
+
 dns-rs (0.6.5) unstable; urgency=medium
 
   * Bound upstream connection pools by RLIMIT_NOFILE and raise the packaged

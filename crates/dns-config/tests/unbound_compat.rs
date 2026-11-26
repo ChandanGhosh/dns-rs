@@ -418,3 +418,54 @@ server:
         "{domains:?}"
     );
 }
+
+#[test]
+fn shipped_config_loads_router_local_zone_defaults() {
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/config/dns-rs.conf");
+    let loaded = load(&shipped).expect("shipped configuration");
+
+    assert!(
+        !messages(&loaded)
+            .iter()
+            .any(|message| message.contains("matched no files")),
+        "{:?}",
+        loaded.warnings
+    );
+
+    for name in [
+        "local.",
+        "localdomain.",
+        "lan.",
+        "home.",
+        "home.arpa.",
+        "internal.",
+        "intranet.",
+        "corp.",
+        "private.",
+    ] {
+        assert!(
+            loaded
+                .config
+                .local_zones
+                .iter()
+                .any(|zone| { zone.name == name && zone.zone_type == LocalZoneType::Transparent }),
+            "missing transparent local-zone for {name}"
+        );
+    }
+    assert!(
+        loaded
+            .config
+            .local_zones
+            .iter()
+            .all(|zone| zone.zone_type == LocalZoneType::Transparent)
+    );
+    // `localhost.` is answered from built-in data; declaring it transparent
+    // would override that answer and forward the query to the gateway.
+    assert!(
+        loaded
+            .config
+            .local_zones
+            .iter()
+            .all(|zone| zone.name != "test." && zone.name != "localhost.")
+    );
+}

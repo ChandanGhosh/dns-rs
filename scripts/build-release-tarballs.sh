@@ -7,8 +7,9 @@ usage() {
 Usage: scripts/build-release-tarballs.sh --version VERSION --input-dir DIR --output-dir DIR
 
 Input binaries must be named dns-rs-amd64 and dns-rs-arm64. Each output
-tarball contains the binary, default configuration, systemd unit, LICENSE,
-and a short README; SHA256SUMS covers every tarball in the output directory.
+tarball contains the binary, default configuration, zones.d local-zone
+defaults, systemd unit, LICENSE, and a short README; SHA256SUMS covers every
+tarball in the output directory.
 EOF
 }
 
@@ -51,6 +52,8 @@ for arch in amd64 arm64; do
         install -D -m 0644 "$repo_root/LICENSE" "$staging/$name/LICENSE"
         install -D -m 0644 "$repo_root/packaging/config/dns-rs.conf" \
             "$staging/$name/dns-rs.conf"
+        install -D -m 0644 "$repo_root/packaging/config/zones.d/local-zones.conf" \
+            "$staging/$name/zones.d/local-zones.conf"
         install -D -m 0644 "$repo_root/packaging/systemd/dns-rs.service" \
             "$staging/$name/dns-rs.service"
 
@@ -64,6 +67,7 @@ dependencies beyond a C library-free Linux kernel.
 
 - \`dns-rs\` -- resolver binary
 - \`dns-rs.conf\` -- default configuration (port 53, RFC 1918 clients only)
+- \`zones.d/local-zones.conf\` -- transparent local-zone defaults for router domains
 - \`dns-rs.service\` -- systemd unit
 - \`LICENSE\` -- BSD-3-Clause
 
@@ -76,8 +80,10 @@ sha256sum --check SHA256SUMS --ignore-missing
 sudo useradd --system --home-dir /var/lib/dns-rs \\
   --shell /usr/sbin/nologin dns-rs
 sudo install -d -o dns-rs -g dns-rs -m 0750 /etc/dns-rs /var/lib/dns-rs /run/dns-rs
+sudo install -d -o root -g dns-rs -m 0750 /etc/dns-rs/zones.d
 sudo install -m 0755 dns-rs /usr/bin/dns-rs
 sudo install -o dns-rs -g dns-rs -m 0640 dns-rs.conf /etc/dns-rs/dns-rs.conf
+sudo install -o root -g dns-rs -m 0640 zones.d/local-zones.conf /etc/dns-rs/zones.d/local-zones.conf
 sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf checkconf
 sudo install -m 0644 dns-rs.service /etc/systemd/system/dns-rs.service
 sudo systemctl daemon-reload

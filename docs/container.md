@@ -65,12 +65,12 @@ directories, but only mount persistent storage for state you need. For RFC 5011
 directory, mount a small tmpfs at `/tmp`.
 
 The optional control socket needs both configuration and a writable directory:
-enable `remote-control` and mount a tmpfs that contains its path. Neither change
-alone is enough. For example, mount a tmpfs and point `control-interface` at it:
-`--tmpfs /run:rw,noexec,nosuid,size=16m` with
-`control-interface: /run/dns-rs.sock`. The socket is mode `0600` and is owned
-by the container user (`65532`), so use `docker exec` (which runs as that same
-UID by default) for control requests:
+enable `remote-control` and mount a tmpfs at its parent directory. Neither change
+alone is enough. For example:
+`--tmpfs /run/dns-rs:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700`
+with `control-interface: /run/dns-rs/dns-rs.sock`. The socket is mode `0600` and
+is owned by the container user (`65532`), so use `docker exec` (which runs as
+that same UID by default) for control requests:
 
 ```bash
 docker exec dns-rs /usr/local/bin/dns-rs \
@@ -104,7 +104,7 @@ content. The compose example mounts `packaging/config`, which contains
 
 `make control-container` builds the image and runs this end-to-end, including
 `reload` and `stop`. The socket path must be on a writable mount; a read-only
-root filesystem with only `/tmp` writable cannot create `/run/dns-rs.sock`.
+root filesystem with only `/tmp` writable cannot create `/run/dns-rs/dns-rs.sock`.
 
 TLS verification uses roots compiled into the binary (`webpki-roots`), so the
 missing system CA store is not a problem. Name resolution for configuration
@@ -435,6 +435,11 @@ local-zone: "metrics.example" always_nxdomain
   an included blocklist. Deduplicate generated lists.
 - Repeating `always_nxdomain` for a parent and its children is harmless; the
   loader keeps only the ancestor when the policy is identical.
+
+The image ships `/etc/dns-rs/zones.d/local-zones.conf` and the default
+`dns-rs.conf` includes it. A bind mount that replaces the whole `/etc/dns-rs`
+directory hides that file; copy it into the mounted directory or remove the
+include when using a fully custom configuration.
 
 See [Migrating from Unbound](unbound-migration.md) for the full include layout
 and option matrix.
@@ -851,7 +856,7 @@ by default, so enable it in the configuration the container loads:
 ```conf
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
 ```
 
 The TOML front-end is equivalent:
@@ -859,7 +864,7 @@ The TOML front-end is equivalent:
 ```toml
 [remote_control]
 enabled = true
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 port = 8953
 ```
 
@@ -867,17 +872,17 @@ Enabling, moving, or disabling the socket requires a restart: a reload reports
 `remote-control` as a restart-only change, just like a listener or port change.
 
 The socket needs a writable directory, which a read-only root filesystem does
-not provide. Mount a tmpfs at `/run`:
+not provide. Mount a tmpfs at its parent directory:
 
 ```yaml
 read_only: true
 tmpfs:
-    - /run:rw,noexec,nosuid,size=16m
+    - /run/dns-rs:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700
 ```
 
 The daemon refuses a parent directory that is group- or other-writable unless it
-has the sticky bit, so a default `755` tmpfs or a host directory owned by UID
-`65532` with mode `0755` both work. A `0777` bind mount fails at startup.
+has the sticky bit. The `0700` tmpfs above is owned by UID `65532`, so it is both
+writable by the daemon and accepted by the path check.
 
 ### Counter commands
 
@@ -900,7 +905,7 @@ docker exec dns-rs /usr/local/bin/dns-rs \
 ```
 
 The client reads the socket path from the file passed with `-c`, so use the same
-path as the container command. `--socket /run/dns-rs.sock` skips loading the
+path as the container command. `--socket /run/dns-rs/dns-rs.sock` skips loading the
 configuration entirely.
 
 | JSON field | Prometheus metric | Meaning |

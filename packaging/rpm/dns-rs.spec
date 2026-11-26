@@ -14,7 +14,7 @@
 %endif
 
 Name:           dns-rs
-Version:        0.6.5
+Version:        0.6.6
 Release:        1%{?dist}
 Summary:        Validating, recursive, caching DNS resolver
 
@@ -45,14 +45,18 @@ fi
 %install
 install -D -m 0755 dns-rs %{buildroot}%{_bindir}/dns-rs
 install -D -m 0640 dns-rs.conf %{buildroot}%{_sysconfdir}/dns-rs/dns-rs.conf
+install -D -m 0640 zones.d/local-zones.conf \
+    %{buildroot}%{_sysconfdir}/dns-rs/zones.d/local-zones.conf
 install -D -m 0644 dns-rs.service %{buildroot}%{_unitdir}/dns-rs.service
 install -d -m 0750 %{buildroot}%{_sharedstatedir}/dns-rs
 
 %files
 %license LICENSE
 %{_bindir}/dns-rs
-%dir %{_sysconfdir}/dns-rs
+%dir %attr(0750,root,dns-rs) %{_sysconfdir}/dns-rs
 %attr(0640,root,dns-rs) %config(noreplace) %{_sysconfdir}/dns-rs/dns-rs.conf
+%dir %attr(0750,root,dns-rs) %{_sysconfdir}/dns-rs/zones.d
+%attr(0640,root,dns-rs) %config(noreplace) %{_sysconfdir}/dns-rs/zones.d/local-zones.conf
 %{_unitdir}/dns-rs.service
 %dir %attr(0750,dns-rs,dns-rs) %{_sharedstatedir}/dns-rs
 

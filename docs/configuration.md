@@ -125,6 +125,12 @@ and test fixtures keep working; add an explicit plain on-LAN forward zone for
 it if the LAN resolves `.test` names. `examples/full.conf` and
 `examples/full.toml` show one explicit local-zone override.
 
+The shipped configuration includes `zones.d/*.conf`, and packages and the image
+install a `local-zones.conf` with those suffixes as transparent local zones.
+They document the protected namespaces and provide a place for local records.
+The leak guard is enforced in the resolver itself, so removing the include does
+not make public resolution possible.
+
 ### Zones and blocklists
 
 TOML uses arrays of tables:
@@ -214,14 +220,14 @@ The control channel is opt-in and uses a Unix socket only:
 ```toml
 [remote_control]
 enabled = true
-interfaces = ["/run/dns-rs.sock"]
+interfaces = ["/run/dns-rs/dns-rs.sock"]
 port = 8953
 ```
 
 ```conf
 remote-control:
     control-enable: yes
-    control-interface: /run/dns-rs.sock
+    control-interface: /run/dns-rs/dns-rs.sock
     control-port: 8953
 ```
 

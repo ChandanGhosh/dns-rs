@@ -95,12 +95,16 @@ community build service or a signed repository you control.
    a new `debian/changelog` entry with the new version for each release.
 
 Upgrades keep local edits to `/etc/dns-rs/dns-rs.conf` through the package
-manager's conffile handling.
+manager's conffile handling. The package also installs
+`/etc/dns-rs/zones.d/local-zones.conf`, which declares the common router and
+SOHO local domains as transparent local zones. Keep it installed: the resolver
+forwards those names only to the LAN gateway and never to a public resolver.
+Add router-specific suffixes or local records as extra `zones.d/*.conf` files.
 
 The packaged unit runs the daemon as `dns-rs` and ships with the control socket
-disabled. To use control commands, enable `remote-control` with a path under
-`/run/dns-rs/` (the unit's writable runtime directory), then restart the
-service. Run the client as the service user:
+disabled. To use control commands, set `control-interface` to
+`/run/dns-rs/dns-rs.sock` (the unit's writable runtime directory), then restart
+the service. Run the client as the service user:
 
 ```bash
 sudo -u dns-rs /usr/bin/dns-rs -c /etc/dns-rs/dns-rs.conf control status

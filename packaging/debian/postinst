@@ -8,6 +8,10 @@ fi
 
 chown root:dns-rs /etc/dns-rs/dns-rs.conf
 chmod 0640 /etc/dns-rs/dns-rs.conf
+chown root:dns-rs /etc/dns-rs/zones.d
+chmod 0750 /etc/dns-rs/zones.d
+chown root:dns-rs /etc/dns-rs/zones.d/local-zones.conf
+chmod 0640 /etc/dns-rs/zones.d/local-zones.conf
 chown dns-rs:dns-rs /var/lib/dns-rs
 chmod 0750 /var/lib/dns-rs
 
