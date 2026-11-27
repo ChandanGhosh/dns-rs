@@ -16,7 +16,7 @@ pub use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
 pub use hickory_proto::rr::rdata::svcb::SvcParamValue;
 pub use hickory_proto::rr::rdata::{CNAME, HTTPS, NS, SOA, SVCB};
 pub use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType, SerialNumber};
-pub use hickory_proto::serialize::binary::DecodeError;
+pub use hickory_proto::serialize::binary::{BinEncodable, BinEncoder, DecodeError};
 
 /// DNS COOKIE option code (RFC 7873).
 pub const EDNS_COOKIE: EdnsCode = EdnsCode::Cookie;

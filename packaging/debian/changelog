@@ -1,3 +1,12 @@
+dns-rs (0.6.10) unstable; urgency=high
+
+  * Emit local-zone decisions at info level so they remain visible without
+    per-query debug logging.
+  * Bound cached response and RRset memory with configurable byte budgets.
+  * Reduce maximum in-flight cold resolutions and cap deferred UDP sends.
+
+  -- Chandan Ghosh <ckghosh1983@gmail.com>  Fri, 27 Nov 2026 18:03:20 +0000
+
 dns-rs (0.6.9) unstable; urgency=low
 
   * Log local-zone decisions at debug level, including the matched zone,

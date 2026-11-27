@@ -90,6 +90,11 @@ impl Config {
                 "cache-min-ttl must not exceed cache-max-ttl".to_owned(),
             ));
         }
+        if server.cache_max_bytes == 0 || server.rrset_cache_max_bytes == 0 {
+            return Err(ConfigError::Validation(
+                "cache byte budgets must be greater than zero".to_owned(),
+            ));
+        }
         if server.min_ttl > server.max_ttl {
             return Err(ConfigError::Validation(
                 "min-ttl must not exceed max-ttl".to_owned(),
@@ -479,6 +484,10 @@ pub struct ServerConfig {
     /// when the SOA minimum suggests a longer TTL. `cache-min-ttl` still takes
     /// precedence, so a larger minimum can keep the entry longer.
     pub cache_max_negative_ttl: u32,
+    /// Byte budget for cached full responses, including per-entry overhead.
+    pub cache_max_bytes: u64,
+    /// Byte budget for cached RRsets, including per-entry overhead.
+    pub rrset_cache_max_bytes: u64,
     /// Lifetime in seconds of per-server infrastructure cache entries.
     pub infra_host_ttl: u32,
     /// Minimum round-trip time in milliseconds used for upstream selection.
@@ -621,6 +630,8 @@ impl Default for ServerConfig {
             // Matches Unbound's default; without it a negative response could
             // be cached for as long as cache-max-ttl.
             cache_max_negative_ttl: 3_600,
+            cache_max_bytes: 64 * 1024 * 1024,
+            rrset_cache_max_bytes: 32 * 1024 * 1024,
             // These are Unbound's defaults.
             infra_host_ttl: 900,
             infra_cache_min_rtt: 50,
@@ -1937,6 +1948,14 @@ mod tests {
         config.server.num_threads = ThreadCount::Fixed(ThreadCount::MAX + 1);
         let error = config.validate().expect_err("thread count must be bounded");
         assert!(error.to_string().contains("num-threads"));
+    }
+
+    #[test]
+    fn rejects_zero_cache_byte_budget() {
+        let mut config = Config::default();
+        config.server.cache_max_bytes = 0;
+        let error = config.validate().expect_err("byte budget must be positive");
+        assert!(error.to_string().contains("cache byte budgets"));
     }
 
     #[test]

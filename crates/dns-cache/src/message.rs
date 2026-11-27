@@ -15,6 +15,16 @@ use moka::sync::Cache;
 /// Default stale window when `serve-expired-ttl` is zero (Unbound semantics).
 pub const DEFAULT_STALE_TTL: Duration = Duration::from_secs(30);
 
+/// Fixed per-entry overhead charged to the byte budget alongside the wire bytes.
+const ENTRY_OVERHEAD: u32 = 256;
+
+fn entry_weight(entry: &CachedWire) -> u32 {
+    u32::try_from(entry.wire.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(ENTRY_OVERHEAD)
+        .max(1)
+}
+
 #[derive(Clone, Debug)]
 struct CachedWire {
     wire: Arc<Vec<u8>>,
@@ -88,18 +98,20 @@ pub struct MessageCache {
 }
 
 impl MessageCache {
-    pub fn new(max_capacity: u64) -> Self {
-        Self::with_stale_window(max_capacity, Duration::ZERO)
+    /// Build a cache with a byte budget.
+    pub fn new(max_bytes: u64) -> Self {
+        Self::with_stale_window(max_bytes, Duration::ZERO)
     }
 
-    /// Build a cache that keeps expired entries for `stale_for` so they can be
-    /// served while a refresh is in flight (RFC 8767).
-    pub fn with_stale_window(max_capacity: u64, stale_for: Duration) -> Self {
+    /// Build a cache with a byte budget that keeps expired entries for
+    /// `stale_for` so they can be served while a refresh is in flight (RFC 8767).
+    pub fn with_stale_window(max_bytes: u64, stale_for: Duration) -> Self {
         Self {
             // Entries enforce their own expiry. The backend TTL only bounds
             // memory for abandoned entries, so leave room for the stale window.
             cache: Cache::builder()
-                .max_capacity(max_capacity)
+                .max_capacity(max_bytes)
+                .weigher(|_, entry| entry_weight(entry))
                 .time_to_live(Duration::from_secs(7 * 24 * 3600))
                 .build(),
             hits: Arc::new(AtomicU64::new(0)),
@@ -590,11 +602,14 @@ pub fn response_ttl(
 mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use dns_proto::{Message, MessageType, Name, OpCode, RData, Record, RecordType, SOA, encode};
 
-    use super::{MessageCache, WireRequest, patch_question, response_ttl, wire_has_opt};
+    use super::{
+        CachedWire, MessageCache, WireRequest, entry_weight, patch_question, response_ttl,
+        wire_has_opt,
+    };
 
     fn answer(ttl: u32) -> Message {
         let name = Name::from_ascii("example.com.").expect("name");
@@ -617,8 +632,22 @@ mod tests {
     }
 
     #[test]
+    fn entry_weight_tracks_wire_size() {
+        let now = Instant::now();
+        let make = |len| CachedWire {
+            wire: Arc::new(vec![0; len]),
+            inserted_at: now,
+            expires_at: now,
+            stale_until: now,
+            original_ttl: Duration::ZERO,
+            has_edns: false,
+        };
+        assert_eq!(entry_weight(&make(4096)) - entry_weight(&make(32)), 4064);
+    }
+
+    #[test]
     fn ages_ttls_on_read() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(
             &name,
@@ -641,7 +670,7 @@ mod tests {
 
     #[test]
     fn patches_flags_for_the_client() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         let mut message = answer(60);
         message.metadata.authentic_data = true;
@@ -675,7 +704,7 @@ mod tests {
 
     #[test]
     fn distinguishes_do_bit() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(
             &name,
@@ -728,7 +757,7 @@ mod tests {
 
     #[test]
     fn expires_entries() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(&name, RecordType::A, false, &answer(60), Duration::ZERO);
         assert!(cache.get(&name, RecordType::A, false, request()).is_none());
@@ -736,7 +765,7 @@ mod tests {
 
     #[test]
     fn serves_expired_entries_with_a_short_ttl() {
-        let cache = MessageCache::with_stale_window(16, Duration::from_secs(30));
+        let cache = MessageCache::with_stale_window(64 * 1024, Duration::from_secs(30));
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(&name, RecordType::A, false, &answer(60), Duration::ZERO);
 
@@ -751,7 +780,7 @@ mod tests {
 
     #[test]
     fn prefetches_near_the_end_of_the_ttl() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         cache.insert(
             &name,
@@ -780,7 +809,7 @@ mod tests {
 
     #[test]
     fn lookups_match_names_case_insensitively() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let mixed = Name::from_ascii("ExAmPlE.CoM.").expect("name");
         cache.insert(
             &mixed,
@@ -800,7 +829,7 @@ mod tests {
 
     #[test]
     fn insert_encoded_stores_the_shared_wire() {
-        let cache = MessageCache::new(16);
+        let cache = MessageCache::new(64 * 1024);
         let name = Name::from_ascii("example.com.").expect("name");
         let mut message = answer(60);
         message.edns = Some(dns_proto::Edns::new());

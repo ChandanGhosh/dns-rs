@@ -32,9 +32,7 @@ use crate::local;
 use crate::phase::{Phase, PhaseTimer};
 use crate::ratelimit::{ClientConcurrency, RateDecision, RateLimiter};
 
-const MESSAGE_CACHE_ENTRIES: u64 = 8_192;
-const RRSET_CACHE_ENTRIES: u64 = 16_384;
-const MAX_GLOBAL_INFLIGHT: usize = 8_192;
+const MAX_GLOBAL_INFLIGHT: usize = 2_048;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 const FOLLOWER_TIMEOUT: Duration = Duration::from_secs(11);
 /// Bounds the per-upstream section of a stats response so it fits the control
@@ -795,10 +793,10 @@ impl QueryPipeline {
             Duration::ZERO
         };
         let messages = Arc::new(MessageCache::with_stale_window(
-            MESSAGE_CACHE_ENTRIES,
+            config.server.cache_max_bytes,
             stale_for,
         ));
-        let rrsets = Arc::new(RrsetCache::new(RRSET_CACHE_ENTRIES));
+        let rrsets = Arc::new(RrsetCache::new(config.server.rrset_cache_max_bytes));
         let infra = Arc::new(InfraCache::with_options(
             config.server.infra_cache_numhosts as u64,
             Duration::from_secs(u64::from(config.server.infra_host_ttl)),

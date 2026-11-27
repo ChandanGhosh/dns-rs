@@ -141,9 +141,9 @@ not a silent no-op. Common groups:
 - Logging switches such as `log-queries`, `log-replies`, `log-servfail`,
   `log-local-actions`, and `log-time-ascii`. Use `verbosity` or `RUST_LOG`
   instead.
-- Cache sizing in bytes and slabs: `msg-cache-size`, `rrset-cache-size`,
-  `key-cache-size`, `neg-cache-size`, and their `*-slabs` companions. dns-rs
-  caches are bounded by entry count, not by byte size.
+- Cache slabs and unused byte budgets: `key-cache-size`, `neg-cache-size`, and
+  their `*-slabs` companions. `msg-cache-size` and `rrset-cache-size` are
+  enforced as byte budgets.
 - Connection tuning: `outgoing-range`, `num-queries-per-thread`,
   `msg-buffer-size`, and `jostle-timeout`. Remove these rather than expecting
   them to change capacity.

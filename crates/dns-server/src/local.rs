@@ -11,7 +11,7 @@ use dns_proto::{
     parse_zone_records,
 };
 use ipnet::IpNet;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// What the local policy decided to do with a query.
 pub enum LocalAction {
@@ -245,8 +245,9 @@ impl LocalZones {
 
     /// Apply the local-zone policy to a query.
     ///
-    /// Handled queries emit a debug line naming the matched zone, its policy,
-    /// and the resulting action so blocklist decisions can be traced.
+    /// Handled queries emit an info line naming the matched zone, its policy,
+    /// and the resulting action so blocklist decisions can be traced without
+    /// enabling per-query debug logging.
     pub fn answer(&self, query: &Query) -> LocalAction {
         let Some(index) = self.find_zone(&query.name) else {
             return LocalAction::NotHandled;
@@ -258,7 +259,7 @@ impl LocalZones {
             LocalAction::Drop => "drop",
             LocalAction::NotHandled => return action,
         };
-        debug!(
+        info!(
             zone = %zone.name,
             reason = %zone.zone_type,
             qname = %query.name,

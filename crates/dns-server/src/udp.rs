@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::warn;
@@ -14,6 +15,9 @@ use crate::pipeline::{PipelineHandle, Prepared, Transport};
 
 /// Largest possible DNS message; matches `dns_proto`'s buffer pool size.
 pub(crate) const MAX_DATAGRAM: usize = 65_535;
+
+/// Maximum number of replies waiting in spawned send tasks per receive loop.
+const MAX_DEFERRED_SENDS: usize = 1_024;
 
 pub fn bind(
     addr: SocketAddr,
@@ -37,6 +41,24 @@ pub fn bind(
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket.into())
+}
+
+/// Spawn a reply send under the per-listener deferred-send cap.
+fn defer_send(
+    socket: &Arc<UdpSocket>,
+    response: Vec<u8>,
+    client: SocketAddr,
+    permits: &Arc<Semaphore>,
+) {
+    let Ok(permit) = permits.clone().try_acquire_owned() else {
+        debug!("deferred UDP send queue full; dropping reply");
+        return;
+    };
+    let socket = Arc::clone(socket);
+    tokio::spawn(async move {
+        let _permit = permit;
+        let _ = socket.send_to(&response, client).await;
+    });
 }
 
 /// Receive, dispatch, and answer UDP datagrams until `shutdown` fires.
@@ -85,6 +107,7 @@ async fn receive_loop(
     // `Vec<u8>` per answered datagram and reduces allocator contention on the
     // hot path. Buffers that are handed to spawned send tasks are not recycled.
     let mut reply_pool: Vec<Vec<u8>> = Vec::with_capacity(32);
+    let deferred_sends = Arc::new(Semaphore::new(MAX_DEFERRED_SENDS));
 
     loop {
         tokio::select! {
@@ -122,11 +145,12 @@ async fn receive_loop(
                                     // does on the hit path.
                                     let queued = PhaseTimer::start(Phase::Queue);
                                     let socket = Arc::clone(socket);
+                                    let send_permits = Arc::clone(&deferred_sends);
                                     tokio::spawn(async move {
                                         queued.end();
                                         if let Some(response) = job.run().await {
                                             let send = PhaseTimer::start(Phase::Send);
-                                            let _ = socket.send_to(&response, client).await;
+                                            defer_send(&socket, response, client, &send_permits);
                                             send.end();
                                         }
                                     });
@@ -148,19 +172,13 @@ async fn receive_loop(
                                     // asynchronously so the receive loop stays responsive.
                                     recycle_prefix(&mut reply_pool, &mut answers, sent);
                                     for (buf, addr) in answers {
-                                        let socket = Arc::clone(socket);
-                                        tokio::spawn(async move {
-                                            let _ = socket.send_to(&buf, addr).await;
-                                        });
+                                        defer_send(socket, buf, addr, &deferred_sends);
                                     }
                                 }
                                 Err(_) => {
                                     // Fallback: send individually without blocking the loop.
                                     for (buf, addr) in answers {
-                                        let socket = Arc::clone(socket);
-                                        tokio::spawn(async move {
-                                            let _ = socket.send_to(&buf, addr).await;
-                                        });
+                                        defer_send(socket, buf, addr, &deferred_sends);
                                     }
                                 }
                             }
@@ -205,6 +223,7 @@ async fn receive_loop(
     // task that owns its own state, so the buffer is never shared with a task
     // and the next receive can reuse it.
     let mut query = vec![0_u8; MAX_DATAGRAM];
+    let deferred_sends = Arc::new(Semaphore::new(MAX_DEFERRED_SENDS));
 
     loop {
         tokio::select! {
@@ -214,7 +233,7 @@ async fn receive_loop(
                     Ok((len, client)) => {
                         let queue = PhaseTimer::start(Phase::Queue);
                         queue.end();
-                        dispatch(socket, pipeline, &query[..len], client);
+                        dispatch(socket, pipeline, &query[..len], client, &deferred_sends);
                     }
                     Err(err) => {
                         debug!(%err, "UDP recv error");
@@ -233,7 +252,13 @@ async fn receive_loop(
 /// `query` must borrow no state that outlives this call: both reply kinds
 /// either send here or move into a task that owns everything it needs.
 #[cfg(not(target_os = "linux"))]
-fn dispatch(socket: &Arc<UdpSocket>, pipeline: &PipelineHandle, query: &[u8], client: SocketAddr) {
+fn dispatch(
+    socket: &Arc<UdpSocket>,
+    pipeline: &PipelineHandle,
+    query: &[u8],
+    client: SocketAddr,
+    deferred_sends: &Arc<Semaphore>,
+) {
     let mut reply_pool = Vec::new();
     let prepared = pipeline.prepare(
         query,
@@ -251,10 +276,7 @@ fn dispatch(socket: &Arc<UdpSocket>, pipeline: &PipelineHandle, query: &[u8], cl
                 {
                     // Send buffer full: hand the reply to a task that can wait
                     // for room rather than stall the receive loop.
-                    let socket = Arc::clone(socket);
-                    tokio::spawn(async move {
-                        let _ = socket.send_to(&response, client).await;
-                    });
+                    defer_send(socket, response, client, deferred_sends);
                 }
                 send.end();
             }
@@ -265,11 +287,12 @@ fn dispatch(socket: &Arc<UdpSocket>, pipeline: &PipelineHandle, query: &[u8], cl
             // does on the hit path.
             let queued = PhaseTimer::start(Phase::Queue);
             let socket = Arc::clone(socket);
+            let send_permits = Arc::clone(deferred_sends);
             tokio::spawn(async move {
                 queued.end();
                 if let Some(response) = job.run().await {
                     let send = PhaseTimer::start(Phase::Send);
-                    let _ = socket.send_to(&response, client).await;
+                    defer_send(&socket, response, client, &send_permits);
                     send.end();
                 }
             });
