@@ -1,3 +1,11 @@
+dns-rs (0.6.9) unstable; urgency=low
+
+  * Log local-zone decisions at debug level, including the matched zone,
+    policy reason, query name/type, and outcome, so sinkholed names are
+    traceable.
+
+  -- Chandan Ghosh <ckghosh1983@gmail.com>  Fri, 27 Nov 2026 07:36:59 +0000
+
 dns-rs (0.6.8) unstable; urgency=high
 
   * Validate answer RRsets in negative DNSSEC responses that carry CNAME
