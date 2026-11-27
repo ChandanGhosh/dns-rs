@@ -98,6 +98,15 @@ pub(crate) enum Prepared {
     Resolve(ResolutionJob),
 }
 
+/// How to answer a client that is restricted to locally served data.
+#[derive(Clone, Copy)]
+enum NonLocalPolicy {
+    /// Stay silent once no local data matches.
+    Drop,
+    /// Reply REFUSED once no local data matches.
+    Refuse,
+}
+
 /// One cache-missed query, packaged as a self-contained unit of work.
 ///
 /// Holds everything the upstream leg needs (decoded question, flags, the
@@ -1175,9 +1184,9 @@ impl QueryPipeline {
             return Prepared::Answer(self.error(&request, ResponseCode::NotImp, client, transport));
         }
 
-        match acl::check(&self.config, &client) {
+        let non_local = match acl::check(&self.config, &client) {
             Decision::Deny => return Prepared::Answer(None),
-            Decision::Refuse | Decision::DenyNonLocal | Decision::RefuseNonLocal => {
+            Decision::Refuse => {
                 return Prepared::Answer(self.error(
                     &request,
                     ResponseCode::Refused,
@@ -1185,19 +1194,23 @@ impl QueryPipeline {
                     transport,
                 ));
             }
-            Decision::Allow => {}
+            Decision::DenyNonLocal => Some(NonLocalPolicy::Drop),
+            Decision::RefuseNonLocal => Some(NonLocalPolicy::Refuse),
+            Decision::Allow => None,
             Decision::AllowSetrd => {
                 // Unbound's `allow_setrd`: ignore the client's RD bit and
                 // answer as if recursion was requested.
                 request.metadata.recursion_desired = true;
+                None
             }
             Decision::AllowSnoop => {
                 // Snoop mode: cache-only access, no recursion sent upstream
                 // (Unbound-like: RD=0, serve from message cache if available,
                 //  otherwise NXDOMAIN/SERVFAIL without recursive resolution).
                 request.metadata.recursion_desired = false;
+                None
             }
-        }
+        };
 
         if request.queries.len() != 1 {
             return Prepared::Answer(self.error(
@@ -1278,7 +1291,7 @@ impl QueryPipeline {
         // scrubbed by the rebinding filter.
         decode_timer.end();
         let lookup = PhaseTimer::start(Phase::Lookup);
-        if !checking_disabled {
+        if non_local.is_none() && !checking_disabled {
             {
                 let mut wire = reply_pool.pop().unwrap_or_else(|| Vec::with_capacity(512));
                 if let Some(meta) = self.messages.get_into(
@@ -1357,6 +1370,15 @@ impl QueryPipeline {
             && let Some(local) = local::maybe_respond(query)
         {
             return Prepared::Answer(self.finalize(local, &request, client, transport));
+        }
+
+        if let Some(policy) = non_local {
+            return match policy {
+                NonLocalPolicy::Drop => Prepared::Answer(None),
+                NonLocalPolicy::Refuse => {
+                    Prepared::Answer(self.error(&request, ResponseCode::Refused, client, transport))
+                }
+            };
         }
 
         if !request.metadata.recursion_desired {
@@ -2359,6 +2381,83 @@ mod tests {
             .expect("response");
         let message = Message::from_vec(&response).expect("decode");
         assert_eq!(message.metadata.response_code, ResponseCode::Refused);
+    }
+
+    fn nonlocal_client() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1234)
+    }
+
+    fn nonlocal_pipeline(action: &str) -> QueryPipeline {
+        let config = Config {
+            server: ServerConfig {
+                access_control: vec![
+                    format!("8.8.8.8/32 {action}")
+                        .parse()
+                        .expect("access-control rule"),
+                ],
+                ..ServerConfig::default()
+            },
+            local_data: vec!["router.lan. IN A 192.168.1.1".to_owned()],
+            ..Config::default()
+        };
+        config.validate().expect("valid config");
+        QueryPipeline::new(Arc::new(config))
+    }
+
+    #[tokio::test]
+    async fn refuse_non_local_answers_local_data() {
+        let bytes = query_bytes("router.lan.", RecordType::A);
+        let response = nonlocal_pipeline("refuse_non_local")
+            .handle(&bytes, nonlocal_client(), Transport::Udp)
+            .await
+            .expect("local data is answered");
+        let message = Message::from_vec(&response).expect("decode");
+        assert_eq!(message.metadata.response_code, ResponseCode::NoError);
+        assert!(!message.answers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refuse_non_local_refuses_non_local_queries() {
+        let bytes = query_bytes("example.com.", RecordType::A);
+        let response = nonlocal_pipeline("refuse_non_local")
+            .handle(&bytes, nonlocal_client(), Transport::Udp)
+            .await
+            .expect("response");
+        let message = Message::from_vec(&response).expect("decode");
+        assert_eq!(message.metadata.response_code, ResponseCode::Refused);
+    }
+
+    #[tokio::test]
+    async fn deny_non_local_drops_non_local_queries() {
+        let bytes = query_bytes("example.com.", RecordType::A);
+        let response = nonlocal_pipeline("deny_non_local")
+            .handle(&bytes, nonlocal_client(), Transport::Udp)
+            .await;
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn deny_non_local_does_not_answer_from_cache() {
+        let pipeline = nonlocal_pipeline("deny_non_local");
+        let name = Name::from_ascii("cached.example.").expect("name");
+        let resolved = resolved_with(vec![answer(
+            "cached.example.",
+            RData::A(Ipv4Addr::new(203, 0, 113, 5).into()),
+        )]);
+        let (message, _) = pipeline.prepare_response(resolved, &name, false);
+        pipeline.messages.insert(
+            &name,
+            RecordType::A,
+            false,
+            &message,
+            Duration::from_secs(60),
+        );
+
+        let bytes = query_bytes("cached.example.", RecordType::A);
+        let response = pipeline
+            .handle(&bytes, nonlocal_client(), Transport::Udp)
+            .await;
+        assert!(response.is_none());
     }
 
     #[tokio::test]

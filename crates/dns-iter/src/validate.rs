@@ -3,7 +3,8 @@
 //! The validator fetches DNSKEY and DS records through the same iterator. The
 //! fetches set DO and are marked `validating`, so they never recurse back into
 //! validation. Positive answers are validated RRset by RRset; negative answers
-//! are checked against NSEC or NSEC3 denial proofs.
+//! are checked against NSEC or NSEC3 denial proofs, and any CNAME chain they
+//! carry is validated as well.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -319,9 +320,20 @@ impl IteratorResolver {
         }
 
         if message.answers.is_empty() || crate::scrub::is_negative(message) {
-            return self
+            let denial = self
                 .validate_negative(message, qtype, context.clone())
                 .await;
+            if message.answers.is_empty() {
+                return denial;
+            }
+
+            // A negative answer can still carry a CNAME chain. The denial
+            // proves only the target's absence; every answer RRset must also
+            // authenticate before the response can be called secure.
+            let answers = self
+                .validate_positive(message, origins, context.clone())
+                .await;
+            return combine(answers, denial);
         }
 
         self.validate_positive(message, origins, context.clone())
@@ -811,7 +823,12 @@ impl IteratorResolver {
                     unix_now(),
                     self.config.nsec3_max_iterations,
                 ) {
-                    Ok(_) => ZoneStatus::insecure(),
+                    // Only an unsigned delegation may be treated as insecure.
+                    // A secure proof that the name exists without a DS means
+                    // it is not a zone apex, so it cannot own the keys being
+                    // validated.
+                    Ok(Proof::Insecure) => ZoneStatus::insecure(),
+                    Ok(Proof::Secure) => ZoneStatus::bogus(BogusReason::Malformed),
                     Err(error) => ZoneStatus::bogus(error.into()),
                 };
                 self.cache_zone(&zone, &status);

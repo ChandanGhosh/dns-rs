@@ -1,5 +1,6 @@
 //! Response-rate limiting and per-client concurrency limits.
 
+use std::hash::{BuildHasher, Hash};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -16,6 +17,30 @@ const EVICTION_BATCH: usize = 512;
 /// Eviction passes are spaced this many over-cap checks apart, bounding the
 /// per-query scan cost even while an attack keeps the table full.
 const EVICTION_TICK: u64 = 64;
+
+/// Visit entries from a rotating starting point.
+///
+/// The old fixed-prefix scans always examined the same leading entries. If
+/// those entries stayed fresh or active, stale entries appended later were
+/// never reached and the table grew past its cap. Each pass advances the start
+/// by one batch, so every entry is eventually examined. Visiting stops as soon
+/// as `visit` returns `false`, keeping each pass bounded by the batch cap.
+fn for_rotating_entries<K, V, S, F>(map: &DashMap<K, V, S>, cursor: usize, mut visit: F)
+where
+    K: Copy + Eq + Hash,
+    S: BuildHasher + Clone,
+    F: FnMut(&K, &V) -> bool,
+{
+    let len = map.len();
+    if len == 0 {
+        return;
+    }
+    for entry in map.iter().skip(cursor % len) {
+        if !visit(entry.key(), entry.value()) {
+            return;
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RateDecision {
@@ -130,33 +155,32 @@ impl RateLimiter {
     ///
     /// Returns the number of buckets removed.
     fn evict_stale(&self, inner: &Inner, now: Instant) -> usize {
-        if !inner
-            .evict_clock
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(EVICTION_TICK)
-        {
+        let tick = inner.evict_clock.fetch_add(1, Ordering::Relaxed);
+        if !tick.is_multiple_of(EVICTION_TICK) {
             return 0;
         }
-        self.evict_stale_pass(inner, now)
+        self.evict_stale_pass_at(
+            inner,
+            now,
+            ((tick / EVICTION_TICK) as usize).wrapping_mul(EVICTION_BATCH),
+        )
     }
 
-    /// One eviction pass; separate from [`Self::evict_stale`] so tests can
-    /// run it without the tick spacing.
-    fn evict_stale_pass(&self, inner: &Inner, now: Instant) -> usize {
-        // Collect first: a `DashMap` iterator holds shard locks, so removal
-        // has to wait until the iteration has ended.
-        let stale = inner
-            .buckets
-            .iter()
-            .take(EVICTION_BATCH)
-            .filter(|entry| {
-                now.saturating_duration_since(entry.value().last)
-                    .as_secs_f64()
-                    * inner.refill_per_second
-                    >= inner.capacity
-            })
-            .map(|entry| (*entry.key(), entry.value().last))
-            .collect::<Vec<_>>();
+    /// One eviction pass starting from a rotating cursor.
+    fn evict_stale_pass_at(&self, inner: &Inner, now: Instant, cursor: usize) -> usize {
+        // Collect first: the shard read locks must be released before removal.
+        let mut stale = Vec::new();
+        for_rotating_entries(&inner.buckets, cursor, |client, bucket| {
+            if stale.len() >= EVICTION_BATCH {
+                return false;
+            }
+            if now.saturating_duration_since(bucket.last).as_secs_f64() * inner.refill_per_second
+                >= inner.capacity
+            {
+                stale.push((*client, bucket.last));
+            }
+            true
+        });
         let mut removed = 0;
         for (client, last) in stale {
             // `last` pins the observed state: if the client was touched
@@ -264,28 +288,26 @@ impl ClientConcurrency {
     ///
     /// Returns the number of entries removed.
     fn evict_idle(&self) -> usize {
-        if !self
-            .evict_clock
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(EVICTION_TICK)
-        {
+        let tick = self.evict_clock.fetch_add(1, Ordering::Relaxed);
+        if !tick.is_multiple_of(EVICTION_TICK) {
             return 0;
         }
-        self.evict_idle_pass()
+        self.evict_idle_pass_at(((tick / EVICTION_TICK) as usize).wrapping_mul(EVICTION_BATCH))
     }
 
-    /// One eviction pass; separate from [`Self::evict_idle`] so tests can
-    /// run it without the tick spacing.
-    fn evict_idle_pass(&self) -> usize {
-        // Collect first: removing while iterating would deadlock on the
-        // shard read lock the iterator holds.
-        let idle = self
-            .per_client
-            .iter()
-            .take(EVICTION_BATCH)
-            .filter(|entry| entry.value().available_permits() >= self.max)
-            .map(|entry| *entry.key())
-            .collect::<Vec<_>>();
+    /// One eviction pass starting from a rotating cursor.
+    fn evict_idle_pass_at(&self, cursor: usize) -> usize {
+        // Collect first: the shard read locks must be released before removal.
+        let mut idle = Vec::new();
+        for_rotating_entries(&self.per_client, cursor, |client, semaphore| {
+            if idle.len() >= EVICTION_BATCH {
+                return false;
+            }
+            if semaphore.available_permits() >= self.max {
+                idle.push(*client);
+            }
+            true
+        });
         let mut removed = 0;
         for client in idle {
             if self
@@ -305,13 +327,14 @@ impl ClientConcurrency {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{ClientConcurrency, RateDecision, RateLimiter};
+    use super::{ClientConcurrency, EVICTION_BATCH, RateDecision, RateLimiter};
 
     /// The maintained entry count must match the map, otherwise the hot-path
     /// cap check either never evicts or evicts too early.
@@ -328,6 +351,12 @@ mod tests {
 
     fn ip(last: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 0, 2, last))
+    }
+
+    fn ip_index(index: u16) -> IpAddr {
+        let high = u8::try_from(index / 256).expect("third octet");
+        let low = u8::try_from(index % 256).expect("fourth octet");
+        IpAddr::V4(Ipv4Addr::new(192, 0, high, low))
     }
 
     #[test]
@@ -383,13 +412,13 @@ mod tests {
 
         // A clock two seconds ahead: both buckets refilled a window ago.
         let future = Instant::now() + Duration::from_secs(2);
-        assert_eq!(limiter.evict_stale_pass(&inner, future), 2);
+        assert_eq!(limiter.evict_stale_pass_at(&inner, future, 0), 2);
         assert_eq!(inner.buckets.len(), 0);
         assert_tracked_matches_len(&limiter);
 
         // A bucket touched just before the scan's clock is kept.
         assert_eq!(limiter.check(ip(3)), RateDecision::Allow);
-        assert_eq!(limiter.evict_stale_pass(&inner, Instant::now()), 0);
+        assert_eq!(limiter.evict_stale_pass_at(&inner, Instant::now(), 0), 0);
         assert_eq!(inner.buckets.len(), 1);
         assert_tracked_matches_len(&limiter);
     }
@@ -421,6 +450,46 @@ mod tests {
         assert_tracked_matches_len(&limiter);
     }
 
+    /// A rotating pass must reach stale entries past the old fixed prefix;
+    /// otherwise a flood of fresh sources pins the first batch in place and
+    /// lets the table grow without bound.
+    #[test]
+    fn rotating_eviction_reaches_stale_entries_past_first_batch() {
+        let client_count = EVICTION_BATCH + 88;
+        let limiter = RateLimiter::with_max_clients(1, 0, client_count * 2);
+        for index in 0..client_count as u16 {
+            assert_eq!(limiter.check(ip_index(index)), RateDecision::Allow);
+        }
+        let inner = limiter.inner.as_ref().map(Arc::clone).expect("limiter");
+        let past = Instant::now();
+        let now = past + Duration::from_secs(10);
+
+        let fresh: Vec<IpAddr> = inner
+            .buckets
+            .iter()
+            .take(EVICTION_BATCH)
+            .map(|entry| *entry.key())
+            .collect();
+        for mut entry in inner.buckets.iter_mut() {
+            entry.value_mut().last = past;
+        }
+        for client in &fresh {
+            inner.buckets.get_mut(client).expect("fresh entry").last = now;
+        }
+
+        assert_eq!(
+            limiter.evict_stale_pass_at(&inner, now, EVICTION_BATCH),
+            client_count - EVICTION_BATCH
+        );
+        assert_eq!(inner.buckets.len(), EVICTION_BATCH);
+        assert!(
+            fresh
+                .iter()
+                .all(|client| inner.buckets.contains_key(client))
+        );
+        assert_tracked_matches_len(&limiter);
+    }
+
     /// Repeated acquisitions for one client must reuse its semaphore and not
     /// grow the tracked count (the map's shared-lock fast path).
     #[test]
@@ -444,14 +513,14 @@ mod tests {
         assert_eq!(cc.per_client.len(), 3);
         assert_eq!(cc.tracked.load(Ordering::Relaxed), 3);
         // All three hold permits, so nothing is evictable ...
-        assert_eq!(cc.evict_idle_pass(), 0);
+        assert_eq!(cc.evict_idle_pass_at(0), 0);
         assert_eq!(cc.per_client.len(), 3);
         // ... a client at its limit stays capped ...
         assert!(cc.try_acquire(ip(2)).is_none());
         // ... and once `a` releases its slot, the next eviction pass removes
         // only the idle entry.
         drop(a);
-        assert_eq!(cc.evict_idle_pass(), 1);
+        assert_eq!(cc.evict_idle_pass_at(0), 1);
         assert_eq!(cc.per_client.len(), 2);
         assert_eq!(cc.tracked.load(Ordering::Relaxed), 2);
         assert!(!cc.per_client.contains_key(&ip(1)));
@@ -459,5 +528,43 @@ mod tests {
         assert!(cc.per_client.contains_key(&ip(3)));
         // Eviction leaves the limiter fully functional.
         assert!(cc.try_acquire(ip(4)).is_some());
+    }
+
+    /// Idle semaphores beyond the old fixed prefix must still be evictable.
+    #[test]
+    fn rotating_eviction_reaches_idle_entries_past_first_batch() {
+        let client_count = EVICTION_BATCH + 88;
+        let cc = ClientConcurrency::with_max_clients(1, client_count, client_count * 2);
+        let permits: Vec<(IpAddr, _)> = (0..client_count as u16)
+            .map(|index| {
+                let client = ip_index(index);
+                let permit = cc.try_acquire(client).expect("client acquires");
+                (client, permit)
+            })
+            .collect();
+        let busy: HashSet<IpAddr> = cc
+            .per_client
+            .iter()
+            .take(EVICTION_BATCH)
+            .map(|entry| *entry.key())
+            .collect();
+
+        let mut active = Vec::new();
+        for (client, permit) in permits {
+            if busy.contains(&client) {
+                active.push(permit);
+            } else {
+                drop(permit);
+            }
+        }
+
+        assert_eq!(
+            cc.evict_idle_pass_at(EVICTION_BATCH),
+            client_count - EVICTION_BATCH
+        );
+        assert_eq!(cc.per_client.len(), EVICTION_BATCH);
+        assert_eq!(cc.tracked.load(Ordering::Relaxed), EVICTION_BATCH);
+        assert!(busy.iter().all(|client| cc.per_client.contains_key(client)));
+        assert!(!active.is_empty());
     }
 }
