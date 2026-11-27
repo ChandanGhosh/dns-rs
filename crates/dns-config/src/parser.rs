@@ -640,6 +640,13 @@ impl Parser {
             "cache-max-negative-ttl" => {
                 self.config.server.cache_max_negative_ttl = parse_u32(path, line, key, value)?;
             }
+            "msg-cache-size" => {
+                self.config.server.cache_max_bytes = parse_size_bytes(path, line, key, value)?;
+            }
+            "rrset-cache-size" => {
+                self.config.server.rrset_cache_max_bytes =
+                    parse_size_bytes(path, line, key, value)?;
+            }
             "infra-host-ttl" => {
                 self.config.server.infra_host_ttl = parse_u32(path, line, key, value)?;
             }
@@ -1297,6 +1304,46 @@ fn parse_u32(path: &Path, line: usize, key: &str, value: &str) -> Result<u32, Co
     })
 }
 
+fn parse_size_bytes(path: &Path, line: usize, key: &str, value: &str) -> Result<u64, ConfigError> {
+    let invalid = || {
+        ConfigError::parse(
+            path,
+            line,
+            format!("invalid byte size for '{key}': {value:?}"),
+        )
+    };
+    let lower = value.trim().to_ascii_lowercase();
+    let (digits, multiplier) = if let Some(digits) = lower.strip_suffix("mib") {
+        (digits, 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix("mb") {
+        (digits, 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix("kib") {
+        (digits, 1024)
+    } else if let Some(digits) = lower.strip_suffix("kb") {
+        (digits, 1024)
+    } else if let Some(digits) = lower.strip_suffix("gib") {
+        (digits, 1024 * 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix("gb") {
+        (digits, 1024 * 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix('m') {
+        (digits, 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix('k') {
+        (digits, 1024)
+    } else if let Some(digits) = lower.strip_suffix('g') {
+        (digits, 1024 * 1024 * 1024)
+    } else if let Some(digits) = lower.strip_suffix('b') {
+        (digits, 1)
+    } else {
+        (lower.as_str(), 1)
+    };
+    digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|bytes| bytes.checked_mul(multiplier))
+        .ok_or_else(invalid)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -1564,7 +1611,7 @@ server:
 server:
     interface: 127.0.0.1@5353
     msg-cache-size: 4m
-    module-config: "validator iterator"
+    module-config: "subnetcache validator iterator"
 "#,
         )
         .expect("write config");
@@ -1575,9 +1622,48 @@ server:
             loaded
                 .warnings
                 .iter()
-                .any(|warning| warning.message.contains("msg-cache-size"))
+                .any(|warning| warning.message.contains("module-config"))
         );
         assert!(loaded.config.server.dnssec_validation);
+    }
+
+    #[test]
+    fn parses_cache_byte_budgets() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+    msg-cache-size: 64m
+    rrset-cache-size: 32mib
+"#,
+        )
+        .expect("write config");
+
+        let loaded = parse_unbound_file(&path).expect("parse config");
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.config.server.cache_max_bytes, 64 * 1024 * 1024);
+        assert_eq!(loaded.config.server.rrset_cache_max_bytes, 32 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_invalid_cache_byte_budget() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("dns-rs.conf");
+        fs::write(
+            &path,
+            r#"
+server:
+    interface: 127.0.0.1@5353
+    msg-cache-size: plenty
+"#,
+        )
+        .expect("write config");
+
+        let error = parse_unbound_file(&path).expect_err("invalid size must fail");
+        assert!(error.to_string().contains("invalid byte size"));
     }
 
     #[test]

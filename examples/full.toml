@@ -99,6 +99,9 @@ edns_buffer_size = 1232
 max_udp_size = 1232
 cache_min_ttl = 0
 cache_max_ttl = 86400
+# Byte budgets for cached responses and RRsets. Defaults: 64 MiB / 32 MiB.
+cache_max_bytes = 67108864
+rrset_cache_max_bytes = 33554432
 # Refresh entries when less than 10% (or 3 seconds) of their TTL remains.
 prefetch = false
 # Serve an expired entry while it is refreshed (RFC 8767).

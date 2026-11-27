@@ -82,11 +82,11 @@ truth in [`crates/dns-config/src/model.rs`](../crates/dns-config/src/model.rs).
 | DNSSEC | `dnssec_validation`, `domain_insecure`, `trust_anchor`, `trust_anchor_file`, `auto_trust_anchor_file`, `nsec3_max_iterations`, `val_permissive_mode` | Validation is on by default with built-in root anchors. `val_permissive_mode` still validates but returns bogus data with `AD=0` instead of `SERVFAIL`. |
 | Privacy | `qname_minimisation`, `qname_minimisation_strict`, `use_caps_for_id` | `use_caps_for_id` defaults to `true`, unlike Unbound. |
 | Rebinding | `private_address`, `private_domain` | See [Rebinding protection](#rebinding-protection). |
-| Caching | `cache_min_ttl`, `cache_max_ttl`, `cache_max_negative_ttl`, `prefetch`, `serve_expired`, `serve_expired_ttl`, `serve_expired_reply_ttl` | Caches are bounded by entry count, not bytes. |
+| Caching | `cache_min_ttl`, `cache_max_ttl`, `cache_max_negative_ttl`, `cache_max_bytes`, `rrset_cache_max_bytes`, `prefetch`, `serve_expired`, `serve_expired_ttl`, `serve_expired_reply_ttl` | Caches are bounded by byte budgets; Unbound's `msg-cache-size` and `rrset-cache-size` set the same budgets. |
 | Upstreams | `forward_zones`, `stub_zones`, `root_hints`, `do_not_query_address`, `do_not_query_localhost` | See [Choosing an upstream model](#choosing-an-upstream-model). |
 | Local data | `local_data`, `local_zones`, `auth_zones`, `views` | Zonefile loading only; no AXFR or URL fetch. |
 | Upstream TLS | `tls_cert_bundle`, `tls_use_system_ca` | With `tls_use_system_ca = true` (default), dns-rs uses the compiled-in `webpki-roots` set; it does not read the OS CA store. Use `tls_cert_bundle` for private CAs. |
-| Limits | `ratelimit`, `ratelimit_slip`, `incoming_num_tcp`, socket buffer sizes | Enforced. Unbound byte-sized cache options are not. |
+| Limits | `ratelimit`, `ratelimit_slip`, `incoming_num_tcp`, socket buffer sizes | Enforced. |
 
 ### Rebinding protection
 

@@ -102,10 +102,11 @@ enforced.
 Interfaces, ports, IPv4/IPv6 transport switches, UDP/TCP limits, TLS/HTTPS
 listener material, socket buffer sizes (`udp-recv-buffer-size`,
 `udp-send-buffer-size`, `tcp-recv-buffer-size`, `tcp-send-buffer-size`), TTL
-bounds, negative-TTL bounds (`cache-max-negative-ttl`), prefetch, serve-expired,
-rate limiting, and per-client concurrency limits are enforced. The
-infrastructure cache honours
-`infra-host-ttl`, `infra-cache-min-rtt`, and `infra-cache-numhosts`.
+bounds, negative-TTL bounds (`cache-max-negative-ttl`), byte budgets
+(`msg-cache-size` and `rrset-cache-size`), prefetch, serve-expired, rate
+limiting, and per-client concurrency limits are enforced. The infrastructure
+cache honours `infra-host-ttl`, `infra-cache-min-rtt`, and
+`infra-cache-numhosts`.
 `so-reuseport: yes` and `delay-close: 0` describe the resolver's existing
 behaviour. `username` is enforced on Unix (see below). The remaining process
 options (`chroot`, `directory`, `logfile`, `pidfile`, `use-syslog`,
@@ -134,10 +135,8 @@ alternative.
 - Logging switches: `log-queries`, `log-replies`, `log-servfail`,
   `log-local-actions`, and `log-time-ascii`. Per-query lines follow `verbosity`
   and `RUST_LOG`; the process supervisor owns log formatting.
-- Cache sizing in bytes and slabs: `msg-cache-size`, `msg-cache-slabs`,
-  `rrset-cache-size`, `rrset-cache-slabs`, `key-cache-size`, `key-cache-slabs`,
-  `neg-cache-size`, and `infra-cache-slabs`. The caches are bounded by entry
-  count instead.
+- Cache slabs and unused byte budgets: `msg-cache-slabs`, `rrset-cache-slabs`,
+  `key-cache-size`, `key-cache-slabs`, `neg-cache-size`, and `infra-cache-slabs`.
 - Connection and scheduling tuning: `msg-buffer-size`, `outgoing-range`,
   `num-queries-per-thread`, and `jostle-timeout`. `so-reuseport: no` and a
   non-zero `delay-close` also warn; the UDP listeners always set
