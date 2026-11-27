@@ -14,7 +14,7 @@
 %endif
 
 Name:           dns-rs
-Version:        0.6.7
+Version:        0.6.8
 Release:        1%{?dist}
 Summary:        Validating, recursive, caching DNS resolver
 

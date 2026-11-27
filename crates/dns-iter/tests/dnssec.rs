@@ -528,6 +528,134 @@ async fn nxdomain_and_nodata_proofs_validate() {
     assert_eq!(nodata.security, Security::Secure);
 }
 
+/// Serve a CNAME from a signed zone whose target has a valid NXDOMAIN proof.
+async fn cname_nxdomain_fixture(sign_cname: bool) -> (SocketAddr, SigningKey) {
+    let (root, com, example, now) = build_hierarchy();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let example_dnskey = signed(
+            vec![example.record("example.com.")],
+            &example,
+            "example.com.",
+            now,
+        );
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let com_ds_example = ds_record(&example, "example.com.", &com, now);
+        let alias = Record::from_rdata(
+            n("alias.example.com."),
+            60,
+            RData::CNAME(CNAME(n("missing.example.com."))),
+        );
+        let alias_records = if sign_cname {
+            signed(vec![alias], &example, "example.com.", now)
+        } else {
+            vec![alias]
+        };
+        let denial = nsec(
+            "example.com.",
+            "example.com.",
+            &[
+                RecordType::SOA,
+                RecordType::NS,
+                RecordType::DNSKEY,
+                RecordType::RRSIG,
+                RecordType::NSEC,
+            ],
+            &example,
+            "example.com.",
+            now,
+        );
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("example.com.", RecordType::DNSKEY) => answer(query, example_dnskey.clone()),
+                ("example.com.", RecordType::DS) => answer(query, com_ds_example.clone()),
+                ("example.com.", RecordType::NS) => {
+                    referral(query, "example.com.", "ns.example.com.")
+                }
+                ("alias.example.com.", RecordType::A) => answer(query, alias_records.clone()),
+                ("missing.example.com.", RecordType::A) => {
+                    let mut message = reply(query, ResponseCode::NXDomain);
+                    message.add_authority(soa("example.com."));
+                    for record in denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+    (server.addr, root)
+}
+
+#[tokio::test]
+async fn signed_cname_to_nxdomain_is_secure() {
+    let (addr, root) = cname_nxdomain_fixture(true).await;
+    let resolver =
+        IteratorResolver::with_config(signed_zone_config(addr, &root), None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "alias.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert_eq!(
+        resolved.message.metadata.response_code,
+        ResponseCode::NXDomain
+    );
+    assert!(
+        resolved
+            .message
+            .answers
+            .iter()
+            .any(|record| record.record_type() == RecordType::CNAME)
+    );
+    assert_eq!(resolved.security, Security::Secure);
+    assert!(resolved.message.metadata.authentic_data);
+}
+
+#[tokio::test]
+async fn unsigned_cname_to_signed_nxdomain_is_bogus() {
+    let (addr, root) = cname_nxdomain_fixture(false).await;
+    let resolver =
+        IteratorResolver::with_config(signed_zone_config(addr, &root), None).expect("resolver");
+    let resolved = resolver
+        .resolve_with_options(
+            "alias.example.com.",
+            RecordType::A,
+            ResolveOptions::default(),
+        )
+        .await
+        .expect("resolution completes");
+
+    assert_eq!(
+        resolved.message.metadata.response_code,
+        ResponseCode::NXDomain
+    );
+    assert!(
+        matches!(
+            resolved.security,
+            Security::Bogus(dns_dnssec::BogusReason::MissingSignature)
+        ),
+        "the denial must not authenticate an unsigned CNAME, got {:?}",
+        resolved.security
+    );
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
 #[tokio::test]
 async fn unsigned_delegation_is_insecure() {
     let (root, com, example, now) = build_hierarchy();
@@ -1638,6 +1766,83 @@ async fn jammed_ds_answers_fail_closed() {
         "jammed DS probes must not downgrade the answer to insecure, got {:?}",
         resolved.security
     );
+    assert!(!resolved.message.metadata.authentic_data);
+}
+
+/// A signed zone may prove that a name exists without a DS. That is not an
+/// unsigned delegation, so the name cannot own the RRSIG signer being checked.
+#[tokio::test]
+async fn ds_nodata_for_non_delegation_signer_is_bogus() {
+    let (root, com, example, now) = build_hierarchy();
+    let server = {
+        let root_dnskey = signed(vec![root.record(".")], &root, ".", now);
+        let com_dnskey = signed(vec![com.record("com.")], &com, "com.", now);
+        let example_dnskey = signed(
+            vec![example.record("example.com.")],
+            &example,
+            "example.com.",
+            now,
+        );
+        let root_ds_com = ds_record(&com, "com.", &root, now);
+        let com_ds_example = ds_record(&example, "example.com.", &com, now);
+        let www_ds_denial = nsec(
+            "www.example.com.",
+            "zzz.example.com.",
+            &[RecordType::A, RecordType::RRSIG, RecordType::NSEC],
+            &example,
+            "example.com.",
+            now,
+        );
+        let www = Record::from_rdata(
+            n("www.example.com."),
+            300,
+            RData::A(Ipv4Addr::new(198, 51, 100, 10).into()),
+        );
+        let forged = vec![
+            www.clone(),
+            sign_rrset(&[www], &example, "www.example.com.", now),
+        ];
+
+        MockAuth::start(move |query| {
+            let question = query.queries.first()?;
+            let qname = question.name.to_ascii().to_ascii_lowercase();
+            let response = match (qname.as_str(), question.query_type) {
+                (".", RecordType::DNSKEY) => answer(query, root_dnskey.clone()),
+                ("com.", RecordType::DNSKEY) => answer(query, com_dnskey.clone()),
+                ("com.", RecordType::DS) => answer(query, root_ds_com.clone()),
+                ("com.", RecordType::NS) => referral(query, "com.", "ns.com."),
+                ("example.com.", RecordType::DNSKEY) => answer(query, example_dnskey.clone()),
+                ("example.com.", RecordType::DS) => answer(query, com_ds_example.clone()),
+                ("example.com.", RecordType::NS) => {
+                    referral(query, "example.com.", "ns.example.com.")
+                }
+                ("www.example.com.", RecordType::A) => answer(query, forged.clone()),
+                ("www.example.com.", RecordType::DS) => {
+                    let mut message = reply(query, ResponseCode::NoError);
+                    message.add_authority(soa("example.com."));
+                    for record in www_ds_denial.clone() {
+                        message.add_authority(record);
+                    }
+                    message
+                }
+                _ => reply(query, ResponseCode::ServFail),
+            };
+            Some(response)
+        })
+        .await
+    };
+
+    let resolver = IteratorResolver::with_config(signed_zone_config(server.addr, &root), None)
+        .expect("resolver");
+    let resolved = resolver
+        .resolve_with_options("www.example.com.", RecordType::A, ResolveOptions::default())
+        .await
+        .expect("resolution completes");
+
+    assert!(matches!(
+        resolved.security,
+        Security::Bogus(dns_dnssec::BogusReason::Malformed)
+    ));
     assert!(!resolved.message.metadata.authentic_data);
 }
 

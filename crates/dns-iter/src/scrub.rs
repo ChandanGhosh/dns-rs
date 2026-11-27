@@ -85,11 +85,11 @@ pub fn scrub_authorities(response: &mut Message, qname: &Name) {
 /// Extract the closest delegation from a referral response.
 ///
 /// `source_zone` is the zone the responding servers are authoritative for.
-/// Glue is only accepted when the responding server is authoritative for the
-/// glue owner (so root and TLD glue works, but out-of-bailiwick glue from a
-/// child zone is discarded). Returns `None` when the response is not a
-/// referral, when the delegation is not an ancestor of the query, or when the
-/// NS set is empty.
+/// Glue is always restricted to the delegated NS names. With `harden_glue`
+/// set, the responding server must also be authoritative for the glue owner
+/// (so root and TLD glue works, but out-of-bailiwick glue from a child zone is
+/// discarded). Returns `None` when the response is not a referral, when the
+/// delegation is not an ancestor of the query, or when the NS set is empty.
 pub fn extract_referral(
     response: &Message,
     qname: &Name,
@@ -145,13 +145,8 @@ pub fn extract_referral(
             if !matches!(record.data, RData::A(_) | RData::AAAA(_)) {
                 return false;
             }
-            if harden_glue {
-                // Only accept glue whose owner is one of the delegated NS
-                // names and lies inside the responding server's authority.
-                nameservers.iter().any(|ns| ns == &record.name) && source_zone.zone_of(&record.name)
-            } else {
-                true
-            }
+            nameservers.iter().any(|ns| ns == &record.name)
+                && (!harden_glue || source_zone.zone_of(&record.name))
         })
         .cloned()
         .collect();
@@ -260,6 +255,22 @@ mod tests {
     fn rejects_unrelated_glue() {
         let response = referral("example.com.", "ns.example.com.", "evil.example.com.");
         let found = extract_referral(&response, &name("www.example.com."), &name("."), true)
+            .expect("referral");
+        assert!(found.glue.is_empty());
+    }
+
+    #[test]
+    fn relaxed_glue_accepts_out_of_bailiwick_ns_address() {
+        let response = referral("example.com.", "ns.other.net.", "ns.other.net.");
+        let found = extract_referral(&response, &name("www.example.com."), &name("com."), false)
+            .expect("referral");
+        assert_eq!(found.glue.len(), 1);
+    }
+
+    #[test]
+    fn relaxed_glue_rejects_unrelated_additional() {
+        let response = referral("example.com.", "ns.example.com.", "evil.example.com.");
+        let found = extract_referral(&response, &name("www.example.com."), &name("."), false)
             .expect("referral");
         assert!(found.glue.is_empty());
     }
